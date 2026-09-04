@@ -750,6 +750,7 @@ class Agent(BaseModel):
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -768,8 +769,14 @@ def _write_secure(path: Path, content: str) -> None:
 
 
 def save_community(community: Community) -> None:
+    # Not `community.model_dump_json()` — Pydantic's SecretStr masks its value
+    # on JSON serialization ("**********"), which would silently destroy the
+    # real admin key on every save. `model_dump(mode="json")` still masks it
+    # too; patch the one secret field back to its real value afterward.
     path = CONFIG_DIR / "communities" / f"{community.id}.json"
-    _write_secure(path, community.model_dump_json())
+    payload = community.model_dump(mode="json")
+    payload["relay_admin_nsec"] = community.relay_admin_nsec.get_secret_value()
+    _write_secure(path, json.dumps(payload))
 
 
 def load_community(community_id: str) -> Community | None:
@@ -784,8 +791,11 @@ def _agents_dir(community_id: str) -> Path:
 
 
 def save_agent(agent: Agent) -> None:
+    # Same SecretStr-masking hazard as save_community, for private_key.
     path = _agents_dir(agent.community_id) / f"{agent.id}.json"
-    _write_secure(path, agent.model_dump_json())
+    payload = agent.model_dump(mode="json")
+    payload["private_key"] = agent.private_key.get_secret_value()
+    _write_secure(path, json.dumps(payload))
 
 
 def load_agents(community_id: str) -> list[Agent]:
