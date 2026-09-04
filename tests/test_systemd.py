@@ -8,6 +8,7 @@ from buzz_fleet.systemd import (
     TEMPLATE_UNIT,
     agent_env_path,
     agent_prompt_path,
+    ensure_linger_enabled,
     ensure_template_unit_installed,
     write_agent_files,
 )
@@ -86,3 +87,54 @@ def test_ensure_template_unit_installed_is_a_noop_when_already_current(tmp_path:
     ensure_template_unit_installed(runner)
 
     assert runner.calls == []
+
+
+class LingerRunner:
+    """FakeRunner variant that answers loginctl calls; other args get a
+    generic OK, matching what ensure_linger_enabled's two calls need.
+    """
+
+    def __init__(self, already_lingering: bool, enable_succeeds: bool = True) -> None:
+        self.already_lingering = already_lingering
+        self.enable_succeeds = enable_succeeds
+        self.calls: list[list[str]] = []
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        if args[:2] == ["loginctl", "show-user"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="yes" if self.already_lingering else "no", stderr=""
+            )
+        if args[:2] == ["loginctl", "enable-linger"]:
+            if self.enable_succeeds:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="Interactive authentication required."
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+def test_ensure_linger_enabled_is_a_noop_when_already_enabled() -> None:
+    runner = LingerRunner(already_lingering=True)
+
+    ensure_linger_enabled(runner)
+
+    assert not any(c[:2] == ["loginctl", "enable-linger"] for c in runner.calls)
+
+
+def test_ensure_linger_enabled_enables_it_when_not_set() -> None:
+    runner = LingerRunner(already_lingering=False)
+
+    ensure_linger_enabled(runner)
+
+    assert any(c[:2] == ["loginctl", "enable-linger"] for c in runner.calls)
+
+
+def test_ensure_linger_enabled_raises_clear_error_when_enable_fails() -> None:
+    runner = LingerRunner(already_lingering=False, enable_succeeds=False)
+
+    try:
+        ensure_linger_enabled(runner)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "sudo loginctl enable-linger" in str(e)

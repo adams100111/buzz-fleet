@@ -992,9 +992,11 @@ _HARNESS_COMMAND = {
 # Question 2, resolved this way): no `User=` line (it always runs as whoever
 # owns this systemd --user instance), `WantedBy=default.target` (the --user
 # equivalent of multi-user.target), and the env path matches AGENTS_DIR above.
-# Requires `loginctl enable-linger <user>` once so the --user instance (and
-# this unit) keeps running after the SSH session that created it ends — see
-# Task 12 Step 1.
+# Requires `loginctl` lingering enabled once so the --user instance (and
+# this unit) keeps running after the SSH session that created it ends —
+# AgentManager.create_agent handles this automatically via
+# systemd.ensure_linger_enabled() (added post-v1, in response to "why do I
+# have to run this myself?"), not a manual step.
 TEMPLATE_UNIT = f"""[Unit]
 Description=Buzz headless agent (%i)
 After=network-online.target
@@ -2258,13 +2260,11 @@ git commit -m "Add create-agent form and live log viewer screens"
 
 **Design rule for this task: everything past one-time host setup happens inside a single `buzz-fleet tui` session — connect, create, edit, view logs, delete — never as separate typed CLI invocations.** The CLI commands (`connect`, `agent create/list/update/delete`) exist for scripting, but the *product* is the TUI, and Task 12 verifies the product, not the CLI wrapper around it. The only things that happen outside the TUI are (a) one-time host/environment setup that has to happen before the app can run at all, and (b) a zero-secret regression check the controller runs itself, not something to hand to a human.
 
-- [ ] **Step 1 (one-time host setup, not part of using the app): enable lingering, build/install the signer, and build the standalone `buzz-fleet` binary**
+- [ ] **Step 1 (one-time host setup, not part of using the app): build/install the signer and the standalone `buzz-fleet` binary**
 
-Everything in this plan runs as your normal, unprivileged user via `systemctl --user` — no root, anywhere (spec Open Question 2, resolved this way). The one prerequisite a normal interactive login doesn't give you for free is that `--user` units stop when your last session ends; `loginctl enable-linger` fixes that so agents survive an SSH logout, which is the entire point of running them on a VPS. `buzz-fleet` itself ships as a standalone PyInstaller binary (see the PyInstaller-packaging addendum below) so nothing beyond this host setup needs Python or `uv` installed on the target machine at all:
+Everything in this plan runs as your normal, unprivileged user via `systemctl --user` — no root, anywhere (spec Open Question 2, resolved this way). The one prerequisite a normal interactive login doesn't give you for free is that `--user` units stop when your last session ends; `loginctl` lingering fixes that so agents survive an SSH logout, which is the entire point of running them on a VPS. This is **not a manual step** — `AgentManager.create_agent` calls `systemd.ensure_linger_enabled()` automatically (as its very first action, before minting a key or touching the relay) and only surfaces a one-time `sudo loginctl enable-linger <user>` instruction if the automatic attempt genuinely lacks the privilege to self-enable it (some distros' polkit policy requires an "active"/console session, not a plain SSH one). `buzz-fleet` itself ships as a standalone PyInstaller binary (see the PyInstaller-packaging addendum below) so nothing beyond this host setup needs Python or `uv` installed on the target machine at all:
 
 ```bash
-loginctl enable-linger "$(whoami)"
-
 cd signer && cargo build --release
 sudo install -m 0755 target/release/buzz-fleet-signer /usr/local/bin/buzz-fleet-signer
 cd ..
@@ -2342,11 +2342,17 @@ uv run pyinstaller --onefile --name buzz-fleet --paths src \
 
 Not yet done (deliberately out of scope for this addendum, follow-up if it matters later): a `--onefile` build has a slower cold-start (unpacks to a temp dir every launch, unlike `--onedir`) and must be built once per target OS/arch (this session's build is `aarch64`-Linux, matching the Oracle server; an x86_64 target needs its own build) — neither affects correctness, both are worth knowing before scripting a multi-arch release process.
 
+### Automatic `loginctl` lingering addendum (added after v1's initial build, in response to "why do I have to run `loginctl enable-linger` myself?")
+
+The original Task 12 text listed `loginctl enable-linger "$(whoami)"` as a command the human runs by hand before first use. That's the wrong default for a tool whose whole premise is "drop it on a VPS and don't fuss with it" — it's a one-time, per-user, per-host setting (not something to repeat on every install/run, and the earlier phrasing risked implying otherwise), but it should still be automatic, not manual.
+
+Fix: `systemd.ensure_linger_enabled(runner)` — checks `loginctl show-user <user> --property=Linger --value`, and if not already `yes`, tries `loginctl enable-linger <user>` itself. Called as the very first action in `AgentManager.create_agent`, before minting a key, installing the template unit, or touching the relay — so on hosts where this can be self-enabled (confirmed working with no `sudo` at all on this session's own dev box), agent creation "just works" with zero manual steps. On hosts where the current polkit policy requires privilege for a non-console session (a real possibility for a plain SSH session on some distros), it raises a clear `RuntimeError` naming the exact one-time command to run (`sudo loginctl enable-linger <user>`) instead of failing confusingly later inside `systemctl --user enable --now`. Verified directly against the real host (not just mocked): `ensure_linger_enabled` ran cleanly with `RealCommandRunner`, no error, confirming the actual `loginctl` invocation succeeds on this machine.
+
 ---
 
 ## Self-Review Notes
 
 - **Spec coverage:** auth/connect (Tasks 3, 9), agent create/update/delete (Tasks 4, 8), systemd-based run/stop/status/logs (Tasks 6, 7, 11), Textual dashboard (Task 10), persona-file prompt source (Task 6/9's `--prompt-file`), stateless-on-launch runtime model (no daemon code anywhere in this plan — every command/screen reads fresh from `systemctl`/state files). Not covered by this plan, intentionally (spec's own Non-goals): multi-community switcher UI, NIP-IA archive-on-delete, remote/multi-host fleet view.
-- **Known gap carried forward, not silently fixed:** `AgentManager.update_agent` (Task 8) drops previously-set `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` on every update, since it always calls `write_agent_files` with both as `None`. Flagged inline in Task 8 — fine for v1's create/delete-focused test coverage, but real usage will hit this the first time someone edits an existing agent's prompt. Fix (not in this plan): `update_agent` should read the existing env file's current API key line(s) before rewriting, or `Agent` should carry the API key in its own model instead of being an out-of-band `write_agent_files` parameter.
-- **Known gap, accepted deliberately (grilled and confirmed, not fixed):** Task 9's `connect` command only proves the given key can authenticate to the relay (NIP-42), not that it actually holds admin/owner role in that community — a merely-member-level or unregistered key would still get "Connected and saved community." The failure surfaces correctly and clearly one step later, the first time `agent create` hits the relay's own "actor not authorized: must be admin or owner" check (which Finding 2's `OkResponse.accepted` fix ensures is no longer swallowed) — accepted as sufficient for v1 rather than adding a second signer round-trip to check role at connect-time.
+- **Known gap from Task 8, since fixed:** `AgentManager.update_agent` originally dropped previously-set `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` on every update. Fixed in the final whole-branch review's fix wave (I9) — `update_agent` now reads the existing env file's key lines forward before rewriting. See that fix wave's commits for detail; this note is kept only as a historical record of the original gap.
+- **Known gap, accepted deliberately (grilled and confirmed, not fixed):** Task 9's `connect` command only proves the given key can authenticate to the relay (NIP-42), not that it actually holds admin/owner role in that community — a merely-member-level or unregistered key would still get "Connected and saved community." The failure surfaces correctly and clearly one step later, the first time `agent create` hits the relay's own admin/owner-role check (which Finding 2's `OkResponse.accepted` fix ensures is no longer swallowed) — accepted as sufficient for v1 rather than adding a second signer round-trip to check role at connect-time.
 - **Type/name consistency check:** `Agent.id`/`display_name`/`harness`/`public_key` used identically from Task 5 through Task 11; `CommandRunner.run(args) -> CompletedProcess[str]` signature identical across Tasks 7, 8, 9, 10, 11; systemd unit naming (`buzz-agent@<id>`) identical across Task 6's template, Task 7's `_unit()`, and Task 12's manual verification commands.

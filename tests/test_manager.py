@@ -19,6 +19,10 @@ class FakeRunner:
             stdout = json.dumps({"public_key": "ab" * 32, "secret_key": "nsec1agent"})
         elif "add-member" in args or "remove-member" in args:
             stdout = json.dumps({"ok": True})
+        elif args[:2] == ["loginctl", "show-user"]:
+            stdout = "yes"  # already lingering — the common case in these tests
+        elif args[:2] == ["loginctl", "enable-linger"]:
+            stdout = ""
         else:
             stdout = "active\n"
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
@@ -197,3 +201,46 @@ def test_create_agent_is_recorded_locally_even_if_enable_now_fails(tmp_path: Pat
     assert recorded[0].id == "orphan-test"
     add_member_call = next(c for c in runner.calls if "add-member" in c)
     assert add_member_call  # membership was published — the local record above is what makes it revocable
+
+
+class LingerCantEnableRunner(FakeRunner):
+    """Fails only `loginctl enable-linger` — e.g. a non-active SSH session
+    without polkit permission to self-enable it.
+    """
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["loginctl", "show-user"]:
+            self.calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="no", stderr="")
+        if args[:2] == ["loginctl", "enable-linger"]:
+            self.calls.append(args)
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="Interactive authentication required."
+            )
+        return super().run(args)
+
+
+def test_create_agent_fails_before_any_side_effect_when_linger_cannot_be_enabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression test: if lingering can't be auto-enabled (needs a manual
+    one-time `sudo`), create_agent must fail immediately with a clear
+    message — before minting a key, publishing relay membership, or writing
+    any files — not fail confusingly later at enable_now.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = LingerCantEnableRunner()
+    manager = AgentManager(runner, _community())
+
+    with pytest.raises(RuntimeError, match="sudo loginctl enable-linger"):
+        manager.create_agent(
+            display_name="Never Created",
+            harness="claude",
+            system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        )
+
+    assert manager.list_agents() == []
+    assert not any("generate-key" in c for c in runner.calls)
+    assert not any("add-member" in c for c in runner.calls)

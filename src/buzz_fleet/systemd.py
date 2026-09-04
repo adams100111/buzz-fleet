@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -59,6 +60,35 @@ def ensure_template_unit_installed(runner: CommandRunner) -> None:
     TEMPLATE_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     TEMPLATE_UNIT_PATH.write_text(TEMPLATE_UNIT)
     runner.run(["systemctl", "--user", "daemon-reload"])
+
+
+def ensure_linger_enabled(runner: CommandRunner) -> None:
+    """Enable `loginctl` lingering for the current user if it isn't already.
+
+    Without lingering, every `buzz-agent@*` --user unit dies the moment the
+    SSH session that created it ends — silently defeating the entire point
+    of running agents on a headless box. This is a one-time, per-user,
+    per-host setting, not something to repeat on every install/run: this
+    function is a no-op the moment it's already enabled.
+
+    Enabling it can require privilege the current session doesn't have
+    (some distros' polkit policy only allows an "active" — i.e. console,
+    not SSH — session to self-enable). Try it directly first (works out of
+    the box on many hosts); only ask for a manual `sudo` step if that
+    genuinely fails, rather than requiring `sudo` unconditionally or
+    failing later with a confusing `systemctl enable --now` error.
+    """
+    user = getpass.getuser()
+    status = runner.run(["loginctl", "show-user", user, "--property=Linger", "--value"])
+    if status.stdout.strip() == "yes":
+        return
+    enabled = runner.run(["loginctl", "enable-linger", user])
+    if enabled.returncode != 0:
+        raise RuntimeError(
+            f"Could not enable lingering for '{user}' automatically (needed so your "
+            f"agents keep running after you log out) — run this once, then try again: "
+            f"sudo loginctl enable-linger {user}\n({enabled.stderr.strip()})"
+        )
 
 
 def agent_env_path(agent_id: str) -> Path:

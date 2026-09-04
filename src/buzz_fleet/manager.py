@@ -51,6 +51,7 @@ class AgentManager:
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
     ) -> Agent:
+        systemd.ensure_linger_enabled(self._runner)
         systemd.ensure_template_unit_installed(self._runner)
         existing_ids = {a.id for a in self.list_agents()}
         agent_id = agent_slug(display_name, existing_ids)

@@ -30,9 +30,6 @@ runtime).
 ## Install
 
 ```bash
-# One-time: let --user systemd units survive after you log out (SSH etc.)
-loginctl enable-linger "$(whoami)"
-
 # Build and install the signer binary
 cd signer && cargo build --release
 sudo install -m 0755 target/release/buzz-fleet-signer /usr/local/bin/buzz-fleet-signer
@@ -41,6 +38,15 @@ cd ..
 # Install the Python package
 uv sync
 ```
+
+`buzz-fleet` needs `loginctl` lingering enabled for your user so `--user`
+systemd units survive after you log out (SSH etc.) — otherwise every agent
+would die the moment your session ends. This is handled automatically the
+first time you create an agent; you don't need to run anything for it
+yourself. The only exception is a host whose polkit policy requires
+privilege for a non-console session to self-enable lingering — if that
+happens, `buzz-fleet` tells you the exact one-time command to run
+(`sudo loginctl enable-linger <you>`) instead of failing confusingly later.
 
 ## Usage
 
