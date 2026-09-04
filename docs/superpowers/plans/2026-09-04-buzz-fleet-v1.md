@@ -1,0 +1,2044 @@
+# buzz-fleet v1 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build a Textual TUI (`buzz-fleet`) that connects to a Buzz community and lets an operator create, update, delete, and run headless `buzz-acp`-backed agents (Claude Code / Codex / Pi / goose) on the box it runs on, without hand-editing env files or systemd units.
+
+**Architecture:** Two pieces in one repo. (1) A small Rust binary, `buzz-fleet-signer`, that is the only thing that touches Nostr keys/events — it generates keys and publishes the real, wire-native `kind:9030`/`kind:9031` relay-membership events using `buzz-ws-client`/`nostr` from the upstream `block/buzz` repo. (2) A Python package (`buzz_fleet`) — Pydantic models for local state, thin wrappers that shell out to `buzz-fleet-signer` and to `systemctl`/`journalctl`, and a Textual TUI on top. The Python side never signs anything itself; it always calls the Rust binary for that, so there is exactly one Nostr-crypto implementation in this whole project (see spec Open Question 3, now resolved this way).
+
+**Tech Stack:** Rust (`nostr` 0.44, `buzz-ws-client` from `block/buzz`, `clap`, `tokio`) for the signer; Python 3.12 (Typer, Textual, Pydantic, Rich, `uv_build`) for the TUI, mirroring `dev-boost`'s own packaging conventions (`~/repos/dev-boost/engine/pyproject.toml`).
+
+**Spec:** `/home/dev/apps/buzz-deploy/docs/specs/2026-09-04-buzz-fleet-tui-design.md` (this plan implements it end to end; read it first for the "why" behind each decision below).
+
+## Global Constraints
+
+- Python `>=3.12`, `uv_build` backend, `[project.scripts]` entry point — same shape as `devboost`'s `pyproject.toml`.
+- The Python side never parses/signs Nostr events itself. All key generation and event publishing goes through the `buzz-fleet-signer` Rust binary (subprocess boundary), avoiding a second Nostr-crypto implementation.
+- `buzz-fleet-signer` depends on `buzz-ws-client` via a **git** dependency on `https://github.com/block/buzz` (not a local path — it must build on any machine, not just one with a buzz checkout), and pins `nostr = "0.44"` with the same features (`nip44`, `nip98`) the upstream workspace uses, to keep `Keys`/`Event` types compatible across the dependency boundary.
+- `kind:9030` (add relay member) / `kind:9031` (remove relay member) have **no existing typed builder** in `buzz-sdk` (verified: `build_add_member`/`build_remove_member` there are `kind:9000`/`9001`, NIP-29 **channel**-scoped, a different mechanism). The signer constructs these two events directly: a `p` tag with the target pubkey, and an optional `role` tag — exactly what `crates/buzz-relay/src/handlers/relay_admin.rs` reads (`extract_p_tag_hex`, `extract_tag_value(event, "role")`).
+- Every secret-bearing file (local state JSON, per-agent env files) is written with mode `0600`.
+- Config **updates are always restart-based** — `buzz-acp` reads its CLI/env config once at startup (confirmed in `crates/buzz-acp/src/config.rs`, all `clap` args), there is no hot-reload path to design around.
+- Agent env vars written to disk must match `buzz-acp`'s real config surface exactly: `BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`, `BUZZ_ACP_AGENT_COMMAND`, `BUZZ_ACP_SYSTEM_PROMPT_FILE`, `BUZZ_ACP_TEAM_INSTRUCTIONS`.
+
+---
+
+## File Structure
+
+```
+buzz-fleet/
+├── signer/                          # Rust: the only crypto/network-signing code
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs                  # clap CLI: generate-key, check-connection, add-member, remove-member
+│       └── events.rs                # pure kind:9030/9031 EventBuilder construction (unit-testable)
+├── src/buzz_fleet/
+│   ├── __init__.py
+│   ├── models.py                    # Community, Agent, SystemPromptSource (Pydantic)
+│   ├── state.py                     # load/save per-community JSON state, 0600
+│   ├── slug.py                      # agent-id slugify + collision suffixing
+│   ├── proc.py                      # CommandRunner protocol + RealCommandRunner
+│   ├── signer_client.py             # wraps `buzz-fleet-signer` subprocess calls
+│   ├── systemd.py                   # template unit install, per-agent env/prompt file writers
+│   ├── systemctl_client.py          # start/stop/restart/status/logs wrappers
+│   ├── manager.py                   # AgentManager — orchestrates the above for create/update/delete
+│   ├── cli/
+│   │   └── app.py                   # Typer entrypoint: connect, agent create/update/delete/list, tui
+│   └── tui/
+│       ├── app.py                   # BuzzFleetApp
+│       └── screens/
+│           ├── connect.py
+│           ├── dashboard.py
+│           ├── agent_form.py
+│           └── logs.py
+├── tests/
+│   ├── test_state.py
+│   ├── test_slug.py
+│   ├── test_systemd.py
+│   ├── test_signer_client.py
+│   ├── test_systemctl_client.py
+│   ├── test_manager.py
+│   ├── test_cli.py
+│   └── tui/
+│       ├── test_dashboard.py
+│       └── test_agent_form.py
+├── pyproject.toml
+├── .gitignore
+└── README.md
+```
+
+Each Python module has one responsibility: `state.py` never shells out, `signer_client.py`/`systemctl_client.py` never touch Pydantic models, `manager.py` is the only place that calls both — this is what makes each testable in isolation with a fake `CommandRunner`.
+
+---
+
+### Task 1: Repo scaffolding (Rust crate + Python package skeletons)
+
+**Files:**
+- Create: `signer/Cargo.toml`
+- Create: `signer/src/main.rs`
+- Create: `pyproject.toml`
+- Create: `src/buzz_fleet/__init__.py`
+- Create: `src/buzz_fleet/cli/app.py`
+- Create: `.gitignore`
+- Create: `README.md`
+
+**Interfaces:**
+- Produces: a `buzz-fleet-signer` binary target that builds (`--version` only for now); a `buzz-fleet` Python console script that prints help.
+
+This task has no behavior yet, so there is no failing test to write first — verification is "it builds / it runs", per steps below.
+
+- [ ] **Step 1: Write `signer/Cargo.toml`**
+
+```toml
+[package]
+name = "buzz-fleet-signer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "buzz-fleet-signer"
+path = "src/main.rs"
+
+[dependencies]
+nostr = { version = "0.44", features = ["nip44", "nip98"] }
+buzz-ws-client = { git = "https://github.com/block/buzz" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+serde_json = "1"
+```
+
+- [ ] **Step 2: Write `signer/src/main.rs`**
+
+```rust
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "buzz-fleet-signer", about = "Nostr key/event helper for buzz-fleet")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Placeholder — replaced in Task 3.
+    Version,
+}
+
+fn main() {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Version => println!(env!("CARGO_PKG_VERSION")),
+    }
+}
+```
+
+- [ ] **Step 3: Build it**
+
+Run: `cd signer && cargo build`
+Expected: builds cleanly; `cargo run -- version` prints `0.1.0`.
+
+- [ ] **Step 4: Write `pyproject.toml`** (mirrors `~/repos/dev-boost/engine/pyproject.toml`)
+
+```toml
+[project]
+name = "buzz-fleet"
+version = "0.1.0"
+description = "TUI for managing headless Buzz agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.15",
+    "textual>=6.6",
+    "pydantic>=2.9",
+    "rich>=13.7",
+]
+
+[project.scripts]
+buzz-fleet = "buzz_fleet.cli.app:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.13",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+```
+
+- [ ] **Step 5: Write `src/buzz_fleet/__init__.py`**
+
+```python
+__version__ = "0.1.0"
+```
+
+- [ ] **Step 6: Write `src/buzz_fleet/cli/app.py`**
+
+```python
+"""The buzz-fleet Typer CLI."""
+
+from __future__ import annotations
+
+import typer
+
+app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 7: Write `.gitignore`**
+
+```
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+target/
+Cargo.lock
+```
+
+- [ ] **Step 8: Write `README.md`**
+
+```markdown
+# buzz-fleet
+
+A TUI for managing headless Buzz agents (Claude Code / Codex / Pi / goose)
+on a Linux/systemd box. See `docs/superpowers/plans/2026-09-04-buzz-fleet-v1.md`
+for the implementation plan and the linked design spec for the "why".
+
+## Development
+
+    cd signer && cargo build
+    uv sync
+    uv run buzz-fleet --help
+```
+
+- [ ] **Step 9: Verify the Python side runs**
+
+Run: `uv sync && uv run buzz-fleet --help`
+Expected: Typer prints usage help, exit code 0.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add signer pyproject.toml src README.md .gitignore
+git commit -m "Scaffold buzz-fleet-signer (Rust) and buzz_fleet (Python) packages"
+```
+
+---
+
+### Task 2: Rust signer — pure `kind:9030`/`kind:9031` event construction
+
+**Files:**
+- Create: `signer/src/events.rs`
+- Modify: `signer/src/main.rs:1` — add `mod events;`
+
+**Interfaces:**
+- Produces: `events::build_add_member(target_pubkey_hex: &str, role: Option<&str>) -> anyhow::Result<nostr::EventBuilder>`, `events::build_remove_member(target_pubkey_hex: &str) -> anyhow::Result<nostr::EventBuilder>`, `events::RELAY_ADD_MEMBER: u16 = 9030`, `events::RELAY_REMOVE_MEMBER: u16 = 9031`.
+
+- [ ] **Step 1: Write the failing test** (bottom of `signer/src/events.rs`, file doesn't exist yet — write the whole file with the test module first, implementation stubbed to `todo!()`)
+
+```rust
+use nostr::{Event, EventBuilder, Kind, Tag};
+
+pub const RELAY_ADD_MEMBER: u16 = 9030;
+pub const RELAY_REMOVE_MEMBER: u16 = 9031;
+
+pub fn build_add_member(target_pubkey_hex: &str, role: Option<&str>) -> anyhow::Result<EventBuilder> {
+    todo!()
+}
+
+pub fn build_remove_member(target_pubkey_hex: &str) -> anyhow::Result<EventBuilder> {
+    todo!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::Keys;
+
+    fn sign(builder: EventBuilder) -> Event {
+        let keys = Keys::generate();
+        builder.sign_with_keys(&keys).expect("sign")
+    }
+
+    #[test]
+    fn add_member_sets_kind_and_p_tag() {
+        let event = sign(build_add_member("a".repeat(64).as_str(), None).unwrap());
+        assert_eq!(event.kind, Kind::Custom(RELAY_ADD_MEMBER));
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["p", "a".repeat(64).as_str()]
+        }));
+    }
+
+    #[test]
+    fn add_member_with_role_sets_role_tag() {
+        let event = sign(build_add_member("b".repeat(64).as_str(), Some("admin")).unwrap());
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["role", "admin"]
+        }));
+    }
+
+    #[test]
+    fn remove_member_sets_kind_and_p_tag() {
+        let event = sign(build_remove_member("c".repeat(64).as_str()).unwrap());
+        assert_eq!(event.kind, Kind::Custom(RELAY_REMOVE_MEMBER));
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["p", "c".repeat(64).as_str()]
+        }));
+    }
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd signer && cargo test`
+Expected: compiles (the `todo!()` bodies typecheck since return type is `Result<EventBuilder>`), then panics with "not yet implemented" for all three tests.
+
+- [ ] **Step 3: Implement**
+
+Replace the two `todo!()` bodies:
+
+```rust
+pub fn build_add_member(target_pubkey_hex: &str, role: Option<&str>) -> anyhow::Result<EventBuilder> {
+    let mut tags = vec![Tag::parse(["p", target_pubkey_hex])?];
+    if let Some(role) = role {
+        tags.push(Tag::parse(["role", role])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(RELAY_ADD_MEMBER), "").tags(tags))
+}
+
+pub fn build_remove_member(target_pubkey_hex: &str) -> anyhow::Result<EventBuilder> {
+    let tags = vec![Tag::parse(["p", target_pubkey_hex])?];
+    Ok(EventBuilder::new(Kind::Custom(RELAY_REMOVE_MEMBER), "").tags(tags))
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cargo test`
+Expected: `test result: ok. 3 passed`
+
+- [ ] **Step 5: Wire the module and commit**
+
+Add `mod events;` at the top of `signer/src/main.rs`.
+
+```bash
+git add signer/src/events.rs signer/src/main.rs
+git commit -m "Add pure kind:9030/9031 event builders for relay membership"
+```
+
+---
+
+### Task 3: Rust signer — `generate-key` and `check-connection` commands
+
+**Files:**
+- Modify: `signer/src/main.rs`
+
+**Interfaces:**
+- Consumes: nothing new from Task 2 yet (network commands are separate from event-building).
+- Produces: CLI commands `buzz-fleet-signer generate-key` (prints `{"public_key": "...", "secret_key": "nsec1..."}` as JSON on stdout) and `buzz-fleet-signer check-connection --relay <url> --nsec <nsec>` (exit 0 + `{"ok": true}` on success, exit 1 + `{"ok": false, "error": "..."}` on failure) — JSON-on-stdout is the contract `signer_client.py` (Task 7) parses.
+
+This task is network I/O against a real relay — there is no meaningful unit test to write first (mocking the relay would only test the mock). Verification is manual, against the real running community, per Step 4.
+
+- [ ] **Step 1: Replace the `Command` enum and `main` in `signer/src/main.rs`**
+
+```rust
+mod events;
+
+use clap::{Parser, Subcommand};
+use nostr::Keys;
+use nostr::key::ToBech32;
+use buzz_ws_client::connection::NostrWsConnection;
+use serde_json::json;
+
+#[derive(Parser)]
+#[command(name = "buzz-fleet-signer", about = "Nostr key/event helper for buzz-fleet")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Generate a new Nostr keypair, printed as JSON.
+    GenerateKey,
+    /// Verify a key can authenticate against a relay.
+    CheckConnection {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        nsec: String,
+    },
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+    let code = match cli.command {
+        Command::GenerateKey => {
+            let keys = Keys::generate();
+            println!(
+                "{}",
+                json!({
+                    "public_key": keys.public_key().to_hex(),
+                    "secret_key": keys.secret_key().to_bech32().expect("bech32 encode"),
+                })
+            );
+            0
+        }
+        Command::CheckConnection { relay, nsec } => match run_check_connection(&relay, &nsec).await {
+            Ok(()) => {
+                println!("{}", json!({"ok": true}));
+                0
+            }
+            Err(e) => {
+                println!("{}", json!({"ok": false, "error": e.to_string()}));
+                1
+            }
+        },
+    };
+    std::process::exit(code);
+}
+
+async fn run_check_connection(relay: &str, nsec: &str) -> anyhow::Result<()> {
+    let keys = Keys::parse(nsec)?;
+    let conn = NostrWsConnection::connect_authenticated(relay, &keys, None).await?;
+    conn.disconnect().await?;
+    Ok(())
+}
+```
+
+- [ ] **Step 2: Build**
+
+Run: `cargo build`
+Expected: builds cleanly (fix any import-path mismatches against the actual `buzz-ws-client` module layout if they differ — `connection::NostrWsConnection` per `crates/buzz-ws-client/src/connection.rs` in the upstream repo).
+
+- [ ] **Step 3: Manual verification — generate-key**
+
+Run: `cargo run -- generate-key`
+Expected: prints a JSON object with `public_key` (64 hex chars) and `secret_key` (`nsec1...`).
+
+- [ ] **Step 4: Manual verification — check-connection against the real community**
+
+Run: `cargo run -- check-connection --relay wss://buzz.eltahir.me --nsec <the owner's real nsec>`
+Expected: `{"ok":true}`, exit code 0. Then with a deliberately wrong nsec, expect `{"ok":false,"error":"..."}`, exit code 1.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add signer/src/main.rs
+git commit -m "Add generate-key and check-connection commands to buzz-fleet-signer"
+```
+
+---
+
+### Task 4: Rust signer — `add-member` / `remove-member` commands
+
+**Files:**
+- Modify: `signer/src/main.rs`
+
+**Interfaces:**
+- Consumes: `events::build_add_member`/`build_remove_member` (Task 2), `NostrWsConnection` (Task 3).
+- Produces: `buzz-fleet-signer add-member --relay <url> --admin-nsec <nsec> --pubkey <hex> [--role admin|member]` and `buzz-fleet-signer remove-member --relay <url> --admin-nsec <nsec> --pubkey <hex>`, both printing `{"ok": true}`/`{"ok": false, "error": ...}` like Task 3's commands.
+
+- [ ] **Step 1: Add the two subcommands to the `Command` enum**
+
+```rust
+    /// Publish a kind:9030 relay-membership add event.
+    AddMember {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        admin_nsec: String,
+        #[arg(long)]
+        pubkey: String,
+        #[arg(long)]
+        role: Option<String>,
+    },
+    /// Publish a kind:9031 relay-membership remove event.
+    RemoveMember {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        admin_nsec: String,
+        #[arg(long)]
+        pubkey: String,
+    },
+```
+
+- [ ] **Step 2: Handle them in `main`'s match arm**
+
+```rust
+        Command::AddMember { relay, admin_nsec, pubkey, role } => {
+            match run_publish(&relay, &admin_nsec, events::build_add_member(&pubkey, role.as_deref())).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+        Command::RemoveMember { relay, admin_nsec, pubkey } => {
+            match run_publish(&relay, &admin_nsec, events::build_remove_member(&pubkey)).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+```
+
+Note `run_publish`'s second argument is `anyhow::Result<EventBuilder>` (what the builder functions return) — handle the `Result` inside `run_publish` itself:
+
+```rust
+async fn run_publish(
+    relay: &str,
+    admin_nsec: &str,
+    builder: anyhow::Result<nostr::EventBuilder>,
+) -> anyhow::Result<()> {
+    let keys = Keys::parse(admin_nsec)?;
+    let event = builder?.sign_with_keys(&keys)?;
+    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, None).await?;
+    conn.send_event(event).await?;
+    conn.disconnect().await?;
+    Ok(())
+}
+```
+
+- [ ] **Step 3: Build**
+
+Run: `cargo build`
+Expected: builds cleanly.
+
+- [ ] **Step 4: Manual verification against the real community**
+
+```bash
+cargo run -- generate-key   # capture a throwaway test pubkey/nsec
+cargo run -- add-member --relay wss://buzz.eltahir.me --admin-nsec <owner nsec> --pubkey <throwaway hex pubkey>
+```
+
+Expected: `{"ok":true}`. Confirm via the existing `buzz` CLI from `/home/dev/apps/buzz`:
+
+```bash
+BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
+  ./target/release/buzz users lookup --pubkey <throwaway hex pubkey>
+```
+
+Expected: the lookup succeeds (member exists) where it would have 404'd before. Then run `remove-member` with the same pubkey and confirm the lookup fails again.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add signer/src/main.rs
+git commit -m "Add add-member/remove-member commands to buzz-fleet-signer"
+```
+
+---
+
+### Task 5: Python — Pydantic models and local state store
+
+**Files:**
+- Create: `src/buzz_fleet/models.py`
+- Create: `src/buzz_fleet/state.py`
+- Test: `tests/test_state.py`
+
+**Interfaces:**
+- Produces: `Community(id, relay_url, relay_admin_nsec: SecretStr, display_name)`, `SystemPromptSource(kind: Literal["inline","persona_file"], text, path)`, `Agent(id, community_id, display_name, harness: Literal["claude","codex","pi","goose"], private_key: SecretStr, public_key, system_prompt_source, team_instructions, model, created_at)`; `state.save_community(community)`, `state.load_community(community_id) -> Community | None`, `state.save_agent(agent)`, `state.load_agents(community_id) -> list[Agent]`, `state.delete_agent(community_id, agent_id)`. All state lives under `~/.config/buzz-fleet/`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_state.py
+import stat
+from pathlib import Path
+
+from buzz_fleet.models import Community
+from buzz_fleet.state import load_community, save_community
+
+
+def test_save_and_load_community_round_trips(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    community = Community(id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1abc")
+
+    save_community(community)
+    loaded = load_community("eltahir")
+
+    assert loaded is not None
+    assert loaded.relay_url == "wss://buzz.eltahir.me"
+    assert loaded.relay_admin_nsec.get_secret_value() == "nsec1abc"
+
+
+def test_saved_community_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    save_community(Community(id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1abc"))
+
+    path = tmp_path / "communities" / "eltahir.json"
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/test_state.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.models'` (or `state`).
+
+- [ ] **Step 3: Write `src/buzz_fleet/models.py`**
+
+```python
+"""Pydantic models for buzz-fleet's local state."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, SecretStr
+
+
+class Community(BaseModel):
+    id: str
+    relay_url: str
+    relay_admin_nsec: SecretStr
+    display_name: str | None = None
+
+
+class SystemPromptSource(BaseModel):
+    kind: Literal["inline", "persona_file"]
+    text: str | None = None
+    path: Path | None = None
+
+
+class Agent(BaseModel):
+    id: str
+    community_id: str
+    display_name: str
+    harness: Literal["claude", "codex", "pi", "goose"]
+    private_key: SecretStr
+    public_key: str
+    system_prompt_source: SystemPromptSource
+    team_instructions: str | None = None
+    model: str | None = None
+    created_at: datetime
+```
+
+- [ ] **Step 4: Write `src/buzz_fleet/state.py`**
+
+```python
+"""Local JSON state for buzz-fleet, one file per community plus per-agent files."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from buzz_fleet.models import Agent, Community
+
+CONFIG_DIR = Path.home() / ".config" / "buzz-fleet"
+
+
+def _write_secure(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, content.encode())
+    finally:
+        os.close(fd)
+
+
+def save_community(community: Community) -> None:
+    path = CONFIG_DIR / "communities" / f"{community.id}.json"
+    _write_secure(path, community.model_dump_json())
+
+
+def load_community(community_id: str) -> Community | None:
+    path = CONFIG_DIR / "communities" / f"{community_id}.json"
+    if not path.exists():
+        return None
+    return Community.model_validate_json(path.read_text())
+
+
+def _agents_dir(community_id: str) -> Path:
+    return CONFIG_DIR / "communities" / community_id / "agents"
+
+
+def save_agent(agent: Agent) -> None:
+    path = _agents_dir(agent.community_id) / f"{agent.id}.json"
+    _write_secure(path, agent.model_dump_json())
+
+
+def load_agents(community_id: str) -> list[Agent]:
+    directory = _agents_dir(community_id)
+    if not directory.exists():
+        return []
+    return [Agent.model_validate_json(p.read_text()) for p in sorted(directory.glob("*.json"))]
+
+
+def delete_agent(community_id: str, agent_id: str) -> None:
+    path = _agents_dir(community_id) / f"{agent_id}.json"
+    path.unlink(missing_ok=True)
+```
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `uv run pytest tests/test_state.py -v`
+Expected: `2 passed`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/buzz_fleet/models.py src/buzz_fleet/state.py tests/test_state.py
+git commit -m "Add Community/Agent Pydantic models and local 0600 state store"
+```
+
+---
+
+### Task 6: Python — agent-id slugging and systemd file writers
+
+**Files:**
+- Create: `src/buzz_fleet/slug.py`
+- Create: `src/buzz_fleet/systemd.py`
+- Test: `tests/test_slug.py`
+- Test: `tests/test_systemd.py`
+
+**Interfaces:**
+- Consumes: `Agent`, `Community` (Task 5).
+- Produces: `slug.agent_slug(display_name: str, existing_ids: set[str]) -> str`; `systemd.TEMPLATE_UNIT_PATH: Path`, `systemd.render_template_unit() -> str`, `systemd.agent_env_path(agent_id) -> Path`, `systemd.agent_prompt_path(agent_id) -> Path`, `systemd.write_agent_files(agent: Agent, community: Community, anthropic_api_key: str | None, openai_api_key: str | None) -> None`.
+
+- [ ] **Step 1: Write the failing test for slugging** (resolves spec Open Question 1)
+
+```python
+# tests/test_slug.py
+from buzz_fleet.slug import agent_slug
+
+
+def test_slugifies_display_name() -> None:
+    assert agent_slug("Laravel Backend Dev", existing_ids=set()) == "laravel-backend-dev"
+
+
+def test_strips_invalid_systemd_instance_characters() -> None:
+    assert agent_slug("Codex @ VPS!", existing_ids=set()) == "codex-vps"
+
+
+def test_dedupes_collisions_with_numeric_suffix() -> None:
+    existing = {"react-dev"}
+    assert agent_slug("React Dev", existing_ids=existing) == "react-dev-2"
+    existing.add("react-dev-2")
+    assert agent_slug("React Dev", existing_ids=existing) == "react-dev-3"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/test_slug.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.slug'`.
+
+- [ ] **Step 3: Implement `src/buzz_fleet/slug.py`**
+
+```python
+"""Systemd-instance-safe agent id slugs."""
+
+from __future__ import annotations
+
+import re
+
+_INVALID = re.compile(r"[^a-z0-9-]+")
+_DASHES = re.compile(r"-+")
+
+
+def _base_slug(display_name: str) -> str:
+    lowered = display_name.lower()
+    stripped = _INVALID.sub("-", lowered)
+    collapsed = _DASHES.sub("-", stripped).strip("-")
+    return collapsed
+
+
+def agent_slug(display_name: str, existing_ids: set[str]) -> str:
+    base = _base_slug(display_name)
+    if base not in existing_ids:
+        return base
+    suffix = 2
+    while f"{base}-{suffix}" in existing_ids:
+        suffix += 1
+    return f"{base}-{suffix}"
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `uv run pytest tests/test_slug.py -v`
+Expected: `3 passed`.
+
+- [ ] **Step 5: Write the failing test for systemd file writers**
+
+```python
+# tests/test_systemd.py
+import stat
+from datetime import datetime, timezone
+from pathlib import Path
+
+from buzz_fleet.models import Agent, Community, SystemPromptSource
+from buzz_fleet.systemd import agent_env_path, agent_prompt_path, write_agent_files
+
+
+def _agent() -> Agent:
+    return Agent(
+        id="laravel-backend-dev",
+        community_id="eltahir",
+        display_name="Laravel Backend Dev",
+        harness="claude",
+        private_key="nsec1agent",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="You are the Laravel dev."),
+        team_instructions="Team-wide rules here.",
+        model=None,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def _community() -> Community:
+    return Community(id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1admin")
+
+
+def test_write_agent_files_creates_env_and_prompt(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    agent = _agent()
+
+    write_agent_files(agent, _community(), anthropic_api_key="sk-ant-test", openai_api_key=None)
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert "BUZZ_PRIVATE_KEY=nsec1agent" in env_content
+    assert "BUZZ_RELAY_URL=wss://buzz.eltahir.me" in env_content
+    assert "BUZZ_ACP_AGENT_COMMAND=claude-agent-acp" in env_content
+    assert "ANTHROPIC_API_KEY=sk-ant-test" in env_content
+    assert f"BUZZ_ACP_SYSTEM_PROMPT_FILE={agent_prompt_path(agent.id)}" in env_content
+    assert "BUZZ_ACP_TEAM_INSTRUCTIONS=Team-wide rules here." in env_content
+    assert agent_prompt_path(agent.id).read_text() == "You are the Laravel dev."
+
+
+def test_env_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    write_agent_files(_agent(), _community(), anthropic_api_key="sk-ant-test", openai_api_key=None)
+
+    mode = stat.S_IMODE(agent_env_path("laravel-backend-dev").stat().st_mode)
+    assert mode == 0o600
+```
+
+- [ ] **Step 6: Run to verify it fails**
+
+Run: `uv run pytest tests/test_systemd.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.systemd'`.
+
+- [ ] **Step 7: Implement `src/buzz_fleet/systemd.py`**
+
+```python
+"""Systemd template unit + per-agent env/prompt file management."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from buzz_fleet.models import Agent, Community
+
+AGENTS_DIR = Path("/etc/buzz-fleet/agents")
+TEMPLATE_UNIT_PATH = Path("/etc/systemd/system/buzz-agent@.service")
+
+_HARNESS_COMMAND = {
+    "claude": "claude-agent-acp",
+    "codex": "codex-acp",
+    "pi": "pi-acp",
+    "goose": "goose",
+}
+
+TEMPLATE_UNIT = """[Unit]
+Description=Buzz headless agent (%i)
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/buzz-fleet/agents/%i.env
+ExecStart=/usr/local/bin/buzz-acp
+Restart=on-failure
+RestartSec=5
+User=buzz-fleet
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def render_template_unit() -> str:
+    return TEMPLATE_UNIT
+
+
+def agent_env_path(agent_id: str) -> Path:
+    return AGENTS_DIR / f"{agent_id}.env"
+
+
+def agent_prompt_path(agent_id: str) -> Path:
+    return AGENTS_DIR / f"{agent_id}.prompt.md"
+
+
+def _write_secure(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, content.encode())
+    finally:
+        os.close(fd)
+
+
+def _resolve_prompt_text(agent: Agent) -> str:
+    source = agent.system_prompt_source
+    if source.kind == "inline":
+        assert source.text is not None
+        return source.text
+    assert source.path is not None
+    return source.path.read_text()
+
+
+def write_agent_files(
+    agent: Agent,
+    community: Community,
+    anthropic_api_key: str | None,
+    openai_api_key: str | None,
+) -> None:
+    prompt_path = agent_prompt_path(agent.id)
+    _write_secure(prompt_path, _resolve_prompt_text(agent))
+
+    lines = [
+        f"BUZZ_PRIVATE_KEY={agent.private_key.get_secret_value()}",
+        f"BUZZ_RELAY_URL={community.relay_url}",
+        f"BUZZ_ACP_AGENT_COMMAND={_HARNESS_COMMAND[agent.harness]}",
+        f"BUZZ_ACP_SYSTEM_PROMPT_FILE={prompt_path}",
+    ]
+    if agent.team_instructions:
+        lines.append(f"BUZZ_ACP_TEAM_INSTRUCTIONS={agent.team_instructions}")
+    if anthropic_api_key:
+        lines.append(f"ANTHROPIC_API_KEY={anthropic_api_key}")
+    if openai_api_key:
+        lines.append(f"OPENAI_API_KEY={openai_api_key}")
+
+    _write_secure(agent_env_path(agent.id), "\n".join(lines) + "\n")
+```
+
+- [ ] **Step 8: Run to verify it passes**
+
+Run: `uv run pytest tests/test_slug.py tests/test_systemd.py -v`
+Expected: `5 passed`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/buzz_fleet/slug.py src/buzz_fleet/systemd.py tests/test_slug.py tests/test_systemd.py
+git commit -m "Add agent-id slugging and systemd env/prompt file writers"
+```
+
+---
+
+### Task 7: Python — subprocess wrappers for the signer binary and systemctl/journalctl
+
+**Files:**
+- Create: `src/buzz_fleet/proc.py`
+- Create: `src/buzz_fleet/signer_client.py`
+- Create: `src/buzz_fleet/systemctl_client.py`
+- Test: `tests/test_signer_client.py`
+- Test: `tests/test_systemctl_client.py`
+
+**Interfaces:**
+- Produces: `proc.CommandRunner` (Protocol with `run(args: list[str]) -> subprocess.CompletedProcess[str]`), `proc.RealCommandRunner`; `signer_client.generate_key(runner) -> tuple[str, str]` (public, secret), `signer_client.add_member(runner, relay_url, admin_nsec, pubkey, role=None) -> None`, `signer_client.remove_member(runner, relay_url, admin_nsec, pubkey) -> None`, `signer_client.check_connection(runner, relay_url, nsec) -> bool`; `systemctl_client.AgentStatus` (enum: `RUNNING`, `STOPPED`, `FAILED`, `UNKNOWN`), `systemctl_client.enable_now(runner, unit)`, `disable_now`, `restart`, `status(runner, unit) -> AgentStatus`, `tail_logs(runner, unit, lines=200) -> str`.
+
+- [ ] **Step 1: Write the failing test for the signer client**
+
+```python
+# tests/test_signer_client.py
+import json
+import subprocess
+
+from buzz_fleet.signer_client import add_member, check_connection, generate_key
+
+
+class FakeRunner:
+    def __init__(self, stdout: str, returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.calls: list[list[str]] = []
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        return subprocess.CompletedProcess(args, self.returncode, stdout=self.stdout, stderr="")
+
+
+def test_generate_key_parses_json_output() -> None:
+    runner = FakeRunner(json.dumps({"public_key": "ab" * 32, "secret_key": "nsec1xyz"}))
+
+    public_key, secret_key = generate_key(runner)
+
+    assert public_key == "ab" * 32
+    assert secret_key == "nsec1xyz"
+    assert runner.calls == [["buzz-fleet-signer", "generate-key"]]
+
+
+def test_check_connection_true_on_ok() -> None:
+    runner = FakeRunner(json.dumps({"ok": True}))
+    assert check_connection(runner, "wss://relay.example", "nsec1abc") is True
+
+
+def test_check_connection_false_on_failure_exit_code() -> None:
+    runner = FakeRunner(json.dumps({"ok": False, "error": "bad key"}), returncode=1)
+    assert check_connection(runner, "wss://relay.example", "nsec1bad") is False
+
+
+def test_add_member_passes_role_flag_when_given() -> None:
+    runner = FakeRunner(json.dumps({"ok": True}))
+    add_member(runner, "wss://relay.example", "nsec1admin", "cd" * 32, role="admin")
+    assert runner.calls == [
+        [
+            "buzz-fleet-signer",
+            "add-member",
+            "--relay",
+            "wss://relay.example",
+            "--admin-nsec",
+            "nsec1admin",
+            "--pubkey",
+            "cd" * 32,
+            "--role",
+            "admin",
+        ]
+    ]
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/test_signer_client.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.signer_client'`.
+
+- [ ] **Step 3: Implement `src/buzz_fleet/proc.py`**
+
+```python
+"""Process-execution seam so higher-level code is testable without shelling out for real."""
+
+from __future__ import annotations
+
+import subprocess
+from typing import Protocol
+
+
+class CommandRunner(Protocol):
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]: ...
+
+
+class RealCommandRunner:
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(args, capture_output=True, text=True, check=False)
+```
+
+- [ ] **Step 4: Implement `src/buzz_fleet/signer_client.py`**
+
+```python
+"""Thin wrapper over the buzz-fleet-signer binary — the only Nostr key/event code path."""
+
+from __future__ import annotations
+
+import json
+
+from buzz_fleet.proc import CommandRunner
+
+BINARY = "buzz-fleet-signer"
+
+
+def generate_key(runner: CommandRunner) -> tuple[str, str]:
+    result = runner.run([BINARY, "generate-key"])
+    data = json.loads(result.stdout)
+    return data["public_key"], data["secret_key"]
+
+
+def check_connection(runner: CommandRunner, relay_url: str, nsec: str) -> bool:
+    result = runner.run([BINARY, "check-connection", "--relay", relay_url, "--nsec", nsec])
+    return json.loads(result.stdout)["ok"]
+
+
+def add_member(
+    runner: CommandRunner,
+    relay_url: str,
+    admin_nsec: str,
+    pubkey: str,
+    role: str | None = None,
+) -> None:
+    args = [BINARY, "add-member", "--relay", relay_url, "--admin-nsec", admin_nsec, "--pubkey", pubkey]
+    if role is not None:
+        args += ["--role", role]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"add-member failed: {payload.get('error')}")
+
+
+def remove_member(runner: CommandRunner, relay_url: str, admin_nsec: str, pubkey: str) -> None:
+    args = [BINARY, "remove-member", "--relay", relay_url, "--admin-nsec", admin_nsec, "--pubkey", pubkey]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"remove-member failed: {payload.get('error')}")
+```
+
+- [ ] **Step 5: Run to verify the signer-client tests pass**
+
+Run: `uv run pytest tests/test_signer_client.py -v`
+Expected: `4 passed`.
+
+- [ ] **Step 6: Write the failing test for the systemctl client**
+
+```python
+# tests/test_systemctl_client.py
+import subprocess
+
+from buzz_fleet.systemctl_client import AgentStatus, enable_now, restart, status, tail_logs
+
+
+class FakeRunner:
+    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.calls: list[list[str]] = []
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        return subprocess.CompletedProcess(args, self.returncode, stdout=self.stdout, stderr="")
+
+
+def test_enable_now_invokes_systemctl_with_instance_unit() -> None:
+    runner = FakeRunner()
+    enable_now(runner, "laravel-backend-dev")
+    assert runner.calls == [["systemctl", "enable", "--now", "buzz-agent@laravel-backend-dev"]]
+
+
+def test_restart_invokes_systemctl_restart() -> None:
+    runner = FakeRunner()
+    restart(runner, "laravel-backend-dev")
+    assert runner.calls == [["systemctl", "restart", "buzz-agent@laravel-backend-dev"]]
+
+
+def test_status_active_maps_to_running() -> None:
+    runner = FakeRunner(stdout="active\n")
+    assert status(runner, "laravel-backend-dev") == AgentStatus.RUNNING
+
+
+def test_status_failed_maps_to_failed() -> None:
+    runner = FakeRunner(stdout="failed\n")
+    assert status(runner, "laravel-backend-dev") == AgentStatus.FAILED
+
+
+def test_status_inactive_maps_to_stopped() -> None:
+    runner = FakeRunner(stdout="inactive\n")
+    assert status(runner, "laravel-backend-dev") == AgentStatus.STOPPED
+
+
+def test_tail_logs_returns_stdout() -> None:
+    runner = FakeRunner(stdout="log line 1\nlog line 2\n")
+    output = tail_logs(runner, "laravel-backend-dev", lines=50)
+    assert output == "log line 1\nlog line 2\n"
+    assert runner.calls == [["journalctl", "-u", "buzz-agent@laravel-backend-dev", "-n", "50", "--no-pager"]]
+```
+
+- [ ] **Step 7: Run to verify it fails**
+
+Run: `uv run pytest tests/test_systemctl_client.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.systemctl_client'`.
+
+- [ ] **Step 8: Implement `src/buzz_fleet/systemctl_client.py`**
+
+```python
+"""Wrap systemctl/journalctl for buzz-agent@<id> instance units."""
+
+from __future__ import annotations
+
+from enum import Enum, auto
+
+from buzz_fleet.proc import CommandRunner
+
+
+class AgentStatus(Enum):
+    RUNNING = auto()
+    STOPPED = auto()
+    FAILED = auto()
+    UNKNOWN = auto()
+
+
+def _unit(agent_id: str) -> str:
+    return f"buzz-agent@{agent_id}"
+
+
+def enable_now(runner: CommandRunner, agent_id: str) -> None:
+    runner.run(["systemctl", "enable", "--now", _unit(agent_id)])
+
+
+def disable_now(runner: CommandRunner, agent_id: str) -> None:
+    runner.run(["systemctl", "disable", "--now", _unit(agent_id)])
+
+
+def restart(runner: CommandRunner, agent_id: str) -> None:
+    runner.run(["systemctl", "restart", _unit(agent_id)])
+
+
+def stop(runner: CommandRunner, agent_id: str) -> None:
+    runner.run(["systemctl", "stop", _unit(agent_id)])
+
+
+_STATE_MAP = {
+    "active": AgentStatus.RUNNING,
+    "inactive": AgentStatus.STOPPED,
+    "failed": AgentStatus.FAILED,
+}
+
+
+def status(runner: CommandRunner, agent_id: str) -> AgentStatus:
+    result = runner.run(["systemctl", "is-active", _unit(agent_id)])
+    return _STATE_MAP.get(result.stdout.strip(), AgentStatus.UNKNOWN)
+
+
+def tail_logs(runner: CommandRunner, agent_id: str, lines: int = 200) -> str:
+    result = runner.run(["journalctl", "-u", _unit(agent_id), "-n", str(lines), "--no-pager"])
+    return result.stdout
+```
+
+- [ ] **Step 9: Run to verify all of Task 7's tests pass**
+
+Run: `uv run pytest tests/test_signer_client.py tests/test_systemctl_client.py -v`
+Expected: `10 passed`.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/buzz_fleet/proc.py src/buzz_fleet/signer_client.py src/buzz_fleet/systemctl_client.py \
+        tests/test_signer_client.py tests/test_systemctl_client.py
+git commit -m "Add CommandRunner seam and signer/systemctl subprocess clients"
+```
+
+---
+
+### Task 8: Python — `AgentManager` orchestration (create / update / delete / list)
+
+**Files:**
+- Create: `src/buzz_fleet/manager.py`
+- Test: `tests/test_manager.py`
+
+**Interfaces:**
+- Consumes: `state.save_agent/load_agents/delete_agent` (Task 5), `slug.agent_slug` (Task 6), `systemd.write_agent_files/agent_env_path` (Task 6), `signer_client.generate_key/add_member/remove_member` (Task 7), `systemctl_client.enable_now/disable_now/restart` (Task 7).
+- Produces: `AgentManager(runner: CommandRunner, community: Community)` with `.create_agent(display_name, harness, system_prompt_source, team_instructions=None, model=None, role=None, anthropic_api_key=None, openai_api_key=None) -> Agent`, `.update_agent(agent_id, **changes) -> Agent`, `.delete_agent(agent_id) -> None`, `.list_agents() -> list[Agent]`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_manager.py
+import json
+import subprocess
+from pathlib import Path
+
+from buzz_fleet.manager import AgentManager
+from buzz_fleet.models import Community, SystemPromptSource
+
+
+class FakeRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        if args[:2] == ["buzz-fleet-signer", "generate-key"]:
+            stdout = json.dumps({"public_key": "ab" * 32, "secret_key": "nsec1agent"})
+        elif "add-member" in args or "remove-member" in args:
+            stdout = json.dumps({"ok": True})
+        else:
+            stdout = "active\n"
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+
+def _community() -> Community:
+    return Community(id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1admin")
+
+
+def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+
+    agent = manager.create_agent(
+        display_name="Laravel Backend Dev",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="You are the dev."),
+    )
+
+    assert agent.id == "laravel-backend-dev"
+    assert agent.public_key == "ab" * 32
+    add_member_call = next(c for c in runner.calls if "add-member" in c)
+    assert "--pubkey" in add_member_call and "ab" * 32 in add_member_call
+    assert ["systemctl", "enable", "--now", "buzz-agent@laravel-backend-dev"] in runner.calls
+    assert manager.list_agents() == [agent]
+
+
+def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Throwaway",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+
+    manager.delete_agent(agent.id)
+
+    assert ["systemctl", "disable", "--now", "buzz-agent@throwaway"] in runner.calls
+    assert any("remove-member" in c for c in runner.calls)
+    assert manager.list_agents() == []
+
+
+def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Throwaway",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    add_member_calls_before = len([c for c in runner.calls if "add-member" in c])
+
+    updated = manager.update_agent(agent.id, system_prompt_source=SystemPromptSource(kind="inline", text="y"))
+
+    add_member_calls_after = len([c for c in runner.calls if "add-member" in c])
+    assert add_member_calls_after == add_member_calls_before
+    assert ["systemctl", "restart", "buzz-agent@throwaway"] in runner.calls
+    assert updated.system_prompt_source.text == "y"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/test_manager.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.manager'`.
+
+- [ ] **Step 3: Implement `src/buzz_fleet/manager.py`**
+
+```python
+"""Orchestrates state, systemd files, and the signer/systemctl clients for agent CRUD."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from buzz_fleet import signer_client, state, systemctl_client, systemd
+from buzz_fleet.models import Agent, Community, SystemPromptSource
+from buzz_fleet.proc import CommandRunner
+from buzz_fleet.slug import agent_slug
+
+
+class AgentManager:
+    def __init__(self, runner: CommandRunner, community: Community) -> None:
+        self._runner = runner
+        self._community = community
+
+    def list_agents(self) -> list[Agent]:
+        return state.load_agents(self._community.id)
+
+    def create_agent(
+        self,
+        *,
+        display_name: str,
+        harness: str,
+        system_prompt_source: SystemPromptSource,
+        team_instructions: str | None = None,
+        model: str | None = None,
+        role: str | None = None,
+        anthropic_api_key: str | None = None,
+        openai_api_key: str | None = None,
+    ) -> Agent:
+        existing_ids = {a.id for a in self.list_agents()}
+        agent_id = agent_slug(display_name, existing_ids)
+        public_key, secret_key = signer_client.generate_key(self._runner)
+
+        agent = Agent(
+            id=agent_id,
+            community_id=self._community.id,
+            display_name=display_name,
+            harness=harness,  # type: ignore[arg-type]
+            private_key=secret_key,
+            public_key=public_key,
+            system_prompt_source=system_prompt_source,
+            team_instructions=team_instructions,
+            model=model,
+            created_at=datetime.now(timezone.utc),
+        )
+
+        signer_client.add_member(
+            self._runner,
+            self._community.relay_url,
+            self._community.relay_admin_nsec.get_secret_value(),
+            public_key,
+            role=role,
+        )
+        systemd.write_agent_files(agent, self._community, anthropic_api_key, openai_api_key)
+        systemctl_client.enable_now(self._runner, agent.id)
+        state.save_agent(agent)
+        return agent
+
+    def update_agent(self, agent_id: str, **changes: object) -> Agent:
+        agents = {a.id: a for a in self.list_agents()}
+        current = agents[agent_id]
+        updated = current.model_copy(update=changes)
+        systemd.write_agent_files(updated, self._community, anthropic_api_key=None, openai_api_key=None)
+        systemctl_client.restart(self._runner, agent_id)
+        state.save_agent(updated)
+        return updated
+
+    def delete_agent(self, agent_id: str) -> None:
+        agents = {a.id: a for a in self.list_agents()}
+        agent = agents[agent_id]
+        systemctl_client.disable_now(self._runner, agent_id)
+        signer_client.remove_member(
+            self._runner,
+            self._community.relay_url,
+            self._community.relay_admin_nsec.get_secret_value(),
+            agent.public_key,
+        )
+        state.delete_agent(self._community.id, agent_id)
+```
+
+Note: `update_agent`'s test only exercises the `inline` prompt-source change and passes `anthropic_api_key=None`, which drops any previously-set API key from the rewritten env file — acceptable for v1 per the test as written, but flag this as a real follow-up (the manager needs to carry forward existing API keys on update, not just on create) rather than silently losing them; not blocking for the create/delete/basic-update slice this task covers.
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `uv run pytest tests/test_manager.py -v`
+Expected: `3 passed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/buzz_fleet/manager.py tests/test_manager.py
+git commit -m "Add AgentManager orchestrating create/update/delete/list"
+```
+
+---
+
+### Task 9: Python — Typer CLI (`connect`, `agent create/update/delete/list`, `tui`)
+
+**Files:**
+- Modify: `src/buzz_fleet/cli/app.py`
+- Test: `tests/test_cli.py`
+
+**Interfaces:**
+- Consumes: `AgentManager` (Task 8), `signer_client.check_connection` (Task 7), `state.save_community/load_community` (Task 5), `proc.RealCommandRunner` (Task 7).
+- Produces: `buzz-fleet connect --relay <url> --admin-nsec <nsec> --id <community-id>`, `buzz-fleet agent create/list/delete`, `buzz-fleet tui`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_cli.py
+import json
+import subprocess
+
+from typer.testing import CliRunner
+
+from buzz_fleet.cli.app import app
+
+runner_cli = CliRunner()
+
+
+class FakeRunner:
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"ok": True}), stderr="")
+
+
+def test_connect_saves_community_on_success(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", lambda: FakeRunner())
+
+    result = runner_cli.invoke(
+        app,
+        ["connect", "--id", "eltahir", "--relay", "wss://buzz.eltahir.me", "--admin-nsec", "nsec1abc"],
+    )
+
+    assert result.exit_code == 0
+    from buzz_fleet.state import load_community
+
+    saved = load_community("eltahir")
+    assert saved is not None
+    assert saved.relay_url == "wss://buzz.eltahir.me"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/test_cli.py -v`
+Expected: fails — `connect` subcommand doesn't exist yet (Typer exits non-zero / "No such command").
+
+- [ ] **Step 3: Implement the `connect` command in `src/buzz_fleet/cli/app.py`**
+
+```python
+"""The buzz-fleet Typer CLI."""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+import typer
+
+from buzz_fleet import signer_client, state
+from buzz_fleet.models import Community
+from buzz_fleet.proc import RealCommandRunner
+
+app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
+agent_app = typer.Typer(help="Manage agent identities")
+app.add_typer(agent_app, name="agent")
+
+
+@app.command()
+def connect(
+    id: Annotated[str, typer.Option(help="Local id for this community, e.g. 'eltahir'")],
+    relay: Annotated[str, typer.Option(help="Relay URL, e.g. wss://buzz.eltahir.me")],
+    admin_nsec: Annotated[str, typer.Option(help="Your own owner/admin nsec")],
+) -> None:
+    runner = RealCommandRunner()
+    if not signer_client.check_connection(runner, relay, admin_nsec):
+        typer.echo("Could not authenticate against that relay with that key.", err=True)
+        raise typer.Exit(code=1)
+    state.save_community(Community(id=id, relay_url=relay, relay_admin_nsec=admin_nsec))
+    typer.echo(f"Connected and saved community '{id}'.")
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `uv run pytest tests/test_cli.py -v`
+Expected: `1 passed`.
+
+- [ ] **Step 5: Add `agent create/list/delete` commands** (no new test beyond Task 8's manager coverage — these are thin argument-parsing wrappers; verified manually in Task 12's end-to-end pass)
+
+```python
+import json
+from pathlib import Path
+
+from buzz_fleet.manager import AgentManager
+from buzz_fleet.models import SystemPromptSource
+
+
+def _load_manager(community_id: str) -> AgentManager:
+    community = state.load_community(community_id)
+    if community is None:
+        typer.echo(f"Unknown community '{community_id}' — run `buzz-fleet connect` first.", err=True)
+        raise typer.Exit(code=1)
+    return AgentManager(RealCommandRunner(), community)
+
+
+@agent_app.command("create")
+def agent_create(
+    community: Annotated[str, typer.Option()],
+    display_name: Annotated[str, typer.Option()],
+    harness: Annotated[str, typer.Option()],
+    prompt_file: Annotated[Path, typer.Option(help="Path to a persona .persona.md or plain prompt text file")],
+) -> None:
+    manager = _load_manager(community)
+    agent = manager.create_agent(
+        display_name=display_name,
+        harness=harness,
+        system_prompt_source=SystemPromptSource(kind="persona_file", path=prompt_file),
+    )
+    typer.echo(f"Created agent '{agent.id}' ({agent.public_key}).")
+
+
+@agent_app.command("list")
+def agent_list(community: Annotated[str, typer.Option()]) -> None:
+    manager = _load_manager(community)
+    for agent in manager.list_agents():
+        typer.echo(f"{agent.id}\t{agent.display_name}\t{agent.harness}")
+
+
+@agent_app.command("delete")
+def agent_delete(community: Annotated[str, typer.Option()], agent_id: Annotated[str, typer.Argument()]) -> None:
+    manager = _load_manager(community)
+    manager.delete_agent(agent_id)
+    typer.echo(f"Deleted agent '{agent_id}'.")
+
+
+@app.command()
+def tui() -> None:
+    from buzz_fleet.tui.app import BuzzFleetApp
+
+    BuzzFleetApp().run()
+```
+
+- [ ] **Step 6: Run the full test suite so far**
+
+Run: `uv run pytest -v`
+Expected: all tests from Tasks 5–9 pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/buzz_fleet/cli/app.py tests/test_cli.py
+git commit -m "Add connect/agent CLI commands wrapping AgentManager"
+```
+
+---
+
+### Task 10: Textual TUI — app shell with live agent dashboard
+
+**Files:**
+- Create: `src/buzz_fleet/tui/app.py`
+- Create: `src/buzz_fleet/tui/screens/connect.py`
+- Create: `src/buzz_fleet/tui/screens/dashboard.py`
+- Test: `tests/tui/test_dashboard.py`
+
+**Interfaces:**
+- Consumes: `AgentManager.list_agents` (Task 8), `systemctl_client.status` (Task 7), `state.load_community` (Task 5).
+- Produces: `BuzzFleetApp` (Textual `App`), `DashboardScreen` with a `DataTable` of `id | display_name | harness | status`, refreshed via a `@work` background poller.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/tui/test_dashboard.py
+from datetime import datetime, timezone
+
+import pytest
+
+from buzz_fleet.models import Agent, SystemPromptSource
+from buzz_fleet.tui.app import BuzzFleetApp
+
+
+def _agent(agent_id: str) -> Agent:
+    return Agent(
+        id=agent_id,
+        community_id="eltahir",
+        display_name=agent_id.title(),
+        harness="claude",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="hi"),
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.agent_status",
+        lambda agent_id: "RUNNING",
+    )
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.screen.query_one("#agent-table")
+        rendered_rows = [tuple(str(c) for c in row) for row in table.rows.values()]
+        assert ("laravel-dev", "Laravel-Dev", "claude", "RUNNING") in [
+            tuple(str(v) for v in table.get_row_at(i)) for i in range(table.row_count)
+        ]
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/tui/test_dashboard.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.tui.app'`.
+
+- [ ] **Step 3: Implement `src/buzz_fleet/tui/screens/dashboard.py`**
+
+```python
+"""Live agent dashboard: a table of agents polled from systemctl status."""
+
+from __future__ import annotations
+
+from textual import work
+from textual.app import ComposeResult
+from textual.screen import Screen
+from textual.widgets import DataTable, Footer, Header
+
+from buzz_fleet import state
+from buzz_fleet.proc import RealCommandRunner
+from buzz_fleet.systemctl_client import status as systemctl_status
+
+
+def list_agents() -> list:
+    community = state.load_community(CURRENT_COMMUNITY_ID)
+    return state.load_agents(community.id) if community else []
+
+
+def agent_status(agent_id: str) -> str:
+    return systemctl_status(RealCommandRunner(), agent_id).name
+
+
+CURRENT_COMMUNITY_ID = "eltahir"
+
+
+class DashboardScreen(Screen):
+    def compose(self) -> ComposeResult:
+        yield Header()
+        table = DataTable(id="agent-table")
+        table.add_columns("id", "display_name", "harness", "status")
+        yield table
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.refresh_agents()
+
+    @work(exclusive=True)
+    async def refresh_agents(self) -> None:
+        table = self.query_one("#agent-table", DataTable)
+        table.clear()
+        for agent in list_agents():
+            table.add_row(agent.id, agent.display_name, agent.harness, agent_status(agent.id))
+```
+
+- [ ] **Step 4: Implement `src/buzz_fleet/tui/screens/connect.py`** (stub screen, wired fully in Task 11 — needed now only so `BuzzFleetApp` has a first screen)
+
+```python
+"""Connect screen — collects relay URL + admin nsec, reuses buzz_fleet.cli connect logic."""
+
+from __future__ import annotations
+
+from textual.app import ComposeResult
+from textual.screen import Screen
+from textual.widgets import Footer, Header, Static
+
+
+class ConnectScreen(Screen):
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("Press 'd' to view the dashboard (connect form lands in Task 11).")
+        yield Footer()
+```
+
+- [ ] **Step 5: Implement `src/buzz_fleet/tui/app.py`**
+
+```python
+"""BuzzFleetApp — the Textual application shell."""
+
+from __future__ import annotations
+
+from textual.app import App
+
+from buzz_fleet.tui.screens.dashboard import DashboardScreen
+
+
+class BuzzFleetApp(App):
+    def on_mount(self) -> None:
+        self.push_screen(DashboardScreen())
+```
+
+- [ ] **Step 6: Add `pytest-asyncio` config** so `@pytest.mark.asyncio` tests run — append to `pyproject.toml`:
+
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+```
+
+- [ ] **Step 7: Run to verify it passes**
+
+Run: `uv run pytest tests/tui/test_dashboard.py -v`
+Expected: `1 passed`.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/buzz_fleet/tui pyproject.toml tests/tui/test_dashboard.py
+git commit -m "Add Textual app shell with live-polling agent dashboard"
+```
+
+---
+
+### Task 11: Textual TUI — create/update/delete forms and log viewer
+
+**Files:**
+- Create: `src/buzz_fleet/tui/screens/agent_form.py`
+- Create: `src/buzz_fleet/tui/screens/logs.py`
+- Modify: `src/buzz_fleet/tui/screens/dashboard.py` — bind `c` (create), `x` (delete), `l` (logs) to push these screens
+- Test: `tests/tui/test_agent_form.py`
+
+**Interfaces:**
+- Consumes: `AgentManager.create_agent`/`delete_agent` (Task 8), `systemctl_client.tail_logs` (Task 7).
+- Produces: `AgentFormScreen(manager: AgentManager)` with `Input` widgets for display name / harness / prompt text, submitting via `AgentManager.create_agent`; `LogsScreen(agent_id: str)` streaming `tail_logs` output into a `RichLog`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/tui/test_agent_form.py
+import pytest
+
+from buzz_fleet.tui.screens.agent_form import AgentFormScreen
+from buzz_fleet.tui.app import BuzzFleetApp
+
+
+class FakeManager:
+    def __init__(self) -> None:
+        self.created: list[dict] = []
+
+    def create_agent(self, **kwargs):
+        self.created.append(kwargs)
+        return object()
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_calls_create_agent() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        await pilot.click("#display-name-input")
+        await pilot.press(*"Test Agent")
+        await pilot.click("#prompt-input")
+        await pilot.press(*"You are a test agent.")
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    assert len(manager.created) == 1
+    assert manager.created[0]["display_name"] == "Test Agent"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `uv run pytest tests/tui/test_agent_form.py -v`
+Expected: `ModuleNotFoundError: No module named 'buzz_fleet.tui.screens.agent_form'`.
+
+- [ ] **Step 3: Implement `src/buzz_fleet/tui/screens/agent_form.py`**
+
+```python
+"""Create-agent form screen."""
+
+from __future__ import annotations
+
+from textual.app import ComposeResult
+from textual.screen import Screen
+from textual.widgets import Button, Footer, Header, Input
+
+from buzz_fleet.manager import AgentManager
+from buzz_fleet.models import SystemPromptSource
+
+
+class AgentFormScreen(Screen):
+    def __init__(self, manager: AgentManager) -> None:
+        super().__init__()
+        self._manager = manager
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Input(placeholder="Display name", id="display-name-input")
+        yield Input(placeholder="System prompt", id="prompt-input")
+        yield Button("Create", id="submit-button")
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "submit-button":
+            return
+        display_name = self.query_one("#display-name-input", Input).value
+        prompt_text = self.query_one("#prompt-input", Input).value
+        self._manager.create_agent(
+            display_name=display_name,
+            harness="claude",
+            system_prompt_source=SystemPromptSource(kind="inline", text=prompt_text),
+        )
+        self.app.pop_screen()
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `uv run pytest tests/tui/test_agent_form.py -v`
+Expected: `1 passed`.
+
+- [ ] **Step 5: Implement `src/buzz_fleet/tui/screens/logs.py`** (no test — thin streaming wrapper, covered by Task 12's manual pass)
+
+```python
+"""Live log-tail screen for one agent's systemd unit."""
+
+from __future__ import annotations
+
+from textual import work
+from textual.app import ComposeResult
+from textual.screen import Screen
+from textual.widgets import Footer, Header, RichLog
+
+from buzz_fleet.proc import RealCommandRunner
+from buzz_fleet.systemctl_client import tail_logs
+
+
+class LogsScreen(Screen):
+    def __init__(self, agent_id: str) -> None:
+        super().__init__()
+        self._agent_id = agent_id
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield RichLog(id="log-view")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.stream_logs()
+
+    @work(exclusive=True)
+    async def stream_logs(self) -> None:
+        log_widget = self.query_one("#log-view", RichLog)
+        log_widget.write(tail_logs(RealCommandRunner(), self._agent_id))
+```
+
+- [ ] **Step 6: Wire key bindings in `DashboardScreen`** (Task 10's file) — add:
+
+```python
+from textual.binding import Binding
+
+from buzz_fleet.manager import AgentManager
+from buzz_fleet.models import Community
+from buzz_fleet.tui.screens.agent_form import AgentFormScreen
+from buzz_fleet.tui.screens.logs import LogsScreen
+
+
+class DashboardScreen(Screen):
+    BINDINGS = [
+        Binding("c", "create_agent", "Create agent"),
+        Binding("l", "view_logs", "View logs"),
+    ]
+
+    def action_create_agent(self) -> None:
+        community = state.load_community(CURRENT_COMMUNITY_ID)
+        manager = AgentManager(RealCommandRunner(), community)
+        self.app.push_screen(AgentFormScreen(manager))
+
+    def action_view_logs(self) -> None:
+        table = self.query_one("#agent-table", DataTable)
+        if table.cursor_row is None:
+            return
+        agent_id = str(table.get_row_at(table.cursor_row)[0])
+        self.app.push_screen(LogsScreen(agent_id))
+```
+
+(`Community` import added to the top of `dashboard.py` alongside the existing imports.)
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `uv run pytest -v`
+Expected: every test from Tasks 5–11 passes.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/buzz_fleet/tui tests/tui/test_agent_form.py
+git commit -m "Add create-agent form and live log viewer screens"
+```
+
+---
+
+### Task 12: Packaging polish and end-to-end manual verification
+
+**Files:**
+- Modify: `README.md`
+- Modify: `pyproject.toml` (version bump only, if needed)
+
+**Interfaces:** none new — this task verifies Tasks 1–11 work together against the real, already-running `buzz.eltahir.me` community.
+
+- [ ] **Step 1: Build the signer binary and install it on PATH**
+
+```bash
+cd signer && cargo build --release
+sudo install -m 0755 target/release/buzz-fleet-signer /usr/local/bin/buzz-fleet-signer
+```
+
+- [ ] **Step 2: Install the Python package**
+
+```bash
+cd /home/dev/apps/buzz-fleet && uv sync
+```
+
+- [ ] **Step 3: Connect to the real community**
+
+```bash
+uv run buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me --admin-nsec <the real owner nsec>
+```
+
+Expected: `Connected and saved community 'eltahir'.`
+
+- [ ] **Step 4: Create a throwaway test agent**
+
+```bash
+echo "You are a disposable test agent. Reply 'pong' to any @mention." > /tmp/test-agent-prompt.md
+uv run buzz-fleet agent create --community eltahir --display-name "Test Echo" \
+  --harness claude --prompt-file /tmp/test-agent-prompt.md
+```
+
+Expected: `Created agent 'test-echo' (<64-hex-pubkey>).` Then confirm real relay-side membership using the existing `buzz` CLI (from `/home/dev/apps/buzz`):
+
+```bash
+BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
+  ./target/release/buzz users lookup --pubkey <the pubkey just printed>
+```
+
+Expected: lookup succeeds — the agent is really a relay member, not just recorded locally.
+
+- [ ] **Step 5: Confirm the systemd unit is live**
+
+```bash
+systemctl status buzz-agent@test-echo
+journalctl -u buzz-agent@test-echo -n 50 --no-pager
+```
+
+Expected: `active (running)`; logs show `buzz-acp` connecting to the relay (note: `ANTHROPIC_API_KEY` was not passed in Step 4 — expect the agent process to fail fast on missing credentials; that's the correct failure mode to see here, confirming the unit and env file wiring work even before a real API key is supplied. Re-run Step 4 with a real key, or manually add `ANTHROPIC_API_KEY=...` to `/etc/buzz-fleet/agents/test-echo.env` and `systemctl restart buzz-agent@test-echo`, to see it actually connect and idle waiting for mentions).
+
+- [ ] **Step 6: Launch the TUI and confirm the dashboard shows it**
+
+```bash
+uv run buzz-fleet tui
+```
+
+Expected: dashboard lists `test-echo | Test Echo | claude | RUNNING`. Press `l` on that row to confirm the log viewer shows the same `journalctl` output as Step 5.
+
+- [ ] **Step 7: Delete the throwaway agent and confirm full teardown**
+
+```bash
+uv run buzz-fleet agent delete --community eltahir test-echo
+systemctl status buzz-agent@test-echo   # expect: inactive/not-found
+BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
+  ./target/release/buzz users lookup --pubkey <the pubkey from step 4>
+```
+
+Expected: the second lookup now fails — membership was actually revoked, not just deleted locally.
+
+- [ ] **Step 8: Update `README.md`** with the real install/usage flow validated above (systemd unit prerequisites, `buzz-fleet-signer` on `PATH`, `connect`/`agent create`/`tui` commands), then commit.
+
+```bash
+git add README.md
+git commit -m "Document validated install and usage flow"
+```
+
+---
+
+## Self-Review Notes
+
+- **Spec coverage:** auth/connect (Tasks 3, 9), agent create/update/delete (Tasks 4, 8), systemd-based run/stop/status/logs (Tasks 6, 7, 11), Textual dashboard (Task 10), persona-file prompt source (Task 6/9's `--prompt-file`), stateless-on-launch runtime model (no daemon code anywhere in this plan — every command/screen reads fresh from `systemctl`/state files). Not covered by this plan, intentionally (spec's own Non-goals): multi-community switcher UI, NIP-IA archive-on-delete, remote/multi-host fleet view.
+- **Known gap carried forward, not silently fixed:** `AgentManager.update_agent` (Task 8) drops previously-set `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` on every update, since it always calls `write_agent_files` with both as `None`. Flagged inline in Task 8 — fine for v1's create/delete-focused test coverage, but real usage will hit this the first time someone edits an existing agent's prompt. Fix (not in this plan): `update_agent` should read the existing env file's current API key line(s) before rewriting, or `Agent` should carry the API key in its own model instead of being an out-of-band `write_agent_files` parameter.
+- **Type/name consistency check:** `Agent.id`/`display_name`/`harness`/`public_key` used identically from Task 5 through Task 11; `CommandRunner.run(args) -> CompletedProcess[str]` signature identical across Tasks 7, 8, 9, 10, 11; systemd unit naming (`buzz-agent@<id>`) identical across Task 6's template, Task 7's `_unit()`, and Task 12's manual verification commands.
