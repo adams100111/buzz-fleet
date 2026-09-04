@@ -47,6 +47,10 @@ class AgentManager:
         system_prompt_source: SystemPromptSource,
         team_instructions: str | None = None,
         model: str | None = None,
+        parallelism: int | None = None,
+        idle_timeout_seconds: int | None = None,
+        max_turn_duration_seconds: int | None = None,
+        respond_to_allowlist: list[str] | None = None,
         role: str | None = None,
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
@@ -67,6 +71,10 @@ class AgentManager:
             system_prompt_source=system_prompt_source,
             team_instructions=team_instructions,
             model=model,
+            parallelism=parallelism,
+            idle_timeout_seconds=idle_timeout_seconds,
+            max_turn_duration_seconds=max_turn_duration_seconds,
+            respond_to_allowlist=respond_to_allowlist,
             created_at=datetime.now(UTC),
         )
 

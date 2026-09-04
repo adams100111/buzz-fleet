@@ -131,3 +131,72 @@ def test_agent_create_with_blank_display_name_exits_cleanly(tmp_path, monkeypatc
 
     assert result.exit_code == 1
     assert "alphanumeric" in result.output
+
+
+def test_agent_create_passes_new_optional_fields(tmp_path, monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def create_agent(self, **kwargs: object) -> object:
+            calls.update(kwargs)
+            return SimpleNamespace(id="test-agent", public_key="ab" * 32)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are an agent.")
+
+    result = runner_cli.invoke(
+        app,
+        [
+            "agent", "create",
+            "--community", "eltahir",
+            "--display-name", "Test Agent",
+            "--harness", "claude",
+            "--prompt-file", str(prompt_file),
+            "--model", "claude-sonnet-5",
+            "--parallelism", "3",
+            "--idle-timeout-seconds", "120",
+            "--max-turn-duration-seconds", "600",
+            "--respond-to-allowlist", f"{'a' * 64},{'b' * 64}",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["model"] == "claude-sonnet-5"
+    assert calls["parallelism"] == 3
+    assert calls["idle_timeout_seconds"] == 120
+    assert calls["max_turn_duration_seconds"] == 600
+    assert calls["respond_to_allowlist"] == ["a" * 64, "b" * 64]
+
+
+def test_agent_update_passes_new_optional_fields(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["agent_id"] = agent_id
+            calls["changes"] = changes
+            return SimpleNamespace(id=agent_id)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    result = runner_cli.invoke(
+        app,
+        [
+            "agent", "update", "--community", "eltahir", "agent-1",
+            "--model", "claude-sonnet-5",
+            "--respond-to-allowlist", "a" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["changes"] == {"model": "claude-sonnet-5", "respond_to_allowlist": ["a" * 64]}

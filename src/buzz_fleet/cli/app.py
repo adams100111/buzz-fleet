@@ -52,6 +52,13 @@ def agent_create(
     display_name: Annotated[str, typer.Option()],
     harness: Annotated[str, typer.Option()],
     prompt_file: Annotated[Path, typer.Option(help="Path to a persona .persona.md or plain prompt text file")],
+    model: Annotated[str | None, typer.Option()] = None,
+    parallelism: Annotated[int | None, typer.Option()] = None,
+    idle_timeout_seconds: Annotated[int | None, typer.Option()] = None,
+    max_turn_duration_seconds: Annotated[int | None, typer.Option()] = None,
+    respond_to_allowlist: Annotated[
+        str | None, typer.Option(help="Comma-separated pubkeys")
+    ] = None,
 ) -> None:
     manager = _load_manager(community)
     try:
@@ -59,6 +66,11 @@ def agent_create(
             display_name=display_name,
             harness=harness,
             system_prompt_source=SystemPromptSource(kind="persona_file", path=prompt_file),
+            model=model,
+            parallelism=parallelism,
+            idle_timeout_seconds=idle_timeout_seconds,
+            max_turn_duration_seconds=max_turn_duration_seconds,
+            respond_to_allowlist=respond_to_allowlist.split(",") if respond_to_allowlist else None,
         )
     except ValueError as e:
         # e.g. a blank/punctuation-only --display-name (agent_slug raises)
@@ -89,6 +101,13 @@ def agent_update(
     prompt_file: Annotated[
         Path | None, typer.Option(help="Replace the system prompt with this persona/prompt file")
     ] = None,
+    model: Annotated[str | None, typer.Option()] = None,
+    parallelism: Annotated[int | None, typer.Option()] = None,
+    idle_timeout_seconds: Annotated[int | None, typer.Option()] = None,
+    max_turn_duration_seconds: Annotated[int | None, typer.Option()] = None,
+    respond_to_allowlist: Annotated[
+        str | None, typer.Option(help="Comma-separated pubkeys")
+    ] = None,
 ) -> None:
     manager = _load_manager(community)
     changes: dict[str, object] = {}
@@ -96,8 +115,18 @@ def agent_update(
         changes["display_name"] = display_name
     if prompt_file is not None:
         changes["system_prompt_source"] = SystemPromptSource(kind="persona_file", path=prompt_file)
+    if model is not None:
+        changes["model"] = model
+    if parallelism is not None:
+        changes["parallelism"] = parallelism
+    if idle_timeout_seconds is not None:
+        changes["idle_timeout_seconds"] = idle_timeout_seconds
+    if max_turn_duration_seconds is not None:
+        changes["max_turn_duration_seconds"] = max_turn_duration_seconds
+    if respond_to_allowlist is not None:
+        changes["respond_to_allowlist"] = respond_to_allowlist.split(",")
     if not changes:
-        typer.echo("Nothing to update — pass --display-name and/or --prompt-file.", err=True)
+        typer.echo("Nothing to update — pass at least one field to change.", err=True)
         raise typer.Exit(code=1)
     updated = manager.update_agent(agent_id, **changes)
     typer.echo(f"Updated agent '{updated.id}'.")

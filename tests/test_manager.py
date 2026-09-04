@@ -244,3 +244,28 @@ def test_create_agent_fails_before_any_side_effect_when_linger_cannot_be_enabled
     assert manager.list_agents() == []
     assert not any("generate-key" in c for c in runner.calls)
     assert not any("add-member" in c for c in runner.calls)
+
+
+def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+
+    agent = manager.create_agent(
+        display_name="Test Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="hi"),
+        model="claude-sonnet-5",
+        parallelism=3,
+        idle_timeout_seconds=120,
+        max_turn_duration_seconds=600,
+        respond_to_allowlist=["a" * 64],
+    )
+
+    assert agent.model == "claude-sonnet-5"
+    assert agent.parallelism == 3
+    assert agent.idle_timeout_seconds == 120
+    assert agent.max_turn_duration_seconds == 600
+    assert agent.respond_to_allowlist == ["a" * 64]
