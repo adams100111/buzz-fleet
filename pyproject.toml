@@ -34,3 +34,6 @@ files = ["src", "tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
