@@ -34,3 +34,24 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
         assert ("laravel-dev", "Laravel-Dev", "claude", "RUNNING") in [
             tuple(str(v) for v in table.get_row_at(i)) for i in range(table.row_count)
         ]
+
+
+@pytest.mark.asyncio
+async def test_create_agent_with_no_connected_community_does_not_crash(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", list)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: None)
+
+    created_managers = []
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.AgentManager",
+        lambda *args, **kwargs: created_managers.append((args, kwargs)),
+    )
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        screen.action_create_agent()
+        await pilot.pause()
+
+    assert created_managers == []

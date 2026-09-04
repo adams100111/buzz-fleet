@@ -60,17 +60,26 @@ class DashboardScreen(Screen):
             return None
         return str(table.get_row_at(table.cursor_row)[0])
 
-    def action_create_agent(self) -> None:
+    def _manager_or_notify(self) -> AgentManager | None:
         community = state.load_community(CURRENT_COMMUNITY_ID)
-        manager = AgentManager(RealCommandRunner(), community)
+        if community is None:
+            self.notify("No connected community — run `buzz-fleet connect` first.", severity="error")
+            return None
+        return AgentManager(RealCommandRunner(), community)
+
+    def action_create_agent(self) -> None:
+        manager = self._manager_or_notify()
+        if manager is None:
+            return
         self.app.push_screen(AgentFormScreen(manager))
 
     def action_edit_agent(self) -> None:
         agent_id = self._selected_agent_id()
         if agent_id is None:
             return
-        community = state.load_community(CURRENT_COMMUNITY_ID)
-        manager = AgentManager(RealCommandRunner(), community)
+        manager = self._manager_or_notify()
+        if manager is None:
+            return
         agent = next((a for a in manager.list_agents() if a.id == agent_id), None)
         if agent is None:
             return
@@ -80,8 +89,9 @@ class DashboardScreen(Screen):
         agent_id = self._selected_agent_id()
         if agent_id is None:
             return
-        community = state.load_community(CURRENT_COMMUNITY_ID)
-        manager = AgentManager(RealCommandRunner(), community)
+        manager = self._manager_or_notify()
+        if manager is None:
+            return
         manager.delete_agent(agent_id)
         self.refresh_agents()
 
