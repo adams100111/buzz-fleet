@@ -106,6 +106,7 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ```
 
 - [ ] **Step 2: Write `signer/src/main.rs`**
@@ -480,6 +481,15 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    // buzz-ws-client dials wss:// relays via tokio-tungstenite's rustls backend, which
+    // requires the process to install a CryptoProvider before the first TLS handshake —
+    // it does not select one automatically. Install `ring` (the only backend in our
+    // dependency graph) up front so check-connection/add-member/remove-member can
+    // actually connect. Mirrors the identical pattern in buzz-admin's own main().
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider");
+
     let cli = Cli::parse();
     let code = match cli.command {
         Command::GenerateKey => {
@@ -525,15 +535,26 @@ Expected: builds cleanly (fix any import-path mismatches against the actual `buz
 Run: `cargo run -- generate-key`
 Expected: prints a JSON object with `public_key` (64 hex chars) and `secret_key` (`nsec1...`).
 
-- [ ] **Step 4: Manual verification — check-connection against the real community**
+- [ ] **Step 4: Manual verification — check-connection against a public test relay**
 
-Run: `cargo run -- check-connection --relay wss://buzz.eltahir.me --nsec <the owner's real nsec>`
-Expected: `{"ok":true}`, exit code 0. Then with a deliberately wrong nsec, expect `{"ok":false,"error":"..."}`, exit code 1.
+Never use the real production community or the real owner nsec for this check — that secret does not belong in any dispatched task's hands, only a human runs that (Task 12). Verify against a public relay with a freshly-generated throwaway key instead:
+
+```bash
+cargo run -- check-connection --relay wss://relay.damus.io --nsec <a throwaway nsec from Step 3>
+```
+
+Expected: `{"ok":true}`, exit code 0 — this proves the real NIP-42 connect/auth code path works. Then with a syntactically invalid nsec:
+
+```bash
+cargo run -- check-connection --relay wss://relay.damus.io --nsec nsec1invalid
+```
+
+Expected: `{"ok":false,"error":"..."}`, exit code 1.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add signer/src/main.rs
+git add signer/Cargo.toml signer/src/main.rs
 git commit -m "Add generate-key and check-connection commands to buzz-fleet-signer"
 ```
 
