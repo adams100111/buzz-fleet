@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+mod events;
+
 #[derive(Parser)]
 #[command(name = "buzz-fleet-signer", about = "Nostr key/event helper for buzz-fleet")]
 struct Cli {
