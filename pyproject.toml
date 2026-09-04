@@ -21,6 +21,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "mypy>=1.13",
     "ruff>=0.7",
+    "pyinstaller>=6.11",
 ]
 
 [build-system]

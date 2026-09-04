@@ -2256,94 +2256,91 @@ git commit -m "Add create-agent form and live log viewer screens"
 
 **Interfaces:** none new — this task verifies Tasks 1–11 work together against the real, already-running `buzz.eltahir.me` community.
 
-- [ ] **Step 1: Enable lingering for this user, build the signer binary, install it on PATH**
+**Design rule for this task: everything past one-time host setup happens inside a single `buzz-fleet tui` session — connect, create, edit, view logs, delete — never as separate typed CLI invocations.** The CLI commands (`connect`, `agent create/list/update/delete`) exist for scripting, but the *product* is the TUI, and Task 12 verifies the product, not the CLI wrapper around it. The only things that happen outside the TUI are (a) one-time host/environment setup that has to happen before the app can run at all, and (b) a zero-secret regression check the controller runs itself, not something to hand to a human.
 
-Everything in this plan runs as your normal, unprivileged user via `systemctl --user` — no root, anywhere (spec Open Question 2, resolved this way). The one prerequisite a normal interactive login doesn't give you for free is that `--user` units stop when your last session ends; `loginctl enable-linger` fixes that so agents survive an SSH logout, which is the entire point of running them on a VPS:
+- [ ] **Step 1 (one-time host setup, not part of using the app): enable lingering, build/install the signer, and build the standalone `buzz-fleet` binary**
+
+Everything in this plan runs as your normal, unprivileged user via `systemctl --user` — no root, anywhere (spec Open Question 2, resolved this way). The one prerequisite a normal interactive login doesn't give you for free is that `--user` units stop when your last session ends; `loginctl enable-linger` fixes that so agents survive an SSH logout, which is the entire point of running them on a VPS. `buzz-fleet` itself ships as a standalone PyInstaller binary (see the PyInstaller-packaging addendum below) so nothing beyond this host setup needs Python or `uv` installed on the target machine at all:
 
 ```bash
 loginctl enable-linger "$(whoami)"
+
 cd signer && cargo build --release
 sudo install -m 0755 target/release/buzz-fleet-signer /usr/local/bin/buzz-fleet-signer
+cd ..
+
+uv sync --group dev
+uv run pyinstaller --onefile --name buzz-fleet --paths src \
+  --collect-all textual --collect-all rich --collect-all pydantic \
+  --collect-all typer --collect-all click \
+  scripts/pyinstaller_entry.py
+sudo install -m 0755 dist/buzz-fleet /usr/local/bin/buzz-fleet
 ```
 
-(`buzz-fleet-signer` itself is installed system-wide with `sudo` here only because `/usr/local/bin` is root-owned by default — it is a static binary with no special privileges at runtime; everything it does, it does as whichever user invokes it.)
+(`buzz-fleet-signer` and `buzz-fleet` are both installed system-wide with `sudo install` here only because `/usr/local/bin` is root-owned by default — both are static-ish binaries with no special privileges at runtime; everything they do, they do as whichever user invokes them. `uv`/PyInstaller are build-time-only tools on the machine that *builds* the binary — the machine that *runs* it needs neither.)
 
-- [ ] **Step 2: Confirm a relay-side rejection is reported as failure, not swallowed as success**
+- [ ] **Step 2 (controller-run, zero secrets — not a task for the human): confirm a relay-side rejection is reported as failure, not swallowed as success**
 
-This is the one live-relay check Task 4 deliberately deferred to here (no subagent is ever given the real community's admin key). Sign with a throwaway key that has never been given admin/owner role on this community:
+This is the one live-relay check Task 4 deliberately deferred to here. It needs no real admin authority at all — it deliberately signs with a throwaway key that has *never* been given admin/owner role, so it's safe for the controller to run directly against the real relay without ever touching the real owner's nsec:
 
 ```bash
 buzz-fleet-signer generate-key   # a throwaway key, used here only as a bogus "admin"
 buzz-fleet-signer add-member --relay wss://buzz.eltahir.me --admin-nsec <that bogus key's nsec> --pubkey <any 64-hex pubkey>
 ```
 
-Expected: `{"ok":false,"error":"relay rejected event: actor not authorized: must be admin or owner"}` and a non-zero exit code — **not** `{"ok":true}`. This is the regression check for the `OkResponse.accepted` fix in Task 4; if it ever prints `{"ok":true}` here, that fix was reverted or bypassed.
+Expected: `{"ok":false,"error":"..."}` and a non-zero exit code — **not** `{"ok":true}`. This is the regression check for the `OkResponse.accepted` fix in Task 4; if it ever prints `{"ok":true}` here, that fix was reverted or bypassed.
 
-- [ ] **Step 3: Install the Python package**
+**Actually run against `wss://buzz.eltahir.me` (2026-09-04):** `{"error":"Authentication failed: restricted: not a relay member","ok":false}`, exit code 1 — a stronger rejection than originally predicted. A throwaway key isn't a community member at all, so the relay's NIP-42 auth layer rejects it before the request ever reaches the `kind:9030` handler's admin/owner role check — two independent layers of defense, not one, both confirmed working against the real production relay.
 
-```bash
-cd /home/dev/apps/buzz-fleet && uv sync
-```
-
-- [ ] **Step 4: Connect to the real community**
+- [ ] **Step 3 (the actual product, one TUI session, human-run): connect, create, inspect, delete — entirely inside `buzz-fleet tui`**
 
 ```bash
-uv run buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me --admin-nsec <the real owner nsec>
+buzz-fleet tui
 ```
 
-Expected: `Connected and saved community 'eltahir'.`
+No prior `connect`/`agent create` CLI invocation, no separate `.env`/prompt file staged on disk beforehand. Inside that one session:
 
-- [ ] **Step 5: Create a throwaway test agent**
+1. **First screen is `ConnectScreen`** (no community connected yet) — type the relay URL (`wss://buzz.eltahir.me`) and the real owner/admin nsec into the two inputs (the nsec input is masked), then submit. On success it switches straight to `DashboardScreen`; on failure it shows an error and stays put — confirm both paths if you want to (e.g. try a wrong URL first).
+2. **Press `c`** on the dashboard, fill in a display name and a system prompt in the create form (e.g. "Test Echo" / "You are a disposable test agent. Reply 'pong' to any @mention."), submit. Confirm the dashboard shows the new row (harness `claude`, status `RUNNING` once the poller catches up — restart the TUI if it doesn't refresh live yet, a known Minor gap).
+3. **Select that row and press `l`** — confirm the log viewer streams real `journalctl --user` output for the unit (expect the process to fail fast on missing `ANTHROPIC_API_KEY`, since the create form doesn't collect one yet — that failure mode itself confirms the unit/env-file wiring is correct even before a real key is supplied).
+4. **Select the row and press `u`**, change the display name, submit — confirm the dashboard reflects the rename and the unit restarted (log viewer shows a fresh startup sequence).
+5. **Select the row and press `x`** — confirm the row disappears from the dashboard.
 
-```bash
-echo "You are a disposable test agent. Reply 'pong' to any @mention." > /tmp/test-agent-prompt.md
-uv run buzz-fleet agent create --community eltahir --display-name "Test Echo" \
-  --harness claude --prompt-file /tmp/test-agent-prompt.md
-```
+- [ ] **Step 4 (optional side-verification, not required to consider the app working): independently confirm the real relay/systemd state matches what the TUI showed**
 
-Expected: `Created agent 'test-echo' (<64-hex-pubkey>).` Then confirm real relay-side membership using the existing `buzz` CLI (from `/home/dev/apps/buzz`):
+Only if you want a second, TUI-independent confirmation that Step 3 had real effects (not required — Step 3 alone is the actual acceptance criterion for this task):
 
 ```bash
 BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
-  ./target/release/buzz users lookup --pubkey <the pubkey just printed>
+  ./target/release/buzz users lookup --pubkey <the pubkey the create form's dashboard row showed>
 ```
 
-Expected: lookup succeeds — the agent is really a relay member, not just recorded locally.
+Expected: succeeds while the agent exists (after Step 3.2), fails after deletion (after Step 3.5) — membership was really registered and really revoked, not just recorded/erased locally.
 
-- [ ] **Step 6: Confirm the systemd unit is live**
-
-```bash
-systemctl --user status buzz-agent@test-echo
-journalctl --user -u buzz-agent@test-echo -n 50 --no-pager
-```
-
-Expected: `active (running)`; logs show `buzz-acp` connecting to the relay (note: `ANTHROPIC_API_KEY` was not passed in Step 5 — expect the agent process to fail fast on missing credentials; that's the correct failure mode to see here, confirming the unit and env file wiring work even before a real API key is supplied. Re-run Step 5 with a real key, or manually add `ANTHROPIC_API_KEY=...` to `~/.config/buzz-fleet/agents/test-echo.env` and `systemctl --user restart buzz-agent@test-echo`, to see it actually connect and idle waiting for mentions).
-
-- [ ] **Step 7: Launch the TUI and confirm the dashboard shows it**
-
-```bash
-uv run buzz-fleet tui
-```
-
-Expected: dashboard lists `test-echo | Test Echo | claude | RUNNING`. Press `l` on that row to confirm the log viewer shows the same `journalctl` output as Step 5.
-
-- [ ] **Step 8: Delete the throwaway agent and confirm full teardown**
-
-```bash
-uv run buzz-fleet agent delete --community eltahir test-echo
-systemctl --user status buzz-agent@test-echo   # expect: inactive/not-found
-BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
-  ./target/release/buzz users lookup --pubkey <the pubkey from step 5>
-```
-
-Expected: the second lookup now fails — membership was actually revoked, not just deleted locally.
-
-- [ ] **Step 9: Update `README.md`** with the real install/usage flow validated above (systemd unit prerequisites, `buzz-fleet-signer` on `PATH`, `connect`/`agent create`/`tui` commands), then commit.
+- [ ] **Step 5: Update `README.md`** with the real install/usage flow validated above (one-time host setup, the standalone binary build, and the single-TUI-session usage model), then commit.
 
 ```bash
 git add README.md
 git commit -m "Document validated install and usage flow"
 ```
+
+### PyInstaller packaging addendum (added after v1's initial build, in response to "why do I need uv?")
+
+`buzz-fleet` originally shipped only as an installable Python package (`uv sync` + `uv run buzz-fleet`), which — unlike the Rust `buzz-fleet-signer` binary sitting right next to it — required a Python interpreter and a resolved venv on every target machine. For a tool whose whole point is "drop it on a fresh VPS," that's a real inconsistency, not a style nit.
+
+Fix: `scripts/pyinstaller_entry.py` (a two-line shim calling the same `buzz_fleet.cli.app:main` the console-script entry point uses) plus `pyinstaller>=6.11` as a dev dependency. Building with `--onefile --collect-all` for `textual`/`rich`/`pydantic`/`typer`/`click` (all four needed hidden-import collection — Typer/Click's lazy command loading and Textual/Rich's dynamic imports aren't picked up by PyInstaller's default static analysis) produces a single ~24MB self-contained executable that runs `--help`, `agent --help`, and the real Textual `tui` (confirmed rendering the actual `ConnectScreen` with its Relay URL / masked nsec inputs) with no Python or `uv` present at runtime. Verified directly, not just built:
+
+```bash
+uv run pyinstaller --onefile --name buzz-fleet --paths src \
+  --collect-all textual --collect-all rich --collect-all pydantic \
+  --collect-all typer --collect-all click \
+  scripts/pyinstaller_entry.py
+./dist/buzz-fleet --help        # lists connect / agent / tui
+./dist/buzz-fleet agent --help  # lists create / list / update / delete
+./dist/buzz-fleet tui           # renders the real ConnectScreen, confirmed via a headless timeout run
+```
+
+Not yet done (deliberately out of scope for this addendum, follow-up if it matters later): a `--onefile` build has a slower cold-start (unpacks to a temp dir every launch, unlike `--onedir`) and must be built once per target OS/arch (this session's build is `aarch64`-Linux, matching the Oracle server; an x86_64 target needs its own build) — neither affects correctness, both are worth knowing before scripting a multi-arch release process.
 
 ---
 
