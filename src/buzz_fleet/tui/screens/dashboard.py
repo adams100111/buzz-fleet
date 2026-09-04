@@ -56,7 +56,11 @@ class DashboardScreen(Screen):
 
     def _selected_agent_id(self) -> str | None:
         table = self.query_one("#agent-table", DataTable)
-        if table.cursor_row is None:
+        # DataTable.cursor_row is an int that is 0 on an empty table (never
+        # None), so guarding on `cursor_row is None` doesn't catch the empty
+        # case — get_row_at(0) then raises RowDoesNotExist and crashes the
+        # app. Guard on row_count instead.
+        if table.row_count == 0:
             return None
         return str(table.get_row_at(table.cursor_row)[0])
 
