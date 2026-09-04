@@ -168,3 +168,60 @@ def test_resolve_prompt_text_returns_whole_file_when_no_frontmatter(tmp_path: Pa
     )
 
     assert resolve_prompt_text(agent) == "Just a plain prompt, no frontmatter.\n"
+
+
+def test_write_agent_files_emits_model_when_set(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    agent = _agent().model_copy(update={"model": "claude-sonnet-5"})
+
+    write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert "BUZZ_ACP_MODEL=claude-sonnet-5" in env_content
+
+
+def test_write_agent_files_omits_optional_fields_when_unset(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    agent = _agent()
+
+    write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
+
+    env_content = agent_env_path(agent.id).read_text()
+    for key in (
+        "BUZZ_ACP_MODEL",
+        "BUZZ_ACP_AGENTS",
+        "BUZZ_ACP_IDLE_TIMEOUT",
+        "BUZZ_ACP_MAX_TURN_DURATION",
+        "BUZZ_ACP_RESPOND_TO",
+        "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+    ):
+        assert key not in env_content
+
+
+def test_write_agent_files_emits_parallelism_idle_timeout_max_turn_duration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    agent = _agent().model_copy(
+        update={"parallelism": 3, "idle_timeout_seconds": 120, "max_turn_duration_seconds": 600}
+    )
+
+    write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert "BUZZ_ACP_AGENTS=3" in env_content
+    assert "BUZZ_ACP_IDLE_TIMEOUT=120" in env_content
+    assert "BUZZ_ACP_MAX_TURN_DURATION=600" in env_content
+
+
+def test_write_agent_files_sets_respond_to_allowlist_mode_when_list_non_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    agent = _agent().model_copy(update={"respond_to_allowlist": ["a" * 64, "b" * 64]})
+
+    write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert f"BUZZ_ACP_RESPOND_TO_ALLOWLIST={'a' * 64},{'b' * 64}" in env_content
+    assert "BUZZ_ACP_RESPOND_TO=allowlist" in env_content

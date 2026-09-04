@@ -146,6 +146,20 @@ def write_agent_files(
     ]
     if agent.team_instructions:
         lines.append(f"BUZZ_ACP_TEAM_INSTRUCTIONS={agent.team_instructions}")
+    if agent.model:
+        lines.append(f"BUZZ_ACP_MODEL={agent.model}")
+    if agent.parallelism is not None:
+        lines.append(f"BUZZ_ACP_AGENTS={agent.parallelism}")
+    if agent.idle_timeout_seconds is not None:
+        lines.append(f"BUZZ_ACP_IDLE_TIMEOUT={agent.idle_timeout_seconds}")
+    if agent.max_turn_duration_seconds is not None:
+        lines.append(f"BUZZ_ACP_MAX_TURN_DURATION={agent.max_turn_duration_seconds}")
+    if agent.respond_to_allowlist:
+        # buzz-acp only consults the allowlist when respond_to == "allowlist"
+        # (BUZZ_ACP_RESPOND_TO, default "owner-only") — set both together so
+        # the allowlist is never silently inert.
+        lines.append("BUZZ_ACP_RESPOND_TO=allowlist")
+        lines.append(f"BUZZ_ACP_RESPOND_TO_ALLOWLIST={','.join(agent.respond_to_allowlist)}")
     if anthropic_api_key:
         lines.append(f"ANTHROPIC_API_KEY={anthropic_api_key}")
     if openai_api_key:
