@@ -1737,7 +1737,6 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         table = app.screen.query_one("#agent-table")
-        rendered_rows = [tuple(str(c) for c in row) for row in table.rows.values()]
         assert ("laravel-dev", "Laravel-Dev", "claude", "RUNNING") in [
             tuple(str(v) for v in table.get_row_at(i)) for i in range(table.row_count)
         ]
@@ -1870,6 +1869,7 @@ git commit -m "Add Textual app shell with live-polling agent dashboard"
 ```python
 # tests/tui/test_agent_form.py
 import pytest
+from textual.widgets import Input
 
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
 from buzz_fleet.tui.app import BuzzFleetApp
@@ -1892,10 +1892,12 @@ async def test_submitting_form_calls_create_agent() -> None:
     async with app.run_test() as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
-        await pilot.click("#display-name-input")
-        await pilot.press(*"Test Agent")
-        await pilot.click("#prompt-input")
-        await pilot.press(*"You are a test agent.")
+        # Set values directly rather than simulating keystrokes: Textual's
+        # pilot.press() takes key *names* ("space", not a literal " "), so
+        # press(*"Test Agent") would break on the space in "Test Agent" —
+        # this is the standard way to fill an Input in a Textual test.
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
         await pilot.click("#submit-button")
         await pilot.pause()
 
