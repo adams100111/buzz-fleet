@@ -343,13 +343,68 @@ pub fn build_remove_member(target_pubkey_hex: &str) -> anyhow::Result<EventBuild
 Run: `cargo test`
 Expected: `test result: ok. 3 passed`
 
-- [ ] **Step 5: Wire the module and commit**
+- [ ] **Step 5: Wire the module**
 
 Add `mod events;` at the top of `signer/src/main.rs`.
 
+- [ ] **Step 6: Write the failing test for pubkey validation** (append to the `tests` module in `signer/src/events.rs`) — mirrors `buzz-sdk`'s own `check_hex_len` guard on its `9000`/`9001` builders, which these `9030`/`9031` builders otherwise lack entirely
+
+```rust
+    #[test]
+    fn add_member_rejects_short_pubkey() {
+        assert!(build_add_member("deadbeef", None).is_err());
+    }
+
+    #[test]
+    fn add_member_rejects_non_hex_pubkey() {
+        assert!(build_add_member(&"z".repeat(64), None).is_err());
+    }
+
+    #[test]
+    fn remove_member_rejects_malformed_pubkey() {
+        assert!(build_remove_member("not-hex").is_err());
+    }
+```
+
+Run: `cargo test`
+Expected: these three new tests fail (`unwrap()`/`is_err()` — currently `Tag::parse` happily accepts any string as a tag value, so no error is ever returned for a malformed pubkey).
+
+- [ ] **Step 7: Implement the validation**
+
+```rust
+fn check_pubkey_hex(target_pubkey_hex: &str) -> anyhow::Result<()> {
+    if target_pubkey_hex.len() != 64 || !target_pubkey_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid pubkey: expected 64 hex characters, got {target_pubkey_hex:?}");
+    }
+    Ok(())
+}
+
+pub fn build_add_member(target_pubkey_hex: &str, role: Option<&str>) -> anyhow::Result<EventBuilder> {
+    check_pubkey_hex(target_pubkey_hex)?;
+    let mut tags = vec![Tag::parse(["p", target_pubkey_hex])?];
+    if let Some(role) = role {
+        tags.push(Tag::parse(["role", role])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(RELAY_ADD_MEMBER), "").tags(tags))
+}
+
+pub fn build_remove_member(target_pubkey_hex: &str) -> anyhow::Result<EventBuilder> {
+    check_pubkey_hex(target_pubkey_hex)?;
+    let tags = vec![Tag::parse(["p", target_pubkey_hex])?];
+    Ok(EventBuilder::new(Kind::Custom(RELAY_REMOVE_MEMBER), "").tags(tags))
+}
+```
+
+- [ ] **Step 8: Run tests to verify they all pass**
+
+Run: `cargo test`
+Expected: `test result: ok. 6 passed`
+
+- [ ] **Step 9: Commit**
+
 ```bash
 git add signer/src/events.rs signer/src/main.rs
-git commit -m "Add pure kind:9030/9031 event builders for relay membership"
+git commit -m "Add pure kind:9030/9031 event builders with pubkey validation"
 ```
 
 ---
