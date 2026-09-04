@@ -10,6 +10,7 @@ dependencies = [
     "textual>=6.6",
     "pydantic>=2.9",
     "rich>=13.7",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
