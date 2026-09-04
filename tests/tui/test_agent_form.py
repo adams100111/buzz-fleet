@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input
+from textual.widgets import Input, Select
 
 from buzz_fleet.tui.app import BuzzFleetApp
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
@@ -140,4 +140,140 @@ async def test_submitting_blank_display_name_notifies_instead_of_crashing() -> N
         await pilot.pause()
 
         # The form screen is still on top — pop_screen was never reached.
+        assert isinstance(app.screen, AgentFormScreen)
+
+
+@pytest.mark.asyncio
+async def test_template_select_present_only_in_create_mode(tmp_path, monkeypatch) -> None:
+    from buzz_fleet import personas
+
+    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", tmp_path / "personas")
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        assert app.screen.query("#template-select")
+
+        await app.pop_screen()
+        from datetime import UTC, datetime
+
+        from buzz_fleet.models import Agent
+        from buzz_fleet.models import SystemPromptSource as SPS
+
+        existing = Agent(
+            id="x",
+            community_id="eltahir",
+            display_name="X",
+            harness="claude",
+            private_key="nsec1x",
+            public_key="a" * 64,
+            system_prompt_source=SPS(kind="inline", text="hi"),
+            created_at=datetime.now(UTC),
+        )
+        await app.push_screen(AgentFormScreen(manager, agent=existing))
+        await pilot.pause()
+        assert not app.screen.query("#template-select")
+
+
+@pytest.mark.asyncio
+async def test_selecting_template_prefills_and_overwrites_form_fields(tmp_path, monkeypatch) -> None:
+    from buzz_fleet import personas
+
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    (personas_dir / "laravel.persona.md").write_text(
+        "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\nmodel: claude-sonnet-5\n---\n"
+        "You are the Laravel dev.\n"
+    )
+    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Something Typed First"
+
+        # Only one template on disk, so it's index 0 — discover_personas globs
+        # .persona.md files (sorted) before .agent.json files, and the picker
+        # builds options as enumerate(self._templates). Avoid relying on any
+        # private Select attribute to read options back.
+        select = app.screen.query_one("#template-select", Select)
+        select.value = 0
+        await pilot.pause()
+
+        assert app.screen.query_one("#display-name-input", Input).value == "Laravel Backend Dev"
+        assert app.screen.query_one("#prompt-input", Input).value == "You are the Laravel dev.\n"
+        assert app.screen.query_one("#model-input", Input).value == "claude-sonnet-5"
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_passes_new_fields_to_create_agent() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
+        app.screen.query_one("#model-input", Input).value = "claude-sonnet-5"
+        app.screen.query_one("#parallelism-input", Input).value = "3"
+        app.screen.query_one("#idle-timeout-input", Input).value = "120"
+        app.screen.query_one("#max-turn-duration-input", Input).value = "600"
+        app.screen.query_one("#respond-to-allowlist-input", Input).value = f"{'a' * 64}, {'b' * 64}"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    assert len(manager.created) == 1
+    kwargs = manager.created[0]
+    assert kwargs["model"] == "claude-sonnet-5"
+    assert kwargs["parallelism"] == 3
+    assert kwargs["idle_timeout_seconds"] == 120
+    assert kwargs["max_turn_duration_seconds"] == 600
+    assert kwargs["respond_to_allowlist"] == ["a" * 64, "b" * 64]
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_with_blank_optional_fields_passes_none() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    kwargs = manager.created[0]
+    assert kwargs["model"] is None
+    assert kwargs["parallelism"] is None
+    assert kwargs["idle_timeout_seconds"] is None
+    assert kwargs["max_turn_duration_seconds"] is None
+    assert kwargs["respond_to_allowlist"] is None
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_with_non_numeric_parallelism_notifies_instead_of_crashing() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", Input).value = "hi"
+        app.screen.query_one("#parallelism-input", Input).value = "not-a-number"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+        # Accessed inside the pilot context: app.screen raises ScreenStackError
+        # once run_test() has torn down the app, so these must run before exit.
+        assert manager.created == []
         assert isinstance(app.screen, AgentFormScreen)
