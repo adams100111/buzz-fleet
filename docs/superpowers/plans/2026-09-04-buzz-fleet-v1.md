@@ -202,6 +202,20 @@ from buzz_fleet import __version__
 app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
 
 
+@app.callback(invoke_without_command=True)
+def _root() -> None:
+    """No-op root callback.
+
+    Required as long as this app has exactly one command: Typer/Click
+    collapses a single-command `Typer()` into "single-command mode" (the
+    whole CLI *becomes* that one command, so `--help` stops listing
+    `version` as a subcommand and `buzz-fleet version` fails with "Got
+    unexpected extra argument(s)"). A root callback disables that collapse.
+    Task 9 adds more top-level commands (`connect`, `agent`, `tui`), at
+    which point this callback becomes unnecessary but harmless — leave it.
+    """
+
+
 @app.command()
 def version() -> None:
     """Print the installed buzz-fleet version."""
