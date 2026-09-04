@@ -31,6 +31,28 @@ def test_connect_saves_community_on_success(tmp_path, monkeypatch) -> None:
     assert saved.relay_url == "wss://buzz.eltahir.me"
 
 
+def test_connect_prompts_for_admin_nsec_with_masked_input_when_omitted(tmp_path, monkeypatch) -> None:
+    """Regression test for Fix 6(a): --admin-nsec must be promptable (masked)
+    rather than required as a plain CLI argument, to keep the owner's nsec out
+    of shell history and /proc/<pid>/cmdline.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", lambda: FakeRunner())
+
+    result = runner_cli.invoke(
+        app,
+        ["connect", "--id", "eltahir", "--relay", "wss://buzz.eltahir.me"],
+        input="nsec1abc\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    from buzz_fleet.state import load_community
+
+    saved = load_community("eltahir")
+    assert saved is not None
+    assert saved.relay_admin_nsec.get_secret_value() == "nsec1abc"
+
+
 def test_agent_update_calls_manager_with_changes(monkeypatch) -> None:
     calls: dict[str, object] = {}
 

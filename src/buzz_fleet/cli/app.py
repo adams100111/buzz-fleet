@@ -7,9 +7,10 @@ from typing import Annotated
 
 import typer
 
-from buzz_fleet import signer_client, state
+from buzz_fleet import state
+from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
-from buzz_fleet.models import Community, SystemPromptSource
+from buzz_fleet.models import SystemPromptSource
 from buzz_fleet.proc import RealCommandRunner
 
 app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
@@ -21,13 +22,19 @@ app.add_typer(agent_app, name="agent")
 def connect(
     id: Annotated[str, typer.Option(help="Local id for this community, e.g. 'eltahir'")],
     relay: Annotated[str, typer.Option(help="Relay URL, e.g. wss://buzz.eltahir.me")],
-    admin_nsec: Annotated[str, typer.Option(help="Your own owner/admin nsec")],
+    admin_nsec: Annotated[
+        str,
+        typer.Option(
+            prompt=True,
+            hide_input=True,
+            help="Your own owner/admin nsec (prompted with masked input if omitted)",
+        ),
+    ],
 ) -> None:
     runner = RealCommandRunner()
-    if not signer_client.check_connection(runner, relay, admin_nsec):
+    if not connect_and_save(runner, id, relay, admin_nsec):
         typer.echo("Could not authenticate against that relay with that key.", err=True)
         raise typer.Exit(code=1)
-    state.save_community(Community(id=id, relay_url=relay, relay_admin_nsec=admin_nsec))
     typer.echo(f"Connected and saved community '{id}'.")
 
 
