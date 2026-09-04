@@ -519,11 +519,16 @@ async fn run_publish(
     let keys = Keys::parse(admin_nsec)?;
     let event = builder?.sign_with_keys(&keys)?;
     let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, None).await?;
-    conn.send_event(event).await?;
+    let response = conn.send_event(event).await?;
     conn.disconnect().await?;
+    if !response.accepted {
+        anyhow::bail!("relay rejected event: {}", response.message);
+    }
     Ok(())
 }
 ```
+
+**Why the explicit `accepted` check matters:** `NostrWsConnection::send_event` returns `Ok(OkResponse { accepted: false, .. })` — not `Err` — when the relay *rejects* the event (e.g. wrong role, "actor not authorized"). Discarding the response with a bare `conn.send_event(event).await?;` would make `add-member`/`remove-member` print `{"ok":true}` even when the relay refused the operation, silently leaving `AgentManager` to believe an agent is a real relay member when it never was.
 
 - [ ] **Step 3: Build**
 
@@ -546,11 +551,22 @@ BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
 
 Expected: the lookup succeeds (member exists) where it would have 404'd before. Then run `remove-member` with the same pubkey and confirm the lookup fails again.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Manual verification — confirm a relay-side rejection is reported as failure, not swallowed as success**
+
+Run the same `add-member` command but sign with a throwaway key that has never been given admin/owner role on that community:
+
+```bash
+cargo run -- generate-key   # a second throwaway key, used here only as a bogus "admin"
+cargo run -- add-member --relay wss://buzz.eltahir.me --admin-nsec <that bogus key's nsec> --pubkey <any hex pubkey>
+```
+
+Expected: `{"ok":false,"error":"relay rejected event: actor not authorized: must be admin or owner"}` and a non-zero exit code — **not** `{"ok":true}`. This is the regression check for the `OkResponse.accepted` fix above; if it ever prints `{"ok":true}` here, the fix was reverted or bypassed.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add signer/src/main.rs
-git commit -m "Add add-member/remove-member commands to buzz-fleet-signer"
+git commit -m "Add add-member/remove-member commands; treat relay rejection as failure, not silent success"
 ```
 
 ---
