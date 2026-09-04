@@ -1,6 +1,16 @@
 import subprocess
 
-from buzz_fleet.systemctl_client import AgentStatus, enable_now, restart, status, tail_logs
+import pytest
+
+from buzz_fleet.systemctl_client import (
+    AgentStatus,
+    disable_now,
+    enable_now,
+    restart,
+    status,
+    stop,
+    tail_logs,
+)
 
 
 class FakeRunner:
@@ -46,3 +56,32 @@ def test_tail_logs_returns_stdout() -> None:
     output = tail_logs(runner, "laravel-backend-dev", lines=50)
     assert output == "log line 1\nlog line 2\n"
     assert runner.calls == [["journalctl", "--user", "-u", "buzz-agent@laravel-backend-dev", "-n", "50", "--no-pager"]]
+
+
+# Regression tests for Fix 5(a): a failed systemctl call must not be silently
+# swallowed — create_agent would otherwise report success even when the unit
+# never actually started.
+
+
+def test_enable_now_raises_on_nonzero_returncode() -> None:
+    runner = FakeRunner(returncode=1)
+    with pytest.raises(RuntimeError):
+        enable_now(runner, "laravel-backend-dev")
+
+
+def test_disable_now_raises_on_nonzero_returncode() -> None:
+    runner = FakeRunner(returncode=1)
+    with pytest.raises(RuntimeError):
+        disable_now(runner, "laravel-backend-dev")
+
+
+def test_restart_raises_on_nonzero_returncode() -> None:
+    runner = FakeRunner(returncode=1)
+    with pytest.raises(RuntimeError):
+        restart(runner, "laravel-backend-dev")
+
+
+def test_stop_raises_on_nonzero_returncode() -> None:
+    runner = FakeRunner(returncode=1)
+    with pytest.raises(RuntimeError):
+        stop(runner, "laravel-backend-dev")

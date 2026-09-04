@@ -18,20 +18,26 @@ def _unit(agent_id: str) -> str:
     return f"buzz-agent@{agent_id}"
 
 
+def _run_or_raise(runner: CommandRunner, args: list[str]) -> None:
+    result = runner.run(args)
+    if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(args)} failed: {result.stderr}")
+
+
 def enable_now(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "--user", "enable", "--now", _unit(agent_id)])
+    _run_or_raise(runner, ["systemctl", "--user", "enable", "--now", _unit(agent_id)])
 
 
 def disable_now(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "--user", "disable", "--now", _unit(agent_id)])
+    _run_or_raise(runner, ["systemctl", "--user", "disable", "--now", _unit(agent_id)])
 
 
 def restart(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "--user", "restart", _unit(agent_id)])
+    _run_or_raise(runner, ["systemctl", "--user", "restart", _unit(agent_id)])
 
 
 def stop(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "--user", "stop", _unit(agent_id)])
+    _run_or_raise(runner, ["systemctl", "--user", "stop", _unit(agent_id)])
 
 
 _STATE_MAP = {
