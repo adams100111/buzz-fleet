@@ -197,7 +197,15 @@ from __future__ import annotations
 
 import typer
 
+from buzz_fleet import __version__
+
 app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
+
+
+@app.command()
+def version() -> None:
+    """Print the installed buzz-fleet version."""
+    typer.echo(__version__)
 
 
 def main() -> None:
@@ -207,6 +215,8 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
+
+(The `version` command exists only so this stub Typer app has at least one registered command — a Typer app with zero commands raises `RuntimeError: Could not get a command for this Typer instance` on later Typer/Click versions when invoked at all, including `--help`. Task 9 replaces this file's content wholesale once the real `connect`/`agent`/`tui` commands exist, at which point this placeholder is gone — it is not meant to survive past Task 1.)
 
 - [ ] **Step 7: Write `.gitignore`**
 
@@ -239,8 +249,8 @@ for the implementation plan and the linked design spec for the "why".
 
 - [ ] **Step 9: Verify the Python side runs**
 
-Run: `uv sync && uv run buzz-fleet --help`
-Expected: Typer prints usage help, exit code 0.
+Run: `uv sync && uv run buzz-fleet --help` and `uv run buzz-fleet version`
+Expected: `--help` prints usage help listing the `version` command, exit code 0; `version` prints `0.1.0`.
 
 - [ ] **Step 10: Commit**
 
