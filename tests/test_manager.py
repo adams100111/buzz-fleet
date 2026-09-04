@@ -2,8 +2,11 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Community, SystemPromptSource
+from buzz_fleet.systemd import agent_env_path, agent_prompt_path
 
 
 class FakeRunner:
@@ -84,3 +87,73 @@ def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatc
     assert add_member_calls_after == add_member_calls_before
     assert ["systemctl", "--user", "restart", "buzz-agent@throwaway"] in runner.calls
     assert updated.system_prompt_source.text == "y"
+
+
+def test_create_agent_with_missing_persona_file_fails_before_add_member(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for Fix 3.
+
+    A missing/invalid persona_file path must fail loudly before any relay-side
+    effect (add-member) happens — otherwise the relay membership is published
+    but never recorded locally, orphaning it with no way to revoke it.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+
+    with pytest.raises(FileNotFoundError):
+        manager.create_agent(
+            display_name="Broken Persona",
+            harness="claude",
+            system_prompt_source=SystemPromptSource(kind="persona_file", path=Path("/nonexistent/persona.md")),
+        )
+
+    assert not any("add-member" in c for c in runner.calls)
+
+
+def test_delete_agent_removes_env_and_prompt_files(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for Fix 4: deleting an agent must remove its
+    private-key-bearing .env file and its .prompt.md file, not just the state
+    JSON — otherwise the secret survives "deletion" on disk.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Throwaway",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    assert agent_env_path(agent.id).exists()
+    assert agent_prompt_path(agent.id).exists()
+
+    manager.delete_agent(agent.id)
+
+    assert not agent_env_path(agent.id).exists()
+    assert not agent_prompt_path(agent.id).exists()
+
+
+def test_update_agent_preserves_previously_set_api_keys(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for Fix 9: update_agent must not wipe a previously-set
+    ANTHROPIC_API_KEY/OPENAI_API_KEY when the update doesn't touch keys at all.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Keyed Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        anthropic_api_key="sk-ant-test",
+    )
+    assert "ANTHROPIC_API_KEY=sk-ant-test" in agent_env_path(agent.id).read_text()
+
+    manager.update_agent(agent.id, display_name="Keyed Agent Renamed")
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert "ANTHROPIC_API_KEY=sk-ant-test" in env_content

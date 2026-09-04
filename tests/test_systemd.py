@@ -1,6 +1,6 @@
 import stat
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from buzz_fleet.models import Agent, Community, SystemPromptSource
@@ -24,7 +24,7 @@ def _agent() -> Agent:
         system_prompt_source=SystemPromptSource(kind="inline", text="You are the Laravel dev."),
         team_instructions="Team-wide rules here.",
         model=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 

@@ -2,12 +2,33 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from buzz_fleet import signer_client, state, systemctl_client, systemd
 from buzz_fleet.models import Agent, Community, SystemPromptSource
 from buzz_fleet.proc import CommandRunner
 from buzz_fleet.slug import agent_slug
+
+_ENV_KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+
+
+def _read_existing_env_keys(agent_id: str) -> dict[str, str]:
+    """Best-effort parse of an existing agent .env file for keys write_agent_files
+
+    would otherwise clobber with None on every update (Fix 9). A simple
+    line-parse is sufficient here — this isn't a general env-file parser.
+    """
+    path = systemd.agent_env_path(agent_id)
+    if not path.exists():
+        return {}
+    found: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key in _ENV_KEY_NAMES:
+            found[key] = value
+    return found
 
 
 class AgentManager:
@@ -45,8 +66,16 @@ class AgentManager:
             system_prompt_source=system_prompt_source,
             team_instructions=team_instructions,
             model=model,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
+
+        # Resolve (and thereby validate) the prompt source BEFORE publishing
+        # relay membership. A missing/invalid persona_file path must fail loudly
+        # here, before any relay-side effect happens — otherwise add_member below
+        # publishes a real kind:9030 event for a member that never gets recorded
+        # locally (write_agent_files failing after add_member would orphan it,
+        # with no local record of the secret key to ever revoke it). See Fix 3.
+        systemd.resolve_prompt_text(agent)
 
         signer_client.add_member(
             self._runner,
@@ -64,7 +93,16 @@ class AgentManager:
         agents = {a.id: a for a in self.list_agents()}
         current = agents[agent_id]
         updated = current.model_copy(update=changes)
-        systemd.write_agent_files(updated, self._community, anthropic_api_key=None, openai_api_key=None)
+        # Preserve any previously-set API keys instead of wiping them on every
+        # update — write_agent_files takes explicit key args rather than
+        # merging, so we read the existing .env file forward here (Fix 9).
+        existing_keys = _read_existing_env_keys(agent_id)
+        systemd.write_agent_files(
+            updated,
+            self._community,
+            anthropic_api_key=existing_keys.get("ANTHROPIC_API_KEY"),
+            openai_api_key=existing_keys.get("OPENAI_API_KEY"),
+        )
         systemctl_client.restart(self._runner, agent_id)
         state.save_agent(updated)
         return updated
@@ -80,3 +118,9 @@ class AgentManager:
             agent.public_key,
         )
         state.delete_agent(self._community.id, agent_id)
+        # Remove the private-key-bearing env file and the persona prompt file —
+        # without this the secret key survives "deletion" on disk, and a stale
+        # env file could be silently reused by a future agent with the same
+        # slug (Fix 4).
+        systemd.agent_env_path(agent_id).unlink(missing_ok=True)
+        systemd.agent_prompt_path(agent_id).unlink(missing_ok=True)

@@ -78,7 +78,14 @@ def _write_secure(path: Path, content: str) -> None:
         os.close(fd)
 
 
-def _resolve_prompt_text(agent: Agent) -> str:
+def resolve_prompt_text(agent: Agent) -> str:
+    """Resolve an agent's system prompt text, reading from disk for persona_file sources.
+
+    Exported (not module-private) so callers like AgentManager.create_agent can
+    validate a persona_file path *before* triggering any side effects (e.g.
+    publishing relay membership) that would be awkward to undo if the file
+    turns out to be missing or unreadable.
+    """
     source = agent.system_prompt_source
     if source.kind == "inline":
         assert source.text is not None
@@ -94,7 +101,7 @@ def write_agent_files(
     openai_api_key: str | None,
 ) -> None:
     prompt_path = agent_prompt_path(agent.id)
-    _write_secure(prompt_path, _resolve_prompt_text(agent))
+    _write_secure(prompt_path, resolve_prompt_text(agent))
 
     lines = [
         f"BUZZ_PRIVATE_KEY={agent.private_key.get_secret_value()}",
