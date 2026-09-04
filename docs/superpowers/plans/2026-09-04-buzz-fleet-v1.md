@@ -372,7 +372,7 @@ mod events;
 
 use clap::{Parser, Subcommand};
 use nostr::Keys;
-use nostr::key::ToBech32;
+use nostr::nips::nip19::ToBech32;
 use buzz_ws_client::connection::NostrWsConnection;
 use serde_json::json;
 
