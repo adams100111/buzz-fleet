@@ -17,6 +17,8 @@ def _base_slug(display_name: str) -> str:
 
 def agent_slug(display_name: str, existing_ids: set[str]) -> str:
     base = _base_slug(display_name)
+    if not base:
+        raise ValueError("display_name must contain at least one alphanumeric character")
     if base not in existing_ids:
         return base
     suffix = 2

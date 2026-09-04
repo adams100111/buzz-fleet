@@ -1,3 +1,5 @@
+import pytest
+
 from buzz_fleet.slug import agent_slug
 
 
@@ -14,3 +16,13 @@ def test_dedupes_collisions_with_numeric_suffix() -> None:
     assert agent_slug("React Dev", existing_ids=existing) == "react-dev-2"
     existing.add("react-dev-2")
     assert agent_slug("React Dev", existing_ids=existing) == "react-dev-3"
+
+
+def test_empty_display_name_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        agent_slug("", existing_ids=set())
+
+
+def test_display_name_with_only_invalid_characters_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="alphanumeric"):
+        agent_slug("!!!", existing_ids=set())
