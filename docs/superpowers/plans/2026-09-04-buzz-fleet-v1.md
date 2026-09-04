@@ -638,32 +638,14 @@ async fn run_publish(
 Run: `cargo build`
 Expected: builds cleanly.
 
-- [ ] **Step 4: Manual verification against the real community**
+- [ ] **Step 4: Why this task's live-relay checks are deferred to Task 12, not run here**
 
-```bash
-cargo run -- generate-key   # capture a throwaway test pubkey/nsec
-cargo run -- add-member --relay wss://buzz.eltahir.me --admin-nsec <owner nsec> --pubkey <throwaway hex pubkey>
-```
+`add-member`/`remove-member` publish real `kind:9030`/`9031` events, and *authorization* for them (the exact thing Step 5 below needs to prove) is enforced by Buzz's own relay code (`crates/buzz-relay/src/handlers/relay_admin.rs`) — a generic public Nostr relay (unlike the plain NIP-42 auth check in Task 3) doesn't know what kind `9030` means and would just accept it as an arbitrary custom-kind event, so it cannot exercise the real rejection path. The only way to test the real behavior is against an actual Buzz relay — either a real community (requiring the owner/admin's real nsec) or a locally-run throwaway Buzz relay (requiring Postgres/Redis and the relay's own dev setup). Neither belongs in a task dispatch: no subagent is ever given the real community's admin key, and standing up a full local relay stack is out of scope for this task. **Both the positive path (a real add actually registers a member) and the negative path (a non-admin's add is really rejected, not swallowed) are verified once, for real, in Task 12** — against the real community, with a human supplying the real key at that time. This task's own verification is limited to Step 2 (build) and Step 3 below (existing unit tests still pass) — that's the correct scope here, not a shortcut.
 
-Expected: `{"ok":true}`. Confirm via the existing `buzz` CLI from `/home/dev/apps/buzz`:
+- [ ] **Step 5: Run the existing test suite to confirm nothing broke**
 
-```bash
-BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
-  ./target/release/buzz users lookup --pubkey <throwaway hex pubkey>
-```
-
-Expected: the lookup succeeds (member exists) where it would have 404'd before. Then run `remove-member` with the same pubkey and confirm the lookup fails again.
-
-- [ ] **Step 5: Manual verification — confirm a relay-side rejection is reported as failure, not swallowed as success**
-
-Run the same `add-member` command but sign with a throwaway key that has never been given admin/owner role on that community:
-
-```bash
-cargo run -- generate-key   # a second throwaway key, used here only as a bogus "admin"
-cargo run -- add-member --relay wss://buzz.eltahir.me --admin-nsec <that bogus key's nsec> --pubkey <any hex pubkey>
-```
-
-Expected: `{"ok":false,"error":"relay rejected event: actor not authorized: must be admin or owner"}` and a non-zero exit code — **not** `{"ok":true}`. This is the regression check for the `OkResponse.accepted` fix above; if it ever prints `{"ok":true}` here, the fix was reverted or bypassed.
+Run: `cargo test`
+Expected: the 6 tests from Task 2 (`events.rs`) still pass — this task added no new automated tests of its own (network commands, covered by Task 12 instead).
 
 - [ ] **Step 6: Commit**
 
@@ -2172,13 +2154,24 @@ sudo install -m 0755 target/release/buzz-fleet-signer /usr/local/bin/buzz-fleet-
 
 (`buzz-fleet-signer` itself is installed system-wide with `sudo` here only because `/usr/local/bin` is root-owned by default — it is a static binary with no special privileges at runtime; everything it does, it does as whichever user invokes it.)
 
-- [ ] **Step 2: Install the Python package**
+- [ ] **Step 2: Confirm a relay-side rejection is reported as failure, not swallowed as success**
+
+This is the one live-relay check Task 4 deliberately deferred to here (no subagent is ever given the real community's admin key). Sign with a throwaway key that has never been given admin/owner role on this community:
+
+```bash
+buzz-fleet-signer generate-key   # a throwaway key, used here only as a bogus "admin"
+buzz-fleet-signer add-member --relay wss://buzz.eltahir.me --admin-nsec <that bogus key's nsec> --pubkey <any 64-hex pubkey>
+```
+
+Expected: `{"ok":false,"error":"relay rejected event: actor not authorized: must be admin or owner"}` and a non-zero exit code — **not** `{"ok":true}`. This is the regression check for the `OkResponse.accepted` fix in Task 4; if it ever prints `{"ok":true}` here, that fix was reverted or bypassed.
+
+- [ ] **Step 3: Install the Python package**
 
 ```bash
 cd /home/dev/apps/buzz-fleet && uv sync
 ```
 
-- [ ] **Step 3: Connect to the real community**
+- [ ] **Step 4: Connect to the real community**
 
 ```bash
 uv run buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me --admin-nsec <the real owner nsec>
@@ -2186,7 +2179,7 @@ uv run buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me --admin-nse
 
 Expected: `Connected and saved community 'eltahir'.`
 
-- [ ] **Step 4: Create a throwaway test agent**
+- [ ] **Step 5: Create a throwaway test agent**
 
 ```bash
 echo "You are a disposable test agent. Reply 'pong' to any @mention." > /tmp/test-agent-prompt.md
@@ -2203,16 +2196,16 @@ BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
 
 Expected: lookup succeeds — the agent is really a relay member, not just recorded locally.
 
-- [ ] **Step 5: Confirm the systemd unit is live**
+- [ ] **Step 6: Confirm the systemd unit is live**
 
 ```bash
 systemctl --user status buzz-agent@test-echo
 journalctl --user -u buzz-agent@test-echo -n 50 --no-pager
 ```
 
-Expected: `active (running)`; logs show `buzz-acp` connecting to the relay (note: `ANTHROPIC_API_KEY` was not passed in Step 4 — expect the agent process to fail fast on missing credentials; that's the correct failure mode to see here, confirming the unit and env file wiring work even before a real API key is supplied. Re-run Step 4 with a real key, or manually add `ANTHROPIC_API_KEY=...` to `~/.config/buzz-fleet/agents/test-echo.env` and `systemctl --user restart buzz-agent@test-echo`, to see it actually connect and idle waiting for mentions).
+Expected: `active (running)`; logs show `buzz-acp` connecting to the relay (note: `ANTHROPIC_API_KEY` was not passed in Step 5 — expect the agent process to fail fast on missing credentials; that's the correct failure mode to see here, confirming the unit and env file wiring work even before a real API key is supplied. Re-run Step 5 with a real key, or manually add `ANTHROPIC_API_KEY=...` to `~/.config/buzz-fleet/agents/test-echo.env` and `systemctl --user restart buzz-agent@test-echo`, to see it actually connect and idle waiting for mentions).
 
-- [ ] **Step 6: Launch the TUI and confirm the dashboard shows it**
+- [ ] **Step 7: Launch the TUI and confirm the dashboard shows it**
 
 ```bash
 uv run buzz-fleet tui
@@ -2220,18 +2213,18 @@ uv run buzz-fleet tui
 
 Expected: dashboard lists `test-echo | Test Echo | claude | RUNNING`. Press `l` on that row to confirm the log viewer shows the same `journalctl` output as Step 5.
 
-- [ ] **Step 7: Delete the throwaway agent and confirm full teardown**
+- [ ] **Step 8: Delete the throwaway agent and confirm full teardown**
 
 ```bash
 uv run buzz-fleet agent delete --community eltahir test-echo
 systemctl --user status buzz-agent@test-echo   # expect: inactive/not-found
 BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
-  ./target/release/buzz users lookup --pubkey <the pubkey from step 4>
+  ./target/release/buzz users lookup --pubkey <the pubkey from step 5>
 ```
 
 Expected: the second lookup now fails — membership was actually revoked, not just deleted locally.
 
-- [ ] **Step 8: Update `README.md`** with the real install/usage flow validated above (systemd unit prerequisites, `buzz-fleet-signer` on `PATH`, `connect`/`agent create`/`tui` commands), then commit.
+- [ ] **Step 9: Update `README.md`** with the real install/usage flow validated above (systemd unit prerequisites, `buzz-fleet-signer` on `PATH`, `connect`/`agent create`/`tui` commands), then commit.
 
 ```bash
 git add README.md
