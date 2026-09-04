@@ -70,7 +70,11 @@ def agent_create(
             parallelism=parallelism,
             idle_timeout_seconds=idle_timeout_seconds,
             max_turn_duration_seconds=max_turn_duration_seconds,
-            respond_to_allowlist=respond_to_allowlist.split(",") if respond_to_allowlist else None,
+            respond_to_allowlist=(
+                [key.strip() for key in respond_to_allowlist.split(",") if key.strip()] or None
+                if respond_to_allowlist
+                else None
+            ),
         )
     except ValueError as e:
         # e.g. a blank/punctuation-only --display-name (agent_slug raises)
@@ -124,7 +128,11 @@ def agent_update(
     if max_turn_duration_seconds is not None:
         changes["max_turn_duration_seconds"] = max_turn_duration_seconds
     if respond_to_allowlist is not None:
-        changes["respond_to_allowlist"] = respond_to_allowlist.split(",")
+        changes["respond_to_allowlist"] = (
+            [key.strip() for key in respond_to_allowlist.split(",") if key.strip()] or None
+            if respond_to_allowlist
+            else None
+        )
     if not changes:
         typer.echo("Nothing to update — pass at least one field to change.", err=True)
         raise typer.Exit(code=1)

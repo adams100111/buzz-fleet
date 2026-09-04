@@ -146,3 +146,34 @@ def test_discover_personas_counts_png_and_unparseable_files_as_skipped(tmp_path:
 
     assert templates == []
     assert skipped == 2
+
+
+def test_parse_persona_md_returns_none_for_invalid_utf8(tmp_path: Path) -> None:
+    """Regression test: a binary file mis-named `*.persona.md` must be
+    silently skipped (return None), never raise UnicodeDecodeError — that
+    would crash the whole create-agent TUI screen (discover_personas is
+    called synchronously from AgentFormScreen.compose()).
+    """
+    path = tmp_path / "broken.persona.md"
+    path.write_bytes(b"\xff\xfe\x00not valid utf-8 \x80\x81")
+
+    assert parse_persona_md(path) is None
+
+
+def test_parse_agent_json_returns_none_for_invalid_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "broken.agent.json"
+    path.write_bytes(b"\xff\xfe\x00not valid utf-8 \x80\x81")
+
+    assert parse_agent_json(path) is None
+
+
+def test_discover_personas_counts_invalid_utf8_files_as_skipped_not_a_crash(tmp_path: Path) -> None:
+    root = tmp_path / "personas"
+    root.mkdir(parents=True)
+    (root / "broken.persona.md").write_bytes(b"\xff\xfe\x00not valid utf-8 \x80\x81")
+    (root / "broken.agent.json").write_bytes(b"\xff\xfe\x00not valid utf-8 \x80\x81")
+
+    templates, skipped = discover_personas(root)
+
+    assert templates == []
+    assert skipped == 2

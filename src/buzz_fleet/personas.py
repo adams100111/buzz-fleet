@@ -35,7 +35,10 @@ class PersonaTemplate(BaseModel):
 
 
 def parse_persona_md(path: Path) -> PersonaTemplate | None:
-    raw = path.read_text()
+    try:
+        raw = path.read_text()
+    except (UnicodeDecodeError, OSError):
+        return None
     if not raw.startswith("---\n"):
         return None
     closing = raw.find("\n---\n", 4)
@@ -67,7 +70,7 @@ def parse_persona_md(path: Path) -> PersonaTemplate | None:
 def parse_agent_json(path: Path) -> PersonaTemplate | None:
     try:
         raw = json.loads(path.read_text())
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
     if not isinstance(raw, dict):
         return None
