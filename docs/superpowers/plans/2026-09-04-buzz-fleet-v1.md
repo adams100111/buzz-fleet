@@ -77,6 +77,7 @@ Each Python module has one responsibility: `state.py` never shells out, `signer_
 - Create: `signer/src/main.rs`
 - Create: `pyproject.toml`
 - Create: `src/buzz_fleet/__init__.py`
+- Create: `src/buzz_fleet/cli/__init__.py`
 - Create: `src/buzz_fleet/cli/app.py`
 - Create: `.gitignore`
 - Create: `README.md`
@@ -185,7 +186,9 @@ src = ["src", "tests"]
 __version__ = "0.1.0"
 ```
 
-- [ ] **Step 6: Write `src/buzz_fleet/cli/app.py`**
+- [ ] **Step 6: Write `src/buzz_fleet/cli/__init__.py` (empty) and `src/buzz_fleet/cli/app.py`**
+
+`src/buzz_fleet/cli/__init__.py` is empty — its only job is to make `cli/` an explicit regular package rather than relying on implicit namespace-package discovery, matching how `src/buzz_fleet/__init__.py` already does this for the top-level package.
 
 ```python
 """The buzz-fleet Typer CLI."""
@@ -927,9 +930,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from buzz_fleet.models import Agent, Community
-from buzz_fleet.proc import CommandRunner
+
+if TYPE_CHECKING:
+    # Task 7 creates buzz_fleet.proc; guard this import so Task 6 doesn't
+    # depend on a module that doesn't exist yet at runtime — only the type
+    # checker needs it, `ensure_template_unit_installed` only calls
+    # `runner.run(...)` (duck-typed).
+    from buzz_fleet.proc import CommandRunner
 
 AGENTS_DIR = Path.home() / ".config" / "buzz-fleet" / "agents"
 TEMPLATE_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / "buzz-agent@.service"
@@ -1746,6 +1756,8 @@ git commit -m "Add connect/agent CLI commands wrapping AgentManager"
 ### Task 10: Textual TUI — app shell with live agent dashboard
 
 **Files:**
+- Create: `src/buzz_fleet/tui/__init__.py` (empty)
+- Create: `src/buzz_fleet/tui/screens/__init__.py` (empty)
 - Create: `src/buzz_fleet/tui/app.py`
 - Create: `src/buzz_fleet/tui/screens/connect.py`
 - Create: `src/buzz_fleet/tui/screens/dashboard.py`
@@ -1755,7 +1767,11 @@ git commit -m "Add connect/agent CLI commands wrapping AgentManager"
 - Consumes: `AgentManager.list_agents` (Task 8), `systemctl_client.status` (Task 7), `state.load_community` (Task 5).
 - Produces: `BuzzFleetApp` (Textual `App`), `DashboardScreen` with a `DataTable` of `id | display_name | harness | status`, refreshed via a `@work` background poller.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Create empty `src/buzz_fleet/tui/__init__.py` and `src/buzz_fleet/tui/screens/__init__.py`**
+
+Explicit regular packages, matching `src/buzz_fleet/__init__.py` and `src/buzz_fleet/cli/__init__.py` (Task 1) — not relying on implicit namespace-package discovery.
+
+- [ ] **Step 2: Write the failing test**
 
 ```python
 # tests/tui/test_dashboard.py
@@ -1797,12 +1813,12 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
         ]
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 3: Run to verify it fails**
 
 Run: `uv run pytest tests/tui/test_dashboard.py -v`
 Expected: `ModuleNotFoundError: No module named 'buzz_fleet.tui.app'`.
 
-- [ ] **Step 3: Implement `src/buzz_fleet/tui/screens/dashboard.py`**
+- [ ] **Step 4: Implement `src/buzz_fleet/tui/screens/dashboard.py`**
 
 ```python
 """Live agent dashboard: a table of agents polled from systemctl status."""
@@ -1850,7 +1866,7 @@ class DashboardScreen(Screen):
             table.add_row(agent.id, agent.display_name, agent.harness, agent_status(agent.id))
 ```
 
-- [ ] **Step 4: Implement `src/buzz_fleet/tui/screens/connect.py`** (stub screen, wired fully in Task 11 — needed now only so `BuzzFleetApp` has a first screen)
+- [ ] **Step 5: Implement `src/buzz_fleet/tui/screens/connect.py`** (stub screen, wired fully in Task 11 — needed now only so `BuzzFleetApp` has a first screen)
 
 ```python
 """Connect screen — collects relay URL + admin nsec, reuses buzz_fleet.cli connect logic."""
@@ -1869,7 +1885,7 @@ class ConnectScreen(Screen):
         yield Footer()
 ```
 
-- [ ] **Step 5: Implement `src/buzz_fleet/tui/app.py`**
+- [ ] **Step 6: Implement `src/buzz_fleet/tui/app.py`**
 
 ```python
 """BuzzFleetApp — the Textual application shell."""
@@ -1886,19 +1902,19 @@ class BuzzFleetApp(App):
         self.push_screen(DashboardScreen())
 ```
 
-- [ ] **Step 6: Add `pytest-asyncio` config** so `@pytest.mark.asyncio` tests run — append to `pyproject.toml`:
+- [ ] **Step 7: Add `pytest-asyncio` config** so `@pytest.mark.asyncio` tests run — append to `pyproject.toml`:
 
 ```toml
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 ```
 
-- [ ] **Step 7: Run to verify it passes**
+- [ ] **Step 8: Run to verify it passes**
 
 Run: `uv run pytest tests/tui/test_dashboard.py -v`
 Expected: `1 passed`.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/buzz_fleet/tui pyproject.toml tests/tui/test_dashboard.py
