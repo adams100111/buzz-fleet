@@ -69,6 +69,28 @@ def agent_delete(community: Annotated[str, typer.Option()], agent_id: Annotated[
     typer.echo(f"Deleted agent '{agent_id}'.")
 
 
+@agent_app.command("update")
+def agent_update(
+    community: Annotated[str, typer.Option()],
+    agent_id: Annotated[str, typer.Argument()],
+    display_name: Annotated[str | None, typer.Option()] = None,
+    prompt_file: Annotated[
+        Path | None, typer.Option(help="Replace the system prompt with this persona/prompt file")
+    ] = None,
+) -> None:
+    manager = _load_manager(community)
+    changes: dict[str, object] = {}
+    if display_name is not None:
+        changes["display_name"] = display_name
+    if prompt_file is not None:
+        changes["system_prompt_source"] = SystemPromptSource(kind="persona_file", path=prompt_file)
+    if not changes:
+        typer.echo("Nothing to update — pass --display-name and/or --prompt-file.", err=True)
+        raise typer.Exit(code=1)
+    updated = manager.update_agent(agent_id, **changes)
+    typer.echo(f"Updated agent '{updated.id}'.")
+
+
 @app.command()
 def tui() -> None:
     from buzz_fleet.tui.app import BuzzFleetApp
