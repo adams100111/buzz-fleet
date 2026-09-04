@@ -1,0 +1,16 @@
+[package]
+name = "buzz-fleet-signer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "buzz-fleet-signer"
+path = "src/main.rs"
+
+[dependencies]
+nostr = { version = "0.44", features = ["nip44", "nip98"] }
+buzz-ws-client = { git = "https://github.com/block/buzz" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
+serde_json = "1"

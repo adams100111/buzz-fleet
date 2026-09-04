@@ -1,0 +1,36 @@
+[project]
+name = "buzz-fleet"
+version = "0.1.0"
+description = "TUI for managing headless Buzz agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.15",
+    "textual>=6.6",
+    "pydantic>=2.9",
+    "rich>=13.7",
+]
+
+[project.scripts]
+buzz-fleet = "buzz_fleet.cli.app:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.13",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
