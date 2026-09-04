@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import pytest
 from textual.widgets import Input
 
-from buzz_fleet.tui.screens.agent_form import AgentFormScreen
 from buzz_fleet.tui.app import BuzzFleetApp
+from buzz_fleet.tui.screens.agent_form import AgentFormScreen
 
 
 class FakeManager:
@@ -42,7 +44,7 @@ async def test_submitting_form_calls_create_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_submitting_form_in_edit_mode_calls_update_agent() -> None:
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
 
     from buzz_fleet.models import Agent, SystemPromptSource
 
@@ -55,7 +57,7 @@ async def test_submitting_form_in_edit_mode_calls_update_agent() -> None:
         private_key="nsec1x",
         public_key="a" * 64,
         system_prompt_source=SystemPromptSource(kind="inline", text="old prompt"),
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     app = BuzzFleetApp()
 
@@ -73,3 +75,44 @@ async def test_submitting_form_in_edit_mode_calls_update_agent() -> None:
     agent_id, changes = manager.updated[0]
     assert agent_id == "laravel-dev"
     assert changes["system_prompt_source"].text == "new prompt"
+
+
+@pytest.mark.asyncio
+async def test_editing_only_display_name_does_not_touch_persona_file_prompt() -> None:
+    """Regression test for Fix 1.
+
+    Every CLI-created agent uses kind="persona_file". Opening it in the TUI
+    edit form and changing only the display name must NOT destroy its persona
+    file by silently sending an empty inline prompt in the update.
+    """
+    from datetime import UTC, datetime
+
+    from buzz_fleet.models import Agent, SystemPromptSource
+
+    manager = FakeManager()
+    existing = Agent(
+        id="laravel-dev",
+        community_id="eltahir",
+        display_name="Laravel Dev",
+        harness="claude",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="persona_file", path=Path("/some/persona.md")),
+        created_at=datetime.now(UTC),
+    )
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager, agent=existing))
+        await pilot.pause()
+        # persona_file agents never get their prompt Input pre-filled.
+        assert app.screen.query_one("#prompt-input", Input).value == ""
+        app.screen.query_one("#display-name-input", Input).value = "Laravel Dev (renamed)"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    assert len(manager.updated) == 1
+    agent_id, changes = manager.updated[0]
+    assert agent_id == "laravel-dev"
+    assert changes["display_name"] == "Laravel Dev (renamed)"
+    assert "system_prompt_source" not in changes
