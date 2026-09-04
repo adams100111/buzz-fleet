@@ -153,6 +153,35 @@ Each command's actual effect on the systemd unit:
 - **delete**: `systemctl --user disable --now`, revokes relay membership,
   and deletes the agent's env/prompt files and local record.
 
+#### Persona templates
+
+Persona templates live in `~/.config/buzz-fleet/personas` — this directory is
+auto-created on first use. Place `.persona.md` files (YAML frontmatter + body)
+or `.agent.json` files (Buzz Desktop `buzz-agent-snapshot` v1 exports) there.
+Each template's fields are optionally pre-filled into the create/update form in
+the TUI. `.agent.png` files (PNG exports of agents) are detected but not parsed
+(counted as unsupported).
+
+The new `agent create` and `agent update` flags for harness configuration:
+
+```bash
+buzz-fleet agent create --community eltahir --display-name "Advanced Agent" \
+  --harness claude --prompt-file ./persona.md \
+  --model claude-3-5-sonnet-20241022 \
+  --parallelism 4 \
+  --idle-timeout-seconds 300 \
+  --max-turn-duration-seconds 60 \
+  --respond-to-allowlist "npub1...,npub2..."
+```
+
+These optional fields map to systemd env vars on the agent's unit:
+- `--model` → `BUZZ_ACP_MODEL`
+- `--parallelism` → `BUZZ_ACP_AGENTS`
+- `--idle-timeout-seconds` → `BUZZ_ACP_IDLE_TIMEOUT`
+- `--max-turn-duration-seconds` → `BUZZ_ACP_MAX_TURN_DURATION`
+- `--respond-to-allowlist` → `BUZZ_ACP_RESPOND_TO_ALLOWLIST` (comma-separated
+  pubkeys; also sets `BUZZ_ACP_RESPOND_TO=allowlist`)
+
 ### Manage agents (TUI)
 
 ```bash
@@ -164,6 +193,15 @@ dashboard of agents and their systemd status. Bindings: `c` create, `u`
 edit (display name and/or prompt — editing a persona-file agent without
 touching the prompt field leaves its persona file alone), `x` delete, `l`
 view live logs.
+
+When creating an agent (`c`), the form shows a template dropdown that lists
+all `.persona.md` and `.agent.json` files from `~/.config/buzz-fleet/personas`.
+Selecting a template pre-fills the display name, harness, system prompt, model,
+parallelism, and idle/max-turn timeouts — all fields are editable before
+submit, and re-selecting a different template overwrites them again. The new
+fields for model, parallelism, idle timeout, max turn duration, and respond-to
+allowlist are available as blank-by-default inputs on both the create and edit
+forms.
 
 ### Inspecting a running agent directly
 
