@@ -858,6 +858,7 @@ import os
 from pathlib import Path
 
 from buzz_fleet.models import Agent, Community
+from buzz_fleet.proc import CommandRunner
 
 AGENTS_DIR = Path("/etc/buzz-fleet/agents")
 TEMPLATE_UNIT_PATH = Path("/etc/systemd/system/buzz-agent@.service")
@@ -887,6 +888,16 @@ WantedBy=multi-user.target
 
 def render_template_unit() -> str:
     return TEMPLATE_UNIT
+
+
+def ensure_template_unit_installed(runner: CommandRunner) -> None:
+    """Write the shared buzz-agent@.service template if missing or stale, then daemon-reload."""
+    current = TEMPLATE_UNIT_PATH.read_text() if TEMPLATE_UNIT_PATH.exists() else None
+    if current == TEMPLATE_UNIT:
+        return
+    TEMPLATE_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_UNIT_PATH.write_text(TEMPLATE_UNIT)
+    runner.run(["systemctl", "daemon-reload"])
 
 
 def agent_env_path(agent_id: str) -> Path:
@@ -945,7 +956,50 @@ def write_agent_files(
 Run: `uv run pytest tests/test_slug.py tests/test_systemd.py -v`
 Expected: `5 passed`.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Write the failing test for template-unit installation** (closes the gap where nothing ever wrote `buzz-agent@.service` to disk — every `systemctl enable --now` would otherwise fail with "Unit file does not exist")
+
+```python
+# appended to tests/test_systemd.py
+import subprocess
+
+from buzz_fleet.systemd import TEMPLATE_UNIT, ensure_template_unit_installed
+
+
+class FakeRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+def test_ensure_template_unit_installed_writes_file_and_reloads(tmp_path: Path, monkeypatch) -> None:
+    unit_path = tmp_path / "systemd" / "buzz-agent@.service"
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    runner = FakeRunner()
+
+    ensure_template_unit_installed(runner)
+
+    assert unit_path.read_text() == TEMPLATE_UNIT
+    assert ["systemctl", "daemon-reload"] in runner.calls
+
+
+def test_ensure_template_unit_installed_is_a_noop_when_already_current(tmp_path: Path, monkeypatch) -> None:
+    unit_path = tmp_path / "systemd" / "buzz-agent@.service"
+    unit_path.parent.mkdir(parents=True)
+    unit_path.write_text(TEMPLATE_UNIT)
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    runner = FakeRunner()
+
+    ensure_template_unit_installed(runner)
+
+    assert runner.calls == []
+```
+
+Run: `uv run pytest tests/test_systemd.py -v` — expected to already pass, since `ensure_template_unit_installed` was implemented in Step 3 above (this step exists to give it explicit, checked-in test coverage rather than leaving it implicitly exercised only via Task 8's manager tests). If it fails, fix `ensure_template_unit_installed` until it does.
+
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/buzz_fleet/slug.py src/buzz_fleet/systemd.py tests/test_slug.py tests/test_systemd.py
@@ -1242,7 +1296,7 @@ git commit -m "Add CommandRunner seam and signer/systemctl subprocess clients"
 - Test: `tests/test_manager.py`
 
 **Interfaces:**
-- Consumes: `state.save_agent/load_agents/delete_agent` (Task 5), `slug.agent_slug` (Task 6), `systemd.write_agent_files/agent_env_path` (Task 6), `signer_client.generate_key/add_member/remove_member` (Task 7), `systemctl_client.enable_now/disable_now/restart` (Task 7).
+- Consumes: `state.save_agent/load_agents/delete_agent` (Task 5), `slug.agent_slug` (Task 6), `systemd.write_agent_files/agent_env_path/ensure_template_unit_installed` (Task 6), `signer_client.generate_key/add_member/remove_member` (Task 7), `systemctl_client.enable_now/disable_now/restart` (Task 7).
 - Produces: `AgentManager(runner: CommandRunner, community: Community)` with `.create_agent(display_name, harness, system_prompt_source, team_instructions=None, model=None, role=None, anthropic_api_key=None, openai_api_key=None) -> Agent`, `.update_agent(agent_id, **changes) -> Agent`, `.delete_agent(agent_id) -> None`, `.list_agents() -> list[Agent]`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1279,6 +1333,7 @@ def _community() -> Community:
 def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -1299,6 +1354,7 @@ def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch
 def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1317,6 +1373,7 @@ def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch)
 def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1374,6 +1431,7 @@ class AgentManager:
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
     ) -> Agent:
+        systemd.ensure_template_unit_installed(self._runner)
         existing_ids = {a.id for a in self.list_agents()}
         agent_id = agent_slug(display_name, existing_ids)
         public_key, secret_key = signer_client.generate_key(self._runner)
