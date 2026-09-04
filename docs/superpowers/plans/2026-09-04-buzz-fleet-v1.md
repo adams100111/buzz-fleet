@@ -1631,7 +1631,7 @@ git commit -m "Add AgentManager orchestrating create/update/delete/list"
 
 **Interfaces:**
 - Consumes: `AgentManager` (Task 8), `signer_client.check_connection` (Task 7), `state.save_community/load_community` (Task 5), `proc.RealCommandRunner` (Task 7).
-- Produces: `buzz-fleet connect --relay <url> --admin-nsec <nsec> --id <community-id>`, `buzz-fleet agent create/list/delete`, `buzz-fleet tui`.
+- Produces: `buzz-fleet connect --relay <url> --admin-nsec <nsec> --id <community-id>`, `buzz-fleet agent create/list/delete/update`, `buzz-fleet tui`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1767,6 +1767,28 @@ def agent_delete(community: Annotated[str, typer.Option()], agent_id: Annotated[
     manager = _load_manager(community)
     manager.delete_agent(agent_id)
     typer.echo(f"Deleted agent '{agent_id}'.")
+
+
+@agent_app.command("update")
+def agent_update(
+    community: Annotated[str, typer.Option()],
+    agent_id: Annotated[str, typer.Argument()],
+    display_name: Annotated[str | None, typer.Option()] = None,
+    prompt_file: Annotated[
+        Path | None, typer.Option(help="Replace the system prompt with this persona/prompt file")
+    ] = None,
+) -> None:
+    manager = _load_manager(community)
+    changes: dict[str, object] = {}
+    if display_name is not None:
+        changes["display_name"] = display_name
+    if prompt_file is not None:
+        changes["system_prompt_source"] = SystemPromptSource(kind="persona_file", path=prompt_file)
+    if not changes:
+        typer.echo("Nothing to update — pass --display-name and/or --prompt-file.", err=True)
+        raise typer.Exit(code=1)
+    updated = manager.update_agent(agent_id, **changes)
+    typer.echo(f"Updated agent '{updated.id}'.")
 
 
 @app.command()
@@ -1969,8 +1991,10 @@ git commit -m "Add Textual app shell with live-polling agent dashboard"
 - Test: `tests/tui/test_agent_form.py`
 
 **Interfaces:**
-- Consumes: `AgentManager.create_agent`/`delete_agent` (Task 8), `systemctl_client.tail_logs` (Task 7).
-- Produces: `AgentFormScreen(manager: AgentManager)` with `Input` widgets for display name / harness / prompt text, submitting via `AgentManager.create_agent`; `LogsScreen(agent_id: str)` streaming `tail_logs` output into a `RichLog`.
+- Consumes: `AgentManager.create_agent`/`update_agent`/`delete_agent` (Task 8), `systemctl_client.tail_logs` (Task 7).
+- Produces: `AgentFormScreen(manager: AgentManager, agent: Agent | None = None)` — create mode when `agent` is omitted, edit mode (pre-filled, calls `update_agent`) when given — with `Input` widgets for display name / prompt text; `LogsScreen(agent_id: str)` streaming `tail_logs` output into a `RichLog`; `DashboardScreen.action_delete_agent`/`action_edit_agent` bound to `x`/`u`.
+
+Both `update` (CLI, Task 9) and TUI delete were missing from earlier drafts of this plan despite being part of the user's original, explicit requirement ("create, update, delete and running them") and this task's own title — caught during Task 9's review and fixed here and in Task 9 before either shipped as "done."
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1986,9 +2010,14 @@ from buzz_fleet.tui.app import BuzzFleetApp
 class FakeManager:
     def __init__(self) -> None:
         self.created: list[dict] = []
+        self.updated: list[tuple[str, dict]] = []
 
     def create_agent(self, **kwargs):
         self.created.append(kwargs)
+        return object()
+
+    def update_agent(self, agent_id, **kwargs):
+        self.updated.append((agent_id, kwargs))
         return object()
 
 
@@ -2011,6 +2040,41 @@ async def test_submitting_form_calls_create_agent() -> None:
 
     assert len(manager.created) == 1
     assert manager.created[0]["display_name"] == "Test Agent"
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_in_edit_mode_calls_update_agent() -> None:
+    from datetime import datetime, timezone
+
+    from buzz_fleet.models import Agent, SystemPromptSource
+
+    manager = FakeManager()
+    existing = Agent(
+        id="laravel-dev",
+        community_id="eltahir",
+        display_name="Laravel Dev",
+        harness="claude",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="old prompt"),
+        created_at=datetime.now(timezone.utc),
+    )
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager, agent=existing))
+        await pilot.pause()
+        assert app.screen.query_one("#display-name-input", Input).value == "Laravel Dev"
+        assert app.screen.query_one("#prompt-input", Input).value == "old prompt"
+        app.screen.query_one("#prompt-input", Input).value = "new prompt"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    assert len(manager.updated) == 1
+    assert manager.created == []
+    agent_id, changes = manager.updated[0]
+    assert agent_id == "laravel-dev"
+    assert changes["system_prompt_source"].text == "new prompt"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -2021,7 +2085,7 @@ Expected: `ModuleNotFoundError: No module named 'buzz_fleet.tui.screens.agent_fo
 - [ ] **Step 3: Implement `src/buzz_fleet/tui/screens/agent_form.py`**
 
 ```python
-"""Create-agent form screen."""
+"""Create/update agent form screen."""
 
 from __future__ import annotations
 
@@ -2030,19 +2094,24 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input
 
 from buzz_fleet.manager import AgentManager
-from buzz_fleet.models import SystemPromptSource
+from buzz_fleet.models import Agent, SystemPromptSource
 
 
 class AgentFormScreen(Screen):
-    def __init__(self, manager: AgentManager) -> None:
+    def __init__(self, manager: AgentManager, agent: Agent | None = None) -> None:
         super().__init__()
         self._manager = manager
+        self._agent = agent
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="Display name", id="display-name-input")
-        yield Input(placeholder="System prompt", id="prompt-input")
-        yield Button("Create", id="submit-button")
+        display_name = self._agent.display_name if self._agent else ""
+        prompt_text = ""
+        if self._agent and self._agent.system_prompt_source.kind == "inline":
+            prompt_text = self._agent.system_prompt_source.text or ""
+        yield Input(value=display_name, placeholder="Display name", id="display-name-input")
+        yield Input(value=prompt_text, placeholder="System prompt", id="prompt-input")
+        yield Button("Update" if self._agent else "Create", id="submit-button")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -2050,18 +2119,26 @@ class AgentFormScreen(Screen):
             return
         display_name = self.query_one("#display-name-input", Input).value
         prompt_text = self.query_one("#prompt-input", Input).value
-        self._manager.create_agent(
-            display_name=display_name,
-            harness="claude",
-            system_prompt_source=SystemPromptSource(kind="inline", text=prompt_text),
-        )
+        prompt_source = SystemPromptSource(kind="inline", text=prompt_text)
+        if self._agent is not None:
+            self._manager.update_agent(
+                self._agent.id,
+                display_name=display_name,
+                system_prompt_source=prompt_source,
+            )
+        else:
+            self._manager.create_agent(
+                display_name=display_name,
+                harness="claude",
+                system_prompt_source=prompt_source,
+            )
         self.app.pop_screen()
 ```
 
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `uv run pytest tests/tui/test_agent_form.py -v`
-Expected: `1 passed`.
+Expected: `2 passed`.
 
 - [ ] **Step 5: Implement `src/buzz_fleet/tui/screens/logs.py`** (no test — thin streaming wrapper, covered by Task 12's manual pass)
 
@@ -2112,23 +2189,50 @@ from buzz_fleet.tui.screens.logs import LogsScreen
 class DashboardScreen(Screen):
     BINDINGS = [
         Binding("c", "create_agent", "Create agent"),
+        Binding("u", "edit_agent", "Edit agent"),
+        Binding("x", "delete_agent", "Delete agent"),
         Binding("l", "view_logs", "View logs"),
     ]
+
+    def _selected_agent_id(self) -> str | None:
+        table = self.query_one("#agent-table", DataTable)
+        if table.cursor_row is None:
+            return None
+        return str(table.get_row_at(table.cursor_row)[0])
 
     def action_create_agent(self) -> None:
         community = state.load_community(CURRENT_COMMUNITY_ID)
         manager = AgentManager(RealCommandRunner(), community)
         self.app.push_screen(AgentFormScreen(manager))
 
-    def action_view_logs(self) -> None:
-        table = self.query_one("#agent-table", DataTable)
-        if table.cursor_row is None:
+    def action_edit_agent(self) -> None:
+        agent_id = self._selected_agent_id()
+        if agent_id is None:
             return
-        agent_id = str(table.get_row_at(table.cursor_row)[0])
+        community = state.load_community(CURRENT_COMMUNITY_ID)
+        manager = AgentManager(RealCommandRunner(), community)
+        agent = next((a for a in manager.list_agents() if a.id == agent_id), None)
+        if agent is None:
+            return
+        self.app.push_screen(AgentFormScreen(manager, agent=agent))
+
+    def action_delete_agent(self) -> None:
+        agent_id = self._selected_agent_id()
+        if agent_id is None:
+            return
+        community = state.load_community(CURRENT_COMMUNITY_ID)
+        manager = AgentManager(RealCommandRunner(), community)
+        manager.delete_agent(agent_id)
+        self.refresh_agents()
+
+    def action_view_logs(self) -> None:
+        agent_id = self._selected_agent_id()
+        if agent_id is None:
+            return
         self.app.push_screen(LogsScreen(agent_id))
 ```
 
-(`Community` import added to the top of `dashboard.py` alongside the existing imports.)
+(`Community` import added to the top of `dashboard.py` alongside the existing imports. `action_view_logs` now shares the `_selected_agent_id` helper introduced for `edit`/`delete` rather than repeating the cursor-row lookup a third time.)
 
 - [ ] **Step 7: Run the full suite**
 
