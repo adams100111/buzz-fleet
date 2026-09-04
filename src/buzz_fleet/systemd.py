@@ -121,7 +121,12 @@ def resolve_prompt_text(agent: Agent) -> str:
         assert source.text is not None
         return source.text
     assert source.path is not None
-    return source.path.read_text()
+    raw = source.path.read_text()
+    if raw.startswith("---\n"):
+        closing = raw.find("\n---\n", 4)
+        if closing != -1:
+            return raw[closing + len("\n---\n") :]
+    return raw
 
 
 def write_agent_files(

@@ -138,3 +138,33 @@ def test_ensure_linger_enabled_raises_clear_error_when_enable_fails() -> None:
         raise AssertionError("expected RuntimeError")
     except RuntimeError as e:
         assert "sudo loginctl enable-linger" in str(e)
+
+
+def test_resolve_prompt_text_strips_frontmatter_from_persona_file(tmp_path: Path) -> None:
+    from buzz_fleet.systemd import resolve_prompt_text
+
+    persona_path = tmp_path / "laravel.persona.md"
+    persona_path.write_text(
+        "---\n"
+        "display_name: Laravel Backend Dev\n"
+        "runtime: claude\n"
+        "---\n"
+        "You are the Laravel dev.\n"
+    )
+    agent = _agent().model_copy(
+        update={"system_prompt_source": SystemPromptSource(kind="persona_file", path=persona_path)}
+    )
+
+    assert resolve_prompt_text(agent) == "You are the Laravel dev.\n"
+
+
+def test_resolve_prompt_text_returns_whole_file_when_no_frontmatter(tmp_path: Path) -> None:
+    from buzz_fleet.systemd import resolve_prompt_text
+
+    plain_path = tmp_path / "plain.md"
+    plain_path.write_text("Just a plain prompt, no frontmatter.\n")
+    agent = _agent().model_copy(
+        update={"system_prompt_source": SystemPromptSource(kind="persona_file", path=plain_path)}
+    )
+
+    assert resolve_prompt_text(agent) == "Just a plain prompt, no frontmatter.\n"
