@@ -41,22 +41,28 @@ class AgentFormScreen(Screen):
             return
         display_name = self.query_one("#display-name-input", Input).value
         prompt_text = self.query_one("#prompt-input", Input).value
-        if self._agent is not None:
-            changes: dict[str, object] = {"display_name": display_name}
-            # Only touch system_prompt_source if the user actually edited the
-            # prompt field. This is the fix for the v1 bug where editing only
-            # the display name of a persona_file agent silently overwrote its
-            # persona file with an empty inline prompt (the prompt Input is
-            # never pre-filled for persona_file agents, so leaving it alone
-            # must mean "leave the prompt source alone", not "set it to '').
-            if prompt_text != self._original_prompt_text:
-                changes["system_prompt_source"] = SystemPromptSource(kind="inline", text=prompt_text)
-            self._manager.update_agent(self._agent.id, **changes)
-        else:
-            prompt_source = SystemPromptSource(kind="inline", text=prompt_text)
-            self._manager.create_agent(
-                display_name=display_name,
-                harness="claude",
-                system_prompt_source=prompt_source,
-            )
+        try:
+            if self._agent is not None:
+                changes: dict[str, object] = {"display_name": display_name}
+                # Only touch system_prompt_source if the user actually edited the
+                # prompt field. This is the fix for the v1 bug where editing only
+                # the display name of a persona_file agent silently overwrote its
+                # persona file with an empty inline prompt (the prompt Input is
+                # never pre-filled for persona_file agents, so leaving it alone
+                # must mean "leave the prompt source alone", not "set it to '').
+                if prompt_text != self._original_prompt_text:
+                    changes["system_prompt_source"] = SystemPromptSource(kind="inline", text=prompt_text)
+                self._manager.update_agent(self._agent.id, **changes)
+            else:
+                prompt_source = SystemPromptSource(kind="inline", text=prompt_text)
+                self._manager.create_agent(
+                    display_name=display_name,
+                    harness="claude",
+                    system_prompt_source=prompt_source,
+                )
+        except ValueError as e:
+            # e.g. a blank/punctuation-only display name (agent_slug raises)
+            # must not crash the app — surface it and let the user retry.
+            self.notify(str(e), severity="error")
+            return
         self.app.pop_screen()

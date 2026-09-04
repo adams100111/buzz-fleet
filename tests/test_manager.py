@@ -157,3 +157,43 @@ def test_update_agent_preserves_previously_set_api_keys(tmp_path: Path, monkeypa
 
     env_content = agent_env_path(agent.id).read_text()
     assert "ANTHROPIC_API_KEY=sk-ant-test" in env_content
+
+
+class FailingEnableRunner(FakeRunner):
+    """Fails only `systemctl ... enable --now ...` — e.g. no `loginctl
+    enable-linger` yet on a fresh host, the literal first-run condition.
+    """
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if "enable" in args and "--now" in args:
+            self.calls.append(args)
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="Failed to connect to bus: No medium found"
+            )
+        return super().run(args)
+
+
+def test_create_agent_is_recorded_locally_even_if_enable_now_fails(tmp_path: Path, monkeypatch) -> None:
+    """Regression test: a failed `enable_now` must not orphan the relay
+    membership + private-key env file that were already published/written —
+    the agent must still be discoverable (and therefore deletable/retryable)
+    via `list_agents()` even though its unit never actually started.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FailingEnableRunner()
+    manager = AgentManager(runner, _community())
+
+    with pytest.raises(RuntimeError):
+        manager.create_agent(
+            display_name="Orphan Test",
+            harness="claude",
+            system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        )
+
+    recorded = manager.list_agents()
+    assert len(recorded) == 1
+    assert recorded[0].id == "orphan-test"
+    add_member_call = next(c for c in runner.calls if "add-member" in c)
+    assert add_member_call  # membership was published — the local record above is what makes it revocable

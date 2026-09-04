@@ -116,3 +116,28 @@ async def test_editing_only_display_name_does_not_touch_persona_file_prompt() ->
     assert agent_id == "laravel-dev"
     assert changes["display_name"] == "Laravel Dev (renamed)"
     assert "system_prompt_source" not in changes
+
+
+class RaisingManager:
+    def create_agent(self, **kwargs):
+        raise ValueError("display_name must contain at least one alphanumeric character")
+
+
+@pytest.mark.asyncio
+async def test_submitting_blank_display_name_notifies_instead_of_crashing() -> None:
+    """Regression test: agent_slug raising ValueError on a blank/punctuation-only
+    display name must not crash the app — it should show a notification and
+    leave the form open for the user to correct.
+    """
+    manager = RaisingManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test() as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "!!!"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+        # The form screen is still on top — pop_screen was never reached.
+        assert isinstance(app.screen, AgentFormScreen)

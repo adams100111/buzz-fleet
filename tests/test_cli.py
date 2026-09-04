@@ -93,3 +93,41 @@ def test_agent_update_with_no_changes_exits_with_error(monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "Nothing to update" in result.output
+
+
+def test_agent_create_with_blank_display_name_exits_cleanly(tmp_path, monkeypatch) -> None:
+    """Regression test: agent_slug raising ValueError on a blank/punctuation-only
+    display name must exit 1 with a clear message, not crash with a raw traceback.
+    """
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def create_agent(self, **kwargs: object) -> object:
+            raise ValueError("display_name must contain at least one alphanumeric character")
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are an agent.")
+
+    result = runner_cli.invoke(
+        app,
+        [
+            "agent",
+            "create",
+            "--community",
+            "eltahir",
+            "--display-name",
+            "!!!",
+            "--harness",
+            "claude",
+            "--prompt-file",
+            str(prompt_file),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "alphanumeric" in result.output

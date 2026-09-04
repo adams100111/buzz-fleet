@@ -54,11 +54,16 @@ def agent_create(
     prompt_file: Annotated[Path, typer.Option(help="Path to a persona .persona.md or plain prompt text file")],
 ) -> None:
     manager = _load_manager(community)
-    agent = manager.create_agent(
-        display_name=display_name,
-        harness=harness,
-        system_prompt_source=SystemPromptSource(kind="persona_file", path=prompt_file),
-    )
+    try:
+        agent = manager.create_agent(
+            display_name=display_name,
+            harness=harness,
+            system_prompt_source=SystemPromptSource(kind="persona_file", path=prompt_file),
+        )
+    except ValueError as e:
+        # e.g. a blank/punctuation-only --display-name (agent_slug raises)
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
     typer.echo(f"Created agent '{agent.id}' ({agent.public_key}).")
 
 

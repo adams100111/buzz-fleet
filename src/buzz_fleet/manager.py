@@ -85,8 +85,15 @@ class AgentManager:
             role=role,
         )
         systemd.write_agent_files(agent, self._community, anthropic_api_key, openai_api_key)
-        systemctl_client.enable_now(self._runner, agent.id)
+        # Persist the local record BEFORE enabling the unit. enable_now can
+        # raise (e.g. no `loginctl enable-linger` yet on a fresh host — the
+        # literal first-run condition), and if it did before this save, the
+        # relay membership + private-key env file above would exist with no
+        # local record to ever see or revoke them. Saving first means a failed
+        # enable_now is retryable (`agent list` still shows the agent; the
+        # unit can be enabled by hand or via a future retry) instead of orphaning.
         state.save_agent(agent)
+        systemctl_client.enable_now(self._runner, agent.id)
         return agent
 
     def update_agent(self, agent_id: str, **changes: object) -> Agent:
