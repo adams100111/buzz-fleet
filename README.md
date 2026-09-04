@@ -30,13 +30,40 @@ runtime).
 ## Install
 
 ```bash
-# Build and install the signer binary
+./scripts/install.sh
+```
+
+That's the whole install. It's safe to re-run any time (e.g. after pulling
+new code). What it does, step by step:
+
+1. Installs Rust (via `rustup`) if `cargo` isn't already on `PATH`.
+2. Installs `uv` (via its official installer) if it isn't already on `PATH`
+   — `uv` is only needed to *build* the standalone binary below, not to run
+   it afterward.
+3. Builds `buzz-fleet-signer` (`cargo build --release` in `signer/`) and
+   installs it to `/usr/local/bin` (asks for `sudo` — that directory is
+   root-owned by default; the binary itself has no special runtime
+   privileges).
+4. Builds `buzz-fleet` itself as a standalone PyInstaller binary — no
+   Python or `uv` needed to *run* it afterward, on this machine or any
+   other of the same OS/architecture — and installs it to `/usr/local/bin`
+   the same way.
+
+After it finishes, `buzz-fleet` and `buzz-fleet-signer` are both real
+commands on your `PATH`. If you'd rather do it by hand (or the script
+doesn't fit your setup), the equivalent manual steps are:
+
+```bash
 cd signer && cargo build --release
 sudo install -m 0755 target/release/buzz-fleet-signer /usr/local/bin/buzz-fleet-signer
 cd ..
 
-# Install the Python package
-uv sync
+uv sync --group dev
+uv run pyinstaller --onefile --name buzz-fleet --paths src \
+  --collect-all textual --collect-all rich --collect-all pydantic \
+  --collect-all typer --collect-all click \
+  scripts/pyinstaller_entry.py
+sudo install -m 0755 dist/buzz-fleet /usr/local/bin/buzz-fleet
 ```
 
 `buzz-fleet` needs `loginctl` lingering enabled for your user so `--user`
@@ -59,24 +86,24 @@ your behalf. Omit `--admin-nsec` to be prompted for it with masked input
 instead of passing it as a plaintext argument:
 
 ```bash
-uv run buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me
+buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me
 ```
 
 ### Manage agents (CLI)
 
 ```bash
 # Create — --prompt-file points at a persona .md file or a plain text prompt
-uv run buzz-fleet agent create --community eltahir --display-name "Test Echo" \
+buzz-fleet agent create --community eltahir --display-name "Test Echo" \
   --harness claude --prompt-file ./persona.md
 
 # List
-uv run buzz-fleet agent list --community eltahir
+buzz-fleet agent list --community eltahir
 
 # Update — display name and/or prompt file; anything else is left untouched
-uv run buzz-fleet agent update --community eltahir test-echo --display-name "New Name"
+buzz-fleet agent update --community eltahir test-echo --display-name "New Name"
 
 # Delete — revokes relay membership and removes the agent's local files
-uv run buzz-fleet agent delete --community eltahir test-echo
+buzz-fleet agent delete --community eltahir test-echo
 ```
 
 Each command's actual effect on the systemd unit:
@@ -92,7 +119,7 @@ Each command's actual effect on the systemd unit:
 ### Manage agents (TUI)
 
 ```bash
-uv run buzz-fleet tui
+buzz-fleet tui
 ```
 
 Shows a connect screen if no community is set up yet, otherwise a live
