@@ -1,10 +1,9 @@
 import stat
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from buzz_fleet.models import Agent, Community, SystemPromptSource
 from buzz_fleet.state import (
-    delete_agent,
     load_agents,
     load_community,
     save_agent,
@@ -35,7 +34,7 @@ def test_saved_community_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
 
 def test_save_and_load_agent_round_trips(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    now = datetime.now()
+    now = datetime.now(UTC)
     agent = Agent(
         id="agent-1",
         community_id="eltahir",
@@ -69,7 +68,7 @@ def test_saved_agent_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
         private_key="nsec_secret",
         public_key="npub_public",
         system_prompt_source=SystemPromptSource(kind="inline", text="Test"),
-        created_at=datetime.now(),
+        created_at=datetime.now(UTC),
     )
 
     save_agent(agent)
