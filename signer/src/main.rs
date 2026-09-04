@@ -24,6 +24,26 @@ enum Command {
         #[arg(long)]
         nsec: String,
     },
+    /// Publish a kind:9030 relay-membership add event.
+    AddMember {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        admin_nsec: String,
+        #[arg(long)]
+        pubkey: String,
+        #[arg(long)]
+        role: Option<String>,
+    },
+    /// Publish a kind:9031 relay-membership remove event.
+    RemoveMember {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        admin_nsec: String,
+        #[arg(long)]
+        pubkey: String,
+    },
 }
 
 #[tokio::main]
@@ -59,6 +79,18 @@ async fn main() {
                 1
             }
         },
+        Command::AddMember { relay, admin_nsec, pubkey, role } => {
+            match run_publish(&relay, &admin_nsec, events::build_add_member(&pubkey, role.as_deref())).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+        Command::RemoveMember { relay, admin_nsec, pubkey } => {
+            match run_publish(&relay, &admin_nsec, events::build_remove_member(&pubkey)).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
     };
     std::process::exit(code);
 }
@@ -67,5 +99,21 @@ async fn run_check_connection(relay: &str, nsec: &str) -> anyhow::Result<()> {
     let keys = Keys::parse(nsec)?;
     let conn = NostrWsConnection::connect_authenticated(relay, &keys, None).await?;
     conn.disconnect().await?;
+    Ok(())
+}
+
+async fn run_publish(
+    relay: &str,
+    admin_nsec: &str,
+    builder: anyhow::Result<nostr::EventBuilder>,
+) -> anyhow::Result<()> {
+    let keys = Keys::parse(admin_nsec)?;
+    let event = builder?.sign_with_keys(&keys)?;
+    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, None).await?;
+    let response = conn.send_event(event).await?;
+    conn.disconnect().await?;
+    if !response.accepted {
+        anyhow::bail!("relay rejected event: {}", response.message);
+    }
     Ok(())
 }
