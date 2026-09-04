@@ -876,8 +876,8 @@ from pathlib import Path
 from buzz_fleet.models import Agent, Community
 from buzz_fleet.proc import CommandRunner
 
-AGENTS_DIR = Path("/etc/buzz-fleet/agents")
-TEMPLATE_UNIT_PATH = Path("/etc/systemd/system/buzz-agent@.service")
+AGENTS_DIR = Path.home() / ".config" / "buzz-fleet" / "agents"
+TEMPLATE_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / "buzz-agent@.service"
 
 _HARNESS_COMMAND = {
     "claude": "claude-agent-acp",
@@ -886,19 +886,25 @@ _HARNESS_COMMAND = {
     "goose": "goose",
 }
 
-TEMPLATE_UNIT = """[Unit]
+# A --user unit, not a system unit — no root anywhere in buzz-fleet (spec Open
+# Question 2, resolved this way): no `User=` line (it always runs as whoever
+# owns this systemd --user instance), `WantedBy=default.target` (the --user
+# equivalent of multi-user.target), and the env path matches AGENTS_DIR above.
+# Requires `loginctl enable-linger <user>` once so the --user instance (and
+# this unit) keeps running after the SSH session that created it ends — see
+# Task 12 Step 1.
+TEMPLATE_UNIT = f"""[Unit]
 Description=Buzz headless agent (%i)
 After=network-online.target
 
 [Service]
-EnvironmentFile=/etc/buzz-fleet/agents/%i.env
+EnvironmentFile={AGENTS_DIR}/%i.env
 ExecStart=/usr/local/bin/buzz-acp
 Restart=on-failure
 RestartSec=5
-User=buzz-fleet
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 """
 
 
@@ -913,7 +919,7 @@ def ensure_template_unit_installed(runner: CommandRunner) -> None:
         return
     TEMPLATE_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     TEMPLATE_UNIT_PATH.write_text(TEMPLATE_UNIT)
-    runner.run(["systemctl", "daemon-reload"])
+    runner.run(["systemctl", "--user", "daemon-reload"])
 
 
 def agent_env_path(agent_id: str) -> Path:
@@ -998,7 +1004,7 @@ def test_ensure_template_unit_installed_writes_file_and_reloads(tmp_path: Path, 
     ensure_template_unit_installed(runner)
 
     assert unit_path.read_text() == TEMPLATE_UNIT
-    assert ["systemctl", "daemon-reload"] in runner.calls
+    assert ["systemctl", "--user", "daemon-reload"] in runner.calls
 
 
 def test_ensure_template_unit_installed_is_a_noop_when_already_current(tmp_path: Path, monkeypatch) -> None:
@@ -1198,13 +1204,13 @@ class FakeRunner:
 def test_enable_now_invokes_systemctl_with_instance_unit() -> None:
     runner = FakeRunner()
     enable_now(runner, "laravel-backend-dev")
-    assert runner.calls == [["systemctl", "enable", "--now", "buzz-agent@laravel-backend-dev"]]
+    assert runner.calls == [["systemctl", "--user", "enable", "--now", "buzz-agent@laravel-backend-dev"]]
 
 
 def test_restart_invokes_systemctl_restart() -> None:
     runner = FakeRunner()
     restart(runner, "laravel-backend-dev")
-    assert runner.calls == [["systemctl", "restart", "buzz-agent@laravel-backend-dev"]]
+    assert runner.calls == [["systemctl", "--user", "restart", "buzz-agent@laravel-backend-dev"]]
 
 
 def test_status_active_maps_to_running() -> None:
@@ -1226,7 +1232,7 @@ def test_tail_logs_returns_stdout() -> None:
     runner = FakeRunner(stdout="log line 1\nlog line 2\n")
     output = tail_logs(runner, "laravel-backend-dev", lines=50)
     assert output == "log line 1\nlog line 2\n"
-    assert runner.calls == [["journalctl", "-u", "buzz-agent@laravel-backend-dev", "-n", "50", "--no-pager"]]
+    assert runner.calls == [["journalctl", "--user", "-u", "buzz-agent@laravel-backend-dev", "-n", "50", "--no-pager"]]
 ```
 
 - [ ] **Step 7: Run to verify it fails**
@@ -1258,19 +1264,19 @@ def _unit(agent_id: str) -> str:
 
 
 def enable_now(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "enable", "--now", _unit(agent_id)])
+    runner.run(["systemctl", "--user", "enable", "--now", _unit(agent_id)])
 
 
 def disable_now(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "disable", "--now", _unit(agent_id)])
+    runner.run(["systemctl", "--user", "disable", "--now", _unit(agent_id)])
 
 
 def restart(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "restart", _unit(agent_id)])
+    runner.run(["systemctl", "--user", "restart", _unit(agent_id)])
 
 
 def stop(runner: CommandRunner, agent_id: str) -> None:
-    runner.run(["systemctl", "stop", _unit(agent_id)])
+    runner.run(["systemctl", "--user", "stop", _unit(agent_id)])
 
 
 _STATE_MAP = {
@@ -1281,12 +1287,12 @@ _STATE_MAP = {
 
 
 def status(runner: CommandRunner, agent_id: str) -> AgentStatus:
-    result = runner.run(["systemctl", "is-active", _unit(agent_id)])
+    result = runner.run(["systemctl", "--user", "is-active", _unit(agent_id)])
     return _STATE_MAP.get(result.stdout.strip(), AgentStatus.UNKNOWN)
 
 
 def tail_logs(runner: CommandRunner, agent_id: str, lines: int = 200) -> str:
-    result = runner.run(["journalctl", "-u", _unit(agent_id), "-n", str(lines), "--no-pager"])
+    result = runner.run(["journalctl", "--user", "-u", _unit(agent_id), "-n", str(lines), "--no-pager"])
     return result.stdout
 ```
 
@@ -1363,7 +1369,7 @@ def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch
     assert agent.public_key == "ab" * 32
     add_member_call = next(c for c in runner.calls if "add-member" in c)
     assert "--pubkey" in add_member_call and "ab" * 32 in add_member_call
-    assert ["systemctl", "enable", "--now", "buzz-agent@laravel-backend-dev"] in runner.calls
+    assert ["systemctl", "--user", "enable", "--now", "buzz-agent@laravel-backend-dev"] in runner.calls
     assert manager.list_agents() == [agent]
 
 
@@ -1381,7 +1387,7 @@ def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch)
 
     manager.delete_agent(agent.id)
 
-    assert ["systemctl", "disable", "--now", "buzz-agent@throwaway"] in runner.calls
+    assert ["systemctl", "--user", "disable", "--now", "buzz-agent@throwaway"] in runner.calls
     assert any("remove-member" in c for c in runner.calls)
     assert manager.list_agents() == []
 
@@ -1403,7 +1409,7 @@ def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatc
 
     add_member_calls_after = len([c for c in runner.calls if "add-member" in c])
     assert add_member_calls_after == add_member_calls_before
-    assert ["systemctl", "restart", "buzz-agent@throwaway"] in runner.calls
+    assert ["systemctl", "--user", "restart", "buzz-agent@throwaway"] in runner.calls
     assert updated.system_prompt_source.text == "y"
 ```
 
@@ -2036,12 +2042,17 @@ git commit -m "Add create-agent form and live log viewer screens"
 
 **Interfaces:** none new — this task verifies Tasks 1–11 work together against the real, already-running `buzz.eltahir.me` community.
 
-- [ ] **Step 1: Build the signer binary and install it on PATH**
+- [ ] **Step 1: Enable lingering for this user, build the signer binary, install it on PATH**
+
+Everything in this plan runs as your normal, unprivileged user via `systemctl --user` — no root, anywhere (spec Open Question 2, resolved this way). The one prerequisite a normal interactive login doesn't give you for free is that `--user` units stop when your last session ends; `loginctl enable-linger` fixes that so agents survive an SSH logout, which is the entire point of running them on a VPS:
 
 ```bash
+loginctl enable-linger "$(whoami)"
 cd signer && cargo build --release
 sudo install -m 0755 target/release/buzz-fleet-signer /usr/local/bin/buzz-fleet-signer
 ```
+
+(`buzz-fleet-signer` itself is installed system-wide with `sudo` here only because `/usr/local/bin` is root-owned by default — it is a static binary with no special privileges at runtime; everything it does, it does as whichever user invokes it.)
 
 - [ ] **Step 2: Install the Python package**
 
@@ -2077,11 +2088,11 @@ Expected: lookup succeeds — the agent is really a relay member, not just recor
 - [ ] **Step 5: Confirm the systemd unit is live**
 
 ```bash
-systemctl status buzz-agent@test-echo
-journalctl -u buzz-agent@test-echo -n 50 --no-pager
+systemctl --user status buzz-agent@test-echo
+journalctl --user -u buzz-agent@test-echo -n 50 --no-pager
 ```
 
-Expected: `active (running)`; logs show `buzz-acp` connecting to the relay (note: `ANTHROPIC_API_KEY` was not passed in Step 4 — expect the agent process to fail fast on missing credentials; that's the correct failure mode to see here, confirming the unit and env file wiring work even before a real API key is supplied. Re-run Step 4 with a real key, or manually add `ANTHROPIC_API_KEY=...` to `/etc/buzz-fleet/agents/test-echo.env` and `systemctl restart buzz-agent@test-echo`, to see it actually connect and idle waiting for mentions).
+Expected: `active (running)`; logs show `buzz-acp` connecting to the relay (note: `ANTHROPIC_API_KEY` was not passed in Step 4 — expect the agent process to fail fast on missing credentials; that's the correct failure mode to see here, confirming the unit and env file wiring work even before a real API key is supplied. Re-run Step 4 with a real key, or manually add `ANTHROPIC_API_KEY=...` to `~/.config/buzz-fleet/agents/test-echo.env` and `systemctl --user restart buzz-agent@test-echo`, to see it actually connect and idle waiting for mentions).
 
 - [ ] **Step 6: Launch the TUI and confirm the dashboard shows it**
 
@@ -2095,7 +2106,7 @@ Expected: dashboard lists `test-echo | Test Echo | claude | RUNNING`. Press `l` 
 
 ```bash
 uv run buzz-fleet agent delete --community eltahir test-echo
-systemctl status buzz-agent@test-echo   # expect: inactive/not-found
+systemctl --user status buzz-agent@test-echo   # expect: inactive/not-found
 BUZZ_RELAY_URL=wss://buzz.eltahir.me BUZZ_PRIVATE_KEY=<owner nsec> \
   ./target/release/buzz users lookup --pubkey <the pubkey from step 4>
 ```
