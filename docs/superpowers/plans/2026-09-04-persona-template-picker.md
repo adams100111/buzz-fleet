@@ -460,14 +460,13 @@ def test_discover_personas_finds_both_formats_recursively(tmp_path: Path) -> Non
     (root / "stack-a" / "laravel.persona.md").write_text(
         "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nPrompt body.\n"
     )
-    _write_agent_json(root / "dotnet.agent.json")
+    _write_agent_json(root / "dotnet.agent.json", profile={"displayName": ".NET Backend Dev", "about": None})
 
     templates, skipped = discover_personas(root)
 
-    assert len(templates) == 2
     assert skipped == 0
     names = {t.display_name for t in templates}
-    assert names == {"Laravel Backend Dev", "Laravel Backend Dev"} or len(names) >= 1
+    assert names == {"Laravel Backend Dev", ".NET Backend Dev"}
 
 
 def test_discover_personas_counts_png_and_unparseable_files_as_skipped(tmp_path: Path) -> None:
@@ -637,11 +636,21 @@ git commit -m "feat: add persona/agent-snapshot template discovery and parsing"
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/test_manager.py` (open the file first to match its existing fixture/helper style — it already has a `_manager()`-style setup used by other `create_agent` tests; follow that pattern rather than duplicating a new one):
+`tests/test_manager.py` has no shared fixture helper — each test builds a
+`FakeRunner()` (already defined at module scope in that file) and constructs
+`AgentManager(runner, _community())` directly, monkeypatching
+`buzz_fleet.state.CONFIG_DIR`, `buzz_fleet.systemd.AGENTS_DIR`, and
+`buzz_fleet.systemd.TEMPLATE_UNIT_PATH` to `tmp_path`-based paths (see
+`test_create_agent_mints_key_registers_and_starts` for the exact pattern —
+copy it verbatim). Add:
 
 ```python
-def test_create_agent_stores_new_optional_fields(tmp_path, monkeypatch) -> None:
-    manager, runner = _manager(tmp_path, monkeypatch)  # match existing helper name/signature in this file
+def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
 
     agent = manager.create_agent(
         display_name="Test Agent",
@@ -660,8 +669,6 @@ def test_create_agent_stores_new_optional_fields(tmp_path, monkeypatch) -> None:
     assert agent.max_turn_duration_seconds == 600
     assert agent.respond_to_allowlist == ["a" * 64]
 ```
-
-If this file's existing tests don't use a `_manager()` helper, read the file first and adapt this test to whatever setup pattern (fixtures, monkeypatching `signer_client`/`systemctl_client`) its existing `create_agent` tests already use — don't invent a second pattern.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -722,7 +729,84 @@ Expected: PASS (all tests in the file)
 
 - [ ] **Step 5: Add matching CLI flags**
 
-Read `tests/test_cli.py` first to match its existing `agent create`/`agent update` test invocation style (likely Typer's `CliRunner`), then add a test asserting `--model`, `--parallelism`, `--idle-timeout-seconds`, `--max-turn-duration-seconds`, and `--respond-to-allowlist` reach `AgentManager.create_agent` with the right types (int-parsed, comma-split into a list) — mirroring however the existing tests in that file assert on `--display-name`/`--harness` today (e.g. a fake/mocked `AgentManager`, or inspecting saved state).
+`tests/test_cli.py` uses `typer.testing.CliRunner` (`runner_cli` at module
+scope) plus a locally-defined `FakeAgentManager` class monkeypatched onto
+`buzz_fleet.cli.app.AgentManager`, and `buzz_fleet.cli.app.state.load_community`
+monkeypatched to return a `SimpleNamespace(id=cid)` — see
+`test_agent_update_calls_manager_with_changes` for the exact pattern. Add:
+
+```python
+def test_agent_create_passes_new_optional_fields(tmp_path, monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def create_agent(self, **kwargs: object) -> object:
+            calls.update(kwargs)
+            return SimpleNamespace(id="test-agent", public_key="ab" * 32)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are an agent.")
+
+    result = runner_cli.invoke(
+        app,
+        [
+            "agent", "create",
+            "--community", "eltahir",
+            "--display-name", "Test Agent",
+            "--harness", "claude",
+            "--prompt-file", str(prompt_file),
+            "--model", "claude-sonnet-5",
+            "--parallelism", "3",
+            "--idle-timeout-seconds", "120",
+            "--max-turn-duration-seconds", "600",
+            "--respond-to-allowlist", f"{'a' * 64},{'b' * 64}",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["model"] == "claude-sonnet-5"
+    assert calls["parallelism"] == 3
+    assert calls["idle_timeout_seconds"] == 120
+    assert calls["max_turn_duration_seconds"] == 600
+    assert calls["respond_to_allowlist"] == ["a" * 64, "b" * 64]
+
+
+def test_agent_update_passes_new_optional_fields(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["agent_id"] = agent_id
+            calls["changes"] = changes
+            return SimpleNamespace(id=agent_id)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    result = runner_cli.invoke(
+        app,
+        [
+            "agent", "update", "--community", "eltahir", "agent-1",
+            "--model", "claude-sonnet-5",
+            "--respond-to-allowlist", "a" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["changes"] == {"model": "claude-sonnet-5", "respond_to_allowlist": ["a" * 64]}
+```
+
+Both tests need `from types import SimpleNamespace` — already imported at the
+top of `tests/test_cli.py`.
 
 Then in `src/buzz_fleet/cli/app.py`, update `agent_create`:
 
