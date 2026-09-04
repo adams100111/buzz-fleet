@@ -1,9 +1,16 @@
 import stat
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 from buzz_fleet.models import Agent, Community, SystemPromptSource
-from buzz_fleet.systemd import agent_env_path, agent_prompt_path, write_agent_files
+from buzz_fleet.systemd import (
+    TEMPLATE_UNIT,
+    agent_env_path,
+    agent_prompt_path,
+    ensure_template_unit_installed,
+    write_agent_files,
+)
 
 
 def _agent() -> Agent:
@@ -47,3 +54,35 @@ def test_env_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
 
     mode = stat.S_IMODE(agent_env_path("laravel-backend-dev").stat().st_mode)
     assert mode == 0o600
+
+
+class FakeRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+def test_ensure_template_unit_installed_writes_file_and_reloads(tmp_path: Path, monkeypatch) -> None:
+    unit_path = tmp_path / "systemd" / "buzz-agent@.service"
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    runner = FakeRunner()
+
+    ensure_template_unit_installed(runner)
+
+    assert unit_path.read_text() == TEMPLATE_UNIT
+    assert ["systemctl", "--user", "daemon-reload"] in runner.calls
+
+
+def test_ensure_template_unit_installed_is_a_noop_when_already_current(tmp_path: Path, monkeypatch) -> None:
+    unit_path = tmp_path / "systemd" / "buzz-agent@.service"
+    unit_path.parent.mkdir(parents=True)
+    unit_path.write_text(TEMPLATE_UNIT)
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    runner = FakeRunner()
+
+    ensure_template_unit_installed(runner)
+
+    assert runner.calls == []
