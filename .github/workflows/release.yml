@@ -1,0 +1,101 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # Gate the whole release on the same checks a contributor runs locally, so a
+  # tag can never publish a tree that would fail its own test suite.
+  checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+      - run: uv sync --group dev
+      - run: uv run ruff check .
+      - run: uv run pytest
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --manifest-path signer/Cargo.toml
+
+  binary:
+    needs: [checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check tag matches version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pyproject="$(grep -m1 -oP '^version = "\K[^"]+' pyproject.toml)"
+          init="$(grep -m1 -oP '^__version__ = "\K[^"]+' src/buzz_fleet/__init__.py)"
+          cargo="$(grep -m1 -oP '^version = "\K[^"]+' signer/Cargo.toml)"
+          echo "tag=${tag}  pyproject=${pyproject}  __version__=${init}  Cargo.toml=${cargo}"
+          if [ "${tag}" != "${pyproject}" ] || [ "${tag}" != "${init}" ] || [ "${tag}" != "${cargo}" ]; then
+            echo "::error::tag v${tag} must match pyproject.toml (${pyproject}), __version__ (${init}), and signer/Cargo.toml (${cargo})"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build buzz-fleet-signer (release)
+        run: cargo build --release --manifest-path signer/Cargo.toml
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+      - name: Build standalone buzz-fleet binary
+        run: |
+          uv sync --group dev
+          uv run pyinstaller --onefile --name buzz-fleet --paths src \
+            --collect-all textual --collect-all rich --collect-all pydantic \
+            --collect-all typer --collect-all click \
+            scripts/pyinstaller_entry.py
+      - name: Stage + checksum
+        run: |
+          mkdir -p out
+          cp signer/target/release/buzz-fleet-signer out/buzz-fleet-signer-${{ matrix.arch }}
+          cp dist/buzz-fleet out/buzz-fleet-${{ matrix.arch }}
+          ( cd out && sha256sum buzz-fleet-signer-${{ matrix.arch }} buzz-fleet-${{ matrix.arch }} \
+              > checksums-${{ matrix.arch }}.txt )
+      - uses: actions/upload-artifact@v7
+        with:
+          name: buzz-fleet-${{ matrix.arch }}
+          path: |
+            out/buzz-fleet-signer-${{ matrix.arch }}
+            out/buzz-fleet-${{ matrix.arch }}
+            out/checksums-${{ matrix.arch }}.txt
+
+  release:
+    needs: [binary]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: Collect assets + combined checksums
+        run: |
+          mkdir -p out
+          cp artifacts/buzz-fleet-x86_64/buzz-fleet-signer-x86_64 out/
+          cp artifacts/buzz-fleet-x86_64/buzz-fleet-x86_64 out/
+          cp artifacts/buzz-fleet-aarch64/buzz-fleet-signer-aarch64 out/
+          cp artifacts/buzz-fleet-aarch64/buzz-fleet-aarch64 out/
+          ( cd out && sha256sum buzz-fleet-signer-x86_64 buzz-fleet-x86_64 \
+              buzz-fleet-signer-aarch64 buzz-fleet-aarch64 > checksums.txt )
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            out/buzz-fleet-signer-x86_64
+            out/buzz-fleet-x86_64
+            out/buzz-fleet-signer-aarch64
+            out/buzz-fleet-aarch64
+            out/checksums.txt

@@ -27,14 +27,35 @@ no root, anywhere, except installing the `buzz-fleet-signer` binary itself
 to `/usr/local/bin` once (a static binary with no special privileges at
 runtime).
 
-## Install
+## Install (any Linux x86_64/aarch64 machine, no clone)
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/adams100111/buzz-fleet/main/scripts/get.sh | bash
+```
+
+Detects your architecture, downloads the matching `buzz-fleet` and
+`buzz-fleet-signer` binaries from the latest GitHub Release, verifies their
+SHA256, and installs both onto `PATH` (`~/.local/bin`, plus `/usr/local/bin`
+too if passwordless `sudo` is available) — no Rust, no Python, no `uv`, no
+clone. Afterward `buzz-fleet` works from anywhere:
+
+```bash
+buzz-fleet tui
+```
+
+### Building from source instead
+
+If you're on an architecture the releases don't cover yet, or you're
+developing `buzz-fleet` itself:
+
+```bash
+git clone https://github.com/adams100111/buzz-fleet.git
+cd buzz-fleet
 ./scripts/install.sh
 ```
 
-That's the whole install. It's safe to re-run any time (e.g. after pulling
-new code). What it does, step by step:
+`install.sh` is safe to re-run any time (e.g. after pulling new code). What
+it does, step by step:
 
 1. Installs Rust (via `rustup`) if `cargo` isn't already on `PATH`.
 2. Installs `uv` (via its official installer) if it isn't already on `PATH`
@@ -49,9 +70,7 @@ new code). What it does, step by step:
    other of the same OS/architecture — and installs it to `/usr/local/bin`
    the same way.
 
-After it finishes, `buzz-fleet` and `buzz-fleet-signer` are both real
-commands on your `PATH`. If you'd rather do it by hand (or the script
-doesn't fit your setup), the equivalent manual steps are:
+The equivalent manual steps, if you'd rather not run the script:
 
 ```bash
 cd signer && cargo build --release
@@ -65,6 +84,24 @@ uv run pyinstaller --onefile --name buzz-fleet --paths src \
   scripts/pyinstaller_entry.py
 sudo install -m 0755 dist/buzz-fleet /usr/local/bin/buzz-fleet
 ```
+
+### Releasing a new version
+
+Push a `v*` tag matching `pyproject.toml`'s `version`, `src/buzz_fleet/__init__.py`'s
+`__version__`, and `signer/Cargo.toml`'s `version` (`.github/workflows/release.yml`
+fails the release if any of the three disagree with the tag):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+CI (`checks` → `binary` × {x86_64, aarch64} → `release`) runs the full test
+suite, builds both binaries for both architectures, and publishes them as
+GitHub Release assets with a combined `checksums.txt` — exactly what
+`get.sh` above downloads.
+
+### Lingering
 
 `buzz-fleet` needs `loginctl` lingering enabled for your user so `--user`
 systemd units survive after you log out (SSH etc.) — otherwise every agent
