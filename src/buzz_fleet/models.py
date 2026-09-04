@@ -32,4 +32,8 @@ class Agent(BaseModel):
     system_prompt_source: SystemPromptSource
     team_instructions: str | None = None
     model: str | None = None
+    parallelism: int | None = None
+    idle_timeout_seconds: int | None = None
+    max_turn_duration_seconds: int | None = None
+    respond_to_allowlist: list[str] | None = None
     created_at: datetime
