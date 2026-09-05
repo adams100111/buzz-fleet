@@ -541,6 +541,8 @@ git commit -m "signer: add publish-managed-agent (kind:30177)"
 
 - [ ] **Step 1: Write the failing test in `main.rs`**
 
+This appends into the `#[cfg(test)] mod tests { ... }` block Task 1 already created at the bottom of `main.rs` — do not create a second `mod tests` block in the same file (Rust rejects two modules with the same name in one scope).
+
 ```rust
     #[test]
     fn retract_managed_agent_builds_correct_coordinate() {
@@ -1360,7 +1362,7 @@ Replace the `FakeRunner.run` method's body with (adding branches for the 8 new s
         elif args[:2] == ["buzz-fleet-signer", "pubkey-from-nsec"]:
             stdout = json.dumps({"ok": True, "public_key": "c" * 64})
         elif args[:2] == ["buzz-fleet-signer", "compute-auth-tag"]:
-            stdout = json.dumps({"ok": True, "auth_tag": '["auth","d"*64,"","e"*128]'})
+            stdout = json.dumps({"ok": True, "auth_tag": json.dumps(["auth", "d" * 64, "", "e" * 128])})
         elif "add-member" in args or "remove-member" in args:
             stdout = json.dumps({"ok": True})
         elif args[:2] == ["buzz-fleet-signer", "publish-agent-profile"]:
@@ -2415,19 +2417,19 @@ Add the import (alongside the existing ones):
 
 ```python
 from buzz_fleet import visibility
-from buzz_fleet.models import AgentVisibilityState
+from buzz_fleet.models import Agent, AgentVisibilityState
 ```
+
+(`Agent` isn't used by Step 3's version of `_visibility_display` yet — it's needed by Step 5's refactor below. Importing it now avoids a second import-line edit later.)
 
 Add a helper function near `_STATUS_DISPLAY` (same file-level placement, same "text, color" tuple convention as the existing systemd-status column):
 
 ```python
 def _visibility_display(visibility_managed: bool, state: AgentVisibilityState) -> tuple[str, str]:
-    from buzz_fleet.models import Agent
-
-    # visibility_status_text only needs the two fields relevant here; build a
-    # throwaway Agent-shaped stand-in isn't necessary — construct a minimal
-    # local Agent instead is more coupling than a tuple-in tuple-out helper
-    # needs, so this mirrors visibility_status_text's own branching directly.
+    # Mirrors visibility_status_text's own branching directly rather than
+    # calling it — that function takes a whole Agent, and this dashboard
+    # helper also needs a color per state, not just text. Step 5 below
+    # removes this duplication once the tests pass.
     if not visibility_managed:
         return "—", STATUS_INACTIVE
     errors = [e for e in (state.profile_error, state.managed_agent_error, state.add_policy_error) if e]
@@ -2482,7 +2484,71 @@ def _visibility_display(agent: Agent) -> tuple[str, str]:
     return text, "#C98A2C"  # "pending"
 ```
 
-Update the 4 tests above to call `_visibility_display(agent)` with a constructed `Agent` (matching `test_visibility.py`'s `_agent()` helper pattern — import or duplicate that small helper) instead of passing `visibility_managed`/`state` separately, and update `refresh_agents()`'s call site to `_visibility_display(agent)`.
+Replace `tests/tui/test_dashboard.py`'s entire contents with the version below — it duplicates the small `_agent()` builder from `test_visibility.py` locally (a private, underscore-prefixed test helper isn't meant to be imported across test modules) and updates all 4 tests to build a real `Agent` instead of passing `visibility_managed`/`state` as separate arguments:
+
+```python
+from datetime import UTC, datetime
+
+from buzz_fleet.models import Agent, AgentVisibilityState, SystemPromptSource
+from buzz_fleet.tui.screens.dashboard import _visibility_display
+
+
+def _agent(**overrides) -> Agent:
+    defaults = dict(
+        id="test-agent",
+        community_id="eltahir",
+        display_name="Test Agent",
+        harness="claude",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="hi"),
+        created_at=datetime.now(UTC),
+    )
+    defaults.update(overrides)
+    return Agent(**defaults)
+
+
+def test_visibility_display_old_agent_is_inactive_colored_dash() -> None:
+    text, _color = _visibility_display(_agent())
+    assert text == "—"
+
+
+def test_visibility_display_synced_is_success_colored() -> None:
+    agent = _agent(
+        visibility_managed=True,
+        visibility_state=AgentVisibilityState(
+            profile_published=True, managed_agent_published=True, add_policy_published=True
+        ),
+    )
+    text, _color = _visibility_display(agent)
+    assert text == "synced"
+
+
+def test_visibility_display_pending_is_warning_colored() -> None:
+    text, _color = _visibility_display(_agent(visibility_managed=True))
+    assert text == "pending"
+
+
+def test_visibility_display_error_is_error_colored() -> None:
+    agent = _agent(visibility_managed=True, visibility_state=AgentVisibilityState(profile_error="invalid: bad thing"))
+    text, _color = _visibility_display(agent)
+    assert text.startswith("error:")
+```
+
+Update `refresh_agents()`'s row-building loop (from Step 3) to call `_visibility_display(agent)` with the whole agent instead of the two separate arguments:
+
+```python
+        for agent in list_agents():
+            text, color = _STATUS_DISPLAY[agent_status(agent.id)]
+            vis_text, vis_color = _visibility_display(agent)
+            table.add_row(
+                agent.id,
+                agent.display_name,
+                agent.harness,
+                Text(text, style=f"bold {color}"),
+                Text(vis_text, style=f"bold {vis_color}"),
+            )
+```
 
 - [ ] **Step 6: Run all TUI tests**
 
