@@ -7,6 +7,10 @@ from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.tui.app import BuzzFleetApp
 from buzz_fleet.tui.screens.dashboard import DashboardScreen
 
+# The "no connected community by default" isolation fixture lives in
+# tests/tui/conftest.py — every file in this directory constructs a real
+# BuzzFleetApp(), so it's shared rather than duplicated per file.
+
 
 def _agent(agent_id: str) -> Agent:
     return Agent(
@@ -106,6 +110,57 @@ async def test_dashboard_refreshes_when_a_pushed_screen_is_popped(monkeypatch) -
         table = app.screen.query_one("#agent-table")
         assert table.row_count == 1
         assert table.get_row_at(0)[0] == "new-agent"
+
+
+@pytest.mark.asyncio
+async def test_refresh_heals_runtime_when_a_community_is_connected(monkeypatch) -> None:
+    """Regression test for the buzz-acp-never-installed incident: opening
+    the dashboard (or returning to it) must self-heal automatically — no
+    command the user has to remember to run. Verifies the wiring only
+    (that ensure_runtime_ready() is actually called when connected); the
+    healing logic itself is covered directly in test_manager.py.
+    """
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", list)
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.state.load_community",
+        lambda community_id: object(),
+    )
+    fake_manager = MagicMock()
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.AgentManager",
+        lambda runner, community: fake_manager,
+    )
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.push_screen(DashboardScreen())
+        await pilot.pause()
+
+    # BuzzFleetApp.on_mount() also auto-pushes a DashboardScreen once it
+    # sees a "connected" community (shared with the explicit push below via
+    # the same monkeypatched state.load_community) — this test only cares
+    # that healing happens when connected, not the exact call count.
+    assert fake_manager.ensure_runtime_ready.called
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_healing_when_no_community_is_connected(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", list)
+    fake_manager_cls = MagicMock()
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.AgentManager", fake_manager_cls)
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.push_screen(DashboardScreen())
+        await pilot.pause()
+
+    fake_manager_cls.assert_not_called()
 
 
 @pytest.mark.asyncio

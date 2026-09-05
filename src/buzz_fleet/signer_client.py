@@ -15,6 +15,15 @@ def generate_key(runner: CommandRunner) -> tuple[str, str]:
     return data["public_key"], data["secret_key"]
 
 
+def pubkey_from_nsec(runner: CommandRunner, nsec: str) -> str:
+    result = runner.run([BINARY, "pubkey-from-nsec", "--nsec", nsec])
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"pubkey-from-nsec failed: {payload.get('error')}")
+    pubkey: str = payload["public_key"]
+    return pubkey
+
+
 def check_connection(runner: CommandRunner, relay_url: str, nsec: str) -> bool:
     result = runner.run([BINARY, "check-connection", "--relay", relay_url, "--nsec", nsec])
     ok: bool = json.loads(result.stdout)["ok"]

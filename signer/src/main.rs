@@ -17,6 +17,11 @@ struct Cli {
 enum Command {
     /// Generate a new Nostr keypair, printed as JSON.
     GenerateKey,
+    /// Derive the hex public key for an existing nsec, printed as JSON.
+    PubkeyFromNsec {
+        #[arg(long)]
+        nsec: String,
+    },
     /// Verify a key can authenticate against a relay.
     CheckConnection {
         #[arg(long)]
@@ -69,6 +74,16 @@ async fn main() {
             );
             0
         }
+        Command::PubkeyFromNsec { nsec } => match Keys::parse(&nsec) {
+            Ok(keys) => {
+                println!("{}", json!({"ok": true, "public_key": keys.public_key().to_hex()}));
+                0
+            }
+            Err(e) => {
+                println!("{}", json!({"ok": false, "error": e.to_string()}));
+                1
+            }
+        },
         Command::CheckConnection { relay, nsec } => match run_check_connection(&relay, &nsec).await {
             Ok(()) => {
                 println!("{}", json!({"ok": true}));

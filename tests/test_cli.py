@@ -11,7 +11,11 @@ runner_cli = CliRunner()
 
 class FakeRunner:
     def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"ok": True}), stderr="")
+        if args[1:2] == ["pubkey-from-nsec"]:
+            payload = {"ok": True, "public_key": "a" * 64}
+        else:
+            payload = {"ok": True}
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
 
 
 def test_version_flag_prints_version_and_exits() -> None:

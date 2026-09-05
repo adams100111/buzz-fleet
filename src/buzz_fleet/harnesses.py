@@ -2,12 +2,22 @@
 
 Mirrors Buzz Desktop's runtime-discovery model (`desktop/src-tauri/src/managed_agents/discovery.rs`
 and `presets.rs`): each harness has an adapter binary buzz-acp actually shells out to
-(`_HARNESS_COMMAND` in `systemd.py`), and an "underlying CLI" a user is more likely to have
+(`_ADAPTER_COMMANDS` below — the single source of truth `systemd.write_agent_files` also
+uses via `resolve_adapter_command`), and an "underlying CLI" a user is more likely to have
 installed on its own. Missing the adapter but having the underlying CLI is a distinct,
 more encouraging state ("adapter_missing") than having neither ("not_installed") — the
 same distinction Desktop draws. Unlike Desktop, this runs inside the user's own shell/PATH
 already (buzz-fleet is a CLI/TUI tool, not a GUI app launched outside one), so a plain
 `shutil.which()` is sufficient — no login-shell spawn or sidecar-path search is needed.
+
+`resolve_adapter_command` matters for a real reason beyond detection: systemd's `--user`
+manager has its own fixed, minimal PATH (`/usr/local/bin:/usr/bin:...`) that does NOT
+include a version manager's per-tool install directories (mise, nvm, asdf, volta, ...) —
+so a `buzz-agent@*.service` unit can fail to find an adapter that's genuinely installed
+and on the *user's* PATH. Resolving to an absolute path once, here, at the point
+`buzz-fleet` itself writes the agent's env file (inheriting whatever PATH the user
+actually launched it with) sidesteps that entirely — no PATH list to guess or maintain
+inside the unit file.
 """
 
 from __future__ import annotations
@@ -63,6 +73,22 @@ _INSTALL_COMMANDS: dict[str, list[list[str]] | None] = {
     ],
     "goose": None,
 }
+
+
+def resolve_adapter_command(harness: str) -> str:
+    """The command to put in `BUZZ_ACP_AGENT_COMMAND` for `harness`.
+
+    Returns an absolute path when `shutil.which()` can resolve one of the
+    harness's adapter aliases from here — the environment `buzz-fleet`
+    itself is running in — otherwise the bare, first-listed alias name
+    unresolved, so `buzz-acp`'s own (much more limited) PATH lookup still
+    gets a chance rather than writing nothing at all.
+    """
+    for command in _ADAPTER_COMMANDS[harness]:
+        resolved = shutil.which(command)
+        if resolved:
+            return resolved
+    return _ADAPTER_COMMANDS[harness][0]
 
 
 def install_commands(harness: str) -> list[list[str]] | None:

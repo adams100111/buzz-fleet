@@ -22,7 +22,11 @@ class FakeRunner:
 
     def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
-        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"ok": self._ok}), stderr="")
+        if args[1:2] == ["pubkey-from-nsec"]:
+            payload = {"ok": True, "public_key": "a" * 64} if self._ok else {"ok": False, "error": "bad nsec"}
+        else:
+            payload = {"ok": self._ok}
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
 
 
 def test_connect_and_save_saves_community_on_success(tmp_path, monkeypatch) -> None:

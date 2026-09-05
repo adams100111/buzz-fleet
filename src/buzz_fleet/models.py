@@ -14,6 +14,11 @@ class Community(BaseModel):
     relay_url: str
     relay_admin_nsec: SecretStr
     display_name: str | None = None
+    # Optional (not required) so a community saved before this field existed
+    # still loads — AgentManager.ensure_runtime_ready() backfills it the
+    # first time it's needed, then persists it, rather than requiring a
+    # migration step or breaking on load.
+    owner_pubkey: str | None = None
 
 
 class SystemPromptSource(BaseModel):

@@ -9,6 +9,7 @@ from buzz_fleet.proc import CommandRunner
 
 class AgentStatus(Enum):
     RUNNING = auto()
+    STARTING = auto()
     STOPPED = auto()
     FAILED = auto()
     UNKNOWN = auto()
@@ -42,7 +43,16 @@ def stop(runner: CommandRunner, agent_id: str) -> None:
 
 _STATE_MAP = {
     "active": AgentStatus.RUNNING,
+    # A unit crash-looping under Restart=on-failure spends real time in
+    # "activating" between restart attempts — this used to fall through to
+    # UNKNOWN, hiding an actively-failing agent behind a status that reads
+    # as "nothing to see here". "reloading" is the analogous transient
+    # state for units that support reload. Real incident: an agent whose
+    # exec target didn't exist crash-looped 700+ times reporting "unknown".
+    "activating": AgentStatus.STARTING,
+    "reloading": AgentStatus.STARTING,
     "inactive": AgentStatus.STOPPED,
+    "deactivating": AgentStatus.STOPPED,
     "failed": AgentStatus.FAILED,
 }
 

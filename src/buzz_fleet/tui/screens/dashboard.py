@@ -31,6 +31,7 @@ CURRENT_COMMUNITY_ID = "eltahir"
 # Rich styles directly — Textual's `$variable` CSS syntax doesn't apply.
 _STATUS_DISPLAY: dict[AgentStatus, tuple[str, str]] = {
     AgentStatus.RUNNING: ("active", "#7FB069"),
+    AgentStatus.STARTING: ("starting", "#C98A2C"),
     AgentStatus.STOPPED: ("inactive", STATUS_INACTIVE),
     AgentStatus.FAILED: ("failed", "#C1553A"),
     AgentStatus.UNKNOWN: ("unknown", STATUS_INACTIVE),
@@ -85,6 +86,15 @@ class DashboardScreen(Screen):
 
     @work(exclusive=True)
     async def refresh_agents(self) -> None:
+        # Self-heals already-broken agents (e.g. buzz-acp missing) on every
+        # dashboard load — a no-op once buzz-acp is installed and the
+        # template is current, so this is cheap on every refresh, not just
+        # the first. Runs inside this worker, not synchronously at mount,
+        # so a cold install's download can't freeze the UI's first paint.
+        community = state.load_community(CURRENT_COMMUNITY_ID)
+        if community is not None:
+            AgentManager(RealCommandRunner(), community).ensure_runtime_ready()
+
         table = self.query_one("#agent-table", DataTable)
         table.clear()
         for agent in list_agents():

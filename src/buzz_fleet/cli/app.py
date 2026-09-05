@@ -104,6 +104,7 @@ def agent_create(
 @agent_app.command("list")
 def agent_list(community: Annotated[str, typer.Option()]) -> None:
     manager = _load_manager(community)
+    manager.ensure_runtime_ready()
     for agent in manager.list_agents():
         typer.echo(f"{agent.id}\t{agent.display_name}\t{agent.harness}")
 

@@ -51,6 +51,33 @@ def test_status_inactive_maps_to_stopped() -> None:
     assert status(runner, "laravel-backend-dev") == AgentStatus.STOPPED
 
 
+def test_status_activating_maps_to_starting() -> None:
+    """Regression test: a unit crash-looping under Restart=on-failure spends
+
+    real time in "activating" between restart attempts — this used to fall
+    through to UNKNOWN, hiding an actively-failing agent behind a status
+    that reads as "nothing to see here" (real incident: an agent whose exec
+    target didn't exist crash-looped 700+ times reporting "unknown").
+    """
+    runner = FakeRunner(stdout="activating\n")
+    assert status(runner, "laravel-backend-dev") == AgentStatus.STARTING
+
+
+def test_status_reloading_maps_to_starting() -> None:
+    runner = FakeRunner(stdout="reloading\n")
+    assert status(runner, "laravel-backend-dev") == AgentStatus.STARTING
+
+
+def test_status_deactivating_maps_to_stopped() -> None:
+    runner = FakeRunner(stdout="deactivating\n")
+    assert status(runner, "laravel-backend-dev") == AgentStatus.STOPPED
+
+
+def test_status_genuinely_unrecognized_output_maps_to_unknown() -> None:
+    runner = FakeRunner(stdout="\n")
+    assert status(runner, "laravel-backend-dev") == AgentStatus.UNKNOWN
+
+
 def test_tail_logs_returns_stdout() -> None:
     runner = FakeRunner(stdout="log line 1\nlog line 2\n")
     output = tail_logs(runner, "laravel-backend-dev", lines=50)

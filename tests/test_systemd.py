@@ -35,6 +35,10 @@ def _community() -> Community:
 
 def test_write_agent_files_creates_env_and_prompt(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    # Deterministic regardless of what's actually on this machine's PATH —
+    # the absolute-path-resolution behavior itself is covered separately
+    # below and in test_harnesses.py.
+    monkeypatch.setattr("buzz_fleet.harnesses.shutil.which", lambda cmd: None)
     agent = _agent()
 
     write_agent_files(agent, _community(), anthropic_api_key="sk-ant-test", openai_api_key=None)
@@ -47,6 +51,35 @@ def test_write_agent_files_creates_env_and_prompt(tmp_path: Path, monkeypatch) -
     assert f"BUZZ_ACP_SYSTEM_PROMPT_FILE={agent_prompt_path(agent.id)}" in env_content
     assert "BUZZ_ACP_TEAM_INSTRUCTIONS=Team-wide rules here." in env_content
     assert agent_prompt_path(agent.id).read_text() == "You are the Laravel dev."
+
+
+def test_write_agent_files_resolves_adapter_command_to_absolute_path_when_on_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression test for a real incident: systemd's `--user` manager has
+
+    its own fixed, minimal PATH that excludes version-manager install dirs
+    (mise/nvm/asdf/...) — an agent's unit could never find an adapter that
+    was genuinely installed and on the *user's* own PATH. Resolving to an
+    absolute path here, at write time (inheriting buzz-fleet's own PATH),
+    sidesteps that entirely.
+    """
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        "buzz_fleet.harnesses.shutil.which",
+        lambda cmd: "/home/dev/.local/share/mise/installs/node/22/bin/claude-agent-acp"
+        if cmd == "claude-agent-acp"
+        else None,
+    )
+    agent = _agent()
+
+    write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert (
+        "BUZZ_ACP_AGENT_COMMAND=/home/dev/.local/share/mise/installs/node/22/bin/claude-agent-acp"
+        in env_content
+    )
 
 
 def test_env_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:

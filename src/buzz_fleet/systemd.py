@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from buzz_fleet.buzz_acp import BUZZ_ACP_PATH
+from buzz_fleet.harnesses import resolve_adapter_command
 from buzz_fleet.models import Agent, Community
 
 if TYPE_CHECKING:
@@ -19,13 +21,6 @@ if TYPE_CHECKING:
 AGENTS_DIR = Path.home() / ".config" / "buzz-fleet" / "agents"
 TEMPLATE_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / "buzz-agent@.service"
 
-_HARNESS_COMMAND = {
-    "claude": "claude-agent-acp",
-    "codex": "codex-acp",
-    "pi": "pi-acp",
-    "goose": "goose",
-}
-
 # A --user unit, not a system unit — no root anywhere in buzz-fleet (spec Open
 # Question 2, resolved this way): no `User=` line (it always runs as whoever
 # owns this systemd --user instance), `WantedBy=default.target` (the --user
@@ -33,13 +28,20 @@ _HARNESS_COMMAND = {
 # Requires `loginctl enable-linger <user>` once so the --user instance (and
 # this unit) keeps running after the SSH session that created it ends — see
 # Task 12 Step 1.
+#
+# ExecStart points at BUZZ_ACP_PATH (a per-user path, not /usr/local/bin) so
+# `ensure_buzz_acp_installed()` can install it automatically with no sudo
+# prompt — a unit pointed at a root-owned path could never self-heal without
+# asking the user to run something manually. Real incident: a machine that
+# never separately installed buzz-acp had this crash-loop status=203/EXEC
+# (exec target doesn't exist) hundreds of times before this was caught.
 TEMPLATE_UNIT = f"""[Unit]
 Description=Buzz headless agent (%i)
 After=network-online.target
 
 [Service]
 EnvironmentFile={AGENTS_DIR}/%i.env
-ExecStart=/usr/local/bin/buzz-acp
+ExecStart={BUZZ_ACP_PATH}
 Restart=on-failure
 RestartSec=5
 
@@ -141,9 +143,18 @@ def write_agent_files(
     lines = [
         f"BUZZ_PRIVATE_KEY={agent.private_key.get_secret_value()}",
         f"BUZZ_RELAY_URL={community.relay_url}",
-        f"BUZZ_ACP_AGENT_COMMAND={_HARNESS_COMMAND[agent.harness]}",
+        f"BUZZ_ACP_AGENT_COMMAND={resolve_adapter_command(agent.harness)}",
         f"BUZZ_ACP_SYSTEM_PROMPT_FILE={prompt_path}",
     ]
+    if community.owner_pubkey:
+        # buzz-acp's own default is respond_to=owner-only — with no owner
+        # configured at all, every event is silently dropped forever (a
+        # real incident: every agent buzz-fleet ever created was running
+        # but functionally inert until this was wired). AgentManager.
+        # ensure_runtime_ready() backfills owner_pubkey on communities
+        # saved before this field existed, so this is only ever unset for
+        # a Community not yet round-tripped through that once.
+        lines.append(f"BUZZ_ACP_AGENT_OWNER={community.owner_pubkey}")
     if agent.team_instructions:
         lines.append(f"BUZZ_ACP_TEAM_INSTRUCTIONS={agent.team_instructions}")
     if agent.model:

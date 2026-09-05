@@ -4,12 +4,27 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from buzz_fleet import signer_client, state, systemctl_client, systemd
+from buzz_fleet import buzz_acp, harnesses, signer_client, state, systemctl_client, systemd
 from buzz_fleet.models import Agent, Community, SystemPromptSource
 from buzz_fleet.proc import CommandRunner
 from buzz_fleet.slug import agent_slug
 
 _ENV_KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+
+
+def _read_agent_command(agent_id: str) -> str | None:
+    """The `BUZZ_ACP_AGENT_COMMAND` value currently written for `agent_id`,
+
+    or None if it has no env file yet (a brand-new agent — `create_agent`'s
+    own `write_agent_files` call handles that case directly).
+    """
+    path = systemd.agent_env_path(agent_id)
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        if line.startswith("BUZZ_ACP_AGENT_COMMAND="):
+            return line.partition("=")[2]
+    return None
 
 
 def _read_existing_env_keys(agent_id: str) -> dict[str, str]:
@@ -39,6 +54,75 @@ class AgentManager:
     def list_agents(self) -> list[Agent]:
         return state.load_agents(self._community.id)
 
+    def _ensure_owner_pubkey(self) -> None:
+        """Backfill `owner_pubkey` on a `Community` saved before that field
+
+        existed, deriving it once from the already-known admin nsec and
+        persisting it — not a migration script to run by hand, just another
+        thing `ensure_runtime_ready()` notices and fixes.
+        """
+        if self._community.owner_pubkey:
+            return
+        owner_pubkey = signer_client.pubkey_from_nsec(
+            self._runner, self._community.relay_admin_nsec.get_secret_value()
+        )
+        self._community = self._community.model_copy(update={"owner_pubkey": owner_pubkey})
+        state.save_community(self._community)
+
+    def ensure_runtime_ready(self) -> None:
+        """Make sure everything a `buzz-agent@*` unit needs actually exists,
+        automatically healing agents that were already broken by it rather
+        than requiring a manual restart. Cheap to call on every dashboard
+        load or CLI command — each check is a no-op once already satisfied,
+        and an agent is only rewritten/restarted when something it actually
+        needs changed, never on an already-healthy call.
+
+        Heals three distinct, real incidents this way:
+
+        1. buzz-fleet never installed buzz-acp (the binary every unit
+           execs) at all — a machine that never separately installed it
+           crash-looped hundreds of times with status=203/EXEC.
+        2. Even after installing a harness's adapter (`claude-agent-acp`,
+           `codex-acp`, ...), an *already-existing* agent's env file still
+           has the stale command that was written before the adapter
+           existed — systemd's own PATH is fixed and won't pick it up
+           afterward on its own (see `harnesses.resolve_adapter_command`).
+        3. `BUZZ_ACP_AGENT_OWNER` was never set at all — every agent ran
+           "successfully" while silently dropping 100% of events forever,
+           since buzz-acp's own default (`respond_to=owner-only`) has
+           nothing to match against with no owner configured.
+
+        No step here should ever need a human to run something by hand.
+        """
+        owner_pubkey_before = self._community.owner_pubkey
+        self._ensure_owner_pubkey()
+        owner_pubkey_just_backfilled = owner_pubkey_before != self._community.owner_pubkey
+
+        systemd.ensure_linger_enabled(self._runner)
+        systemd.ensure_template_unit_installed(self._runner)
+        buzz_acp_just_installed = buzz_acp.ensure_buzz_acp_installed()
+        needs_full_refresh = buzz_acp_just_installed or owner_pubkey_just_backfilled
+
+        for agent in self.list_agents():
+            resolved_command = harnesses.resolve_adapter_command(agent.harness)
+            if not needs_full_refresh and _read_agent_command(agent.id) == resolved_command:
+                continue
+            existing_keys = _read_existing_env_keys(agent.id)
+            systemd.write_agent_files(
+                agent,
+                self._community,
+                anthropic_api_key=existing_keys.get("ANTHROPIC_API_KEY"),
+                openai_api_key=existing_keys.get("OPENAI_API_KEY"),
+            )
+            try:
+                systemctl_client.restart(self._runner, agent.id)
+            except RuntimeError:
+                # Best-effort: one agent's restart failing (e.g. its own
+                # unrelated config problem) must not block healing the
+                # rest, or the create/list call this came from. The next
+                # dashboard refresh's status column shows the truth.
+                pass
+
     def create_agent(
         self,
         *,
@@ -55,8 +139,7 @@ class AgentManager:
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
     ) -> Agent:
-        systemd.ensure_linger_enabled(self._runner)
-        systemd.ensure_template_unit_installed(self._runner)
+        self.ensure_runtime_ready()
         existing_ids = {a.id for a in self.list_agents()}
         agent_id = agent_slug(display_name, existing_ids)
         public_key, secret_key = signer_client.generate_key(self._runner)
@@ -106,6 +189,7 @@ class AgentManager:
         return agent
 
     def update_agent(self, agent_id: str, **changes: object) -> Agent:
+        self._ensure_owner_pubkey()
         agents = {a.id: a for a in self.list_agents()}
         current = agents[agent_id]
         updated = current.model_copy(update=changes)

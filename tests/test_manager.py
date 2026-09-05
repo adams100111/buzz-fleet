@@ -17,6 +17,8 @@ class FakeRunner:
         self.calls.append(args)
         if args[:2] == ["buzz-fleet-signer", "generate-key"]:
             stdout = json.dumps({"public_key": "ab" * 32, "secret_key": "nsec1agent"})
+        elif args[:2] == ["buzz-fleet-signer", "pubkey-from-nsec"]:
+            stdout = json.dumps({"ok": True, "public_key": "c" * 64})
         elif "add-member" in args or "remove-member" in args:
             stdout = json.dumps({"ok": True})
         elif args[:2] == ["loginctl", "show-user"]:
@@ -30,6 +32,27 @@ class FakeRunner:
 
 def _community() -> Community:
     return Community(id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1admin")
+
+
+@pytest.fixture(autouse=True)
+def _buzz_acp_already_installed(tmp_path: Path, monkeypatch) -> None:
+    """Every test in this file exercises `create_agent`, which now calls
+    `ensure_runtime_ready()` -> `buzz_acp.ensure_buzz_acp_installed()`.
+    Without this fixture, every test run would perform a REAL network
+    download into the real user's home directory — pre-seed an
+    already-installed, executable stub so it's a safe no-op by default.
+    Tests that specifically want the "just installed" self-heal path
+    override `buzz_acp.ensure_buzz_acp_installed` directly instead.
+    """
+    from buzz_fleet import buzz_acp
+
+    acp_dir = tmp_path / "buzz-acp-bin"
+    acp_dir.mkdir()
+    stub = acp_dir / "buzz-acp"
+    stub.write_bytes(b"stub")
+    stub.chmod(0o755)
+    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", acp_dir)
+    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", stub)
 
 
 def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch) -> None:
@@ -269,3 +292,147 @@ def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) ->
     assert agent.idle_timeout_seconds == 120
     assert agent.max_turn_duration_seconds == 600
     assert agent.respond_to_allowlist == ["a" * 64]
+
+
+def test_ensure_runtime_ready_restarts_existing_agents_when_buzz_acp_just_installed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression test for the real incident: buzz-fleet never installed
+    buzz-acp itself, so every agent's unit crash-looped forever with no way
+    to notice short of a human running `systemctl --user status` by hand.
+    ensure_runtime_ready() must restart already-existing agents the moment
+    it (re)installs buzz-acp, so a previously-broken agent heals itself the
+    next time the dashboard loads or any agent command runs — never a
+    restart when buzz-acp was already fine (that would restart healthy
+    agents on every single call, not just the one that matters).
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    first = manager.create_agent(
+        display_name="First Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    second = manager.create_agent(
+        display_name="Second Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    runner.calls.clear()
+
+    from buzz_fleet import buzz_acp
+
+    monkeypatch.setattr(buzz_acp, "ensure_buzz_acp_installed", lambda: True)
+
+    manager.ensure_runtime_ready()
+
+    assert ["systemctl", "--user", "restart", f"buzz-agent@{first.id}"] in runner.calls
+    assert ["systemctl", "--user", "restart", f"buzz-agent@{second.id}"] in runner.calls
+
+
+def test_ensure_runtime_ready_does_not_restart_agents_when_buzz_acp_already_installed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    manager.create_agent(
+        display_name="First Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    runner.calls.clear()
+
+    manager.ensure_runtime_ready()
+
+    assert not any(c[:3] == ["systemctl", "--user", "restart"] for c in runner.calls)
+
+
+def test_ensure_runtime_ready_refreshes_agent_whose_adapter_command_is_now_resolvable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression test for the real, second half of the incident: installing
+
+    a harness adapter *after* an agent already exists doesn't help that
+    agent on its own — its .env file still has the stale command written
+    before the adapter existed, and systemd's own PATH won't pick up a
+    version-manager-installed binary regardless. ensure_runtime_ready()
+    must notice the now-resolvable command differs from what's on disk and
+    heal it, without needing buzz-acp itself to have just been installed.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+
+    from buzz_fleet import harnesses
+
+    monkeypatch.setattr(harnesses.shutil, "which", lambda cmd: None)  # not resolvable at create time
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Codex Bot",
+        harness="codex",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    env_path = agent_env_path(agent.id)
+    assert "BUZZ_ACP_AGENT_COMMAND=codex-acp" in env_path.read_text()
+    runner.calls.clear()
+
+    # The adapter is "installed" now — resolvable to an absolute path.
+    monkeypatch.setattr(
+        harnesses.shutil,
+        "which",
+        lambda cmd: "/home/dev/.local/share/mise/installs/node/22/bin/codex-acp"
+        if cmd == "codex-acp"
+        else None,
+    )
+
+    manager.ensure_runtime_ready()
+
+    assert (
+        "BUZZ_ACP_AGENT_COMMAND=/home/dev/.local/share/mise/installs/node/22/bin/codex-acp"
+        in env_path.read_text()
+    )
+    assert ["systemctl", "--user", "restart", f"buzz-agent@{agent.id}"] in runner.calls
+
+
+def test_ensure_runtime_ready_continues_healing_other_agents_if_one_restart_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+
+    class FlakyRestartRunner(FakeRunner):
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[:3] == ["systemctl", "--user", "restart"] and "first-agent" in args[3]:
+                self.calls.append(args)
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="boom")
+            return super().run(args)
+
+    runner = FlakyRestartRunner()
+    manager = AgentManager(runner, _community())
+    manager.create_agent(
+        display_name="First Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    second = manager.create_agent(
+        display_name="Second Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    runner.calls.clear()
+
+    from buzz_fleet import buzz_acp
+
+    monkeypatch.setattr(buzz_acp, "ensure_buzz_acp_installed", lambda: True)
+
+    manager.ensure_runtime_ready()  # must not raise despite the first restart failing
+
+    assert ["systemctl", "--user", "restart", f"buzz-agent@{second.id}"] in runner.calls
