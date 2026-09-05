@@ -536,14 +536,19 @@ def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(
 
     manager.ensure_runtime_ready()
 
+    # archive-agent is delete-only (never called by ensure_runtime_ready/
+    # _sync_visibility) and correctly excluded; retract-managed-agent is a
+    # real subcommand a future unpublish path could call and must be
+    # included so this test still catches that regression if it ever
+    # happens.
     visibility_subcommands = {
         "compute-auth-tag",
         "publish-agent-profile",
         "publish-managed-agent",
+        "retract-managed-agent",
         "publish-agent-add-policy",
         "join-channel",
         "leave-channel",
-        "archive-agent",
     }
     assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)
 
