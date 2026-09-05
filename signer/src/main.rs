@@ -115,6 +115,19 @@ enum Command {
         #[arg(long)]
         policy: String,
     },
+    /// File a NIP-IA archive request (used only at delete time, owner-signed).
+    ArchiveAgent {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        owner_nsec: String,
+        #[arg(long)]
+        agent_pubkey: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        auth_tag: String,
+    },
 }
 
 #[tokio::main]
@@ -239,6 +252,13 @@ async fn main() {
         Command::PublishAgentAddPolicy { relay, agent_nsec, policy } => {
             let builder = agent_events::build_agent_add_policy(&policy);
             match run_publish(&relay, &agent_nsec, builder).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+        Command::ArchiveAgent { relay, owner_nsec, agent_pubkey, reason, auth_tag } => {
+            let builder = agent_events::build_archive_agent(&agent_pubkey, &reason, &auth_tag);
+            match run_publish(&relay, &owner_nsec, builder).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }

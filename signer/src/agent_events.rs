@@ -69,6 +69,29 @@ pub fn build_agent_add_policy(policy: &str) -> anyhow::Result<EventBuilder> {
     Ok(EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE), content))
 }
 
+pub const KIND_IA_ARCHIVE_REQUEST: u16 = 9035;
+
+/// Mirrors `desktop/src-tauri/src/events.rs`'s `identity_archive_tags` +
+/// `build_archive_identity_request` exactly: a NIP-70 protected marker
+/// (`["-"]`), the target `p` tag, a `reason` tag, and the owner's NIP-OA
+/// `auth` tag. Always owner-signed here — confirmed from
+/// `agents_pending.rs:188-224`'s real call site, which signs with the
+/// caller's (owner's) keys and only omits the auth tag when signer == target,
+/// never the case for buzz-fleet's delete flow.
+pub fn build_archive_agent(agent_pubkey_hex: &str, reason: &str, auth_tag_json: &str) -> anyhow::Result<EventBuilder> {
+    let parts: Vec<String> = serde_json::from_str(auth_tag_json)?;
+    if parts.len() != 4 || parts[0] != "auth" {
+        anyhow::bail!("invalid auth tag: expected a 4-element JSON array starting with \"auth\"");
+    }
+    let tags = vec![
+        Tag::parse(["-"])?,
+        Tag::parse(["p", agent_pubkey_hex])?,
+        Tag::parse(["reason", reason])?,
+        Tag::parse(parts)?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST), "").tags(tags))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +165,26 @@ mod tests {
     #[test]
     fn build_agent_add_policy_rejects_unknown_value() {
         assert!(build_agent_add_policy("sometimes").is_err());
+    }
+
+    #[test]
+    fn build_archive_agent_sets_expected_tags() {
+        let owner = Keys::generate();
+        let agent_pubkey = "e".repeat(64);
+        let event = build_archive_agent(&agent_pubkey, "retired", &sample_auth_tag())
+            .unwrap()
+            .sign_with_keys(&owner)
+            .unwrap();
+        assert_eq!(event.kind, Kind::Custom(9035));
+        assert_eq!(event.content, "");
+        let tag_values: Vec<Vec<&str>> = event
+            .tags
+            .iter()
+            .map(|t| t.as_slice().iter().map(String::as_str).collect())
+            .collect();
+        assert!(tag_values.contains(&vec!["-"]));
+        assert!(tag_values.contains(&vec!["p", agent_pubkey.as_str()]));
+        assert!(tag_values.contains(&vec!["reason", "retired"]));
+        assert!(tag_values.iter().any(|v| v[0] == "auth"));
     }
 }
