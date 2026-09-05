@@ -86,6 +86,17 @@ enum Command {
         #[arg(long)]
         auth_tag: String,
     },
+    /// Publish (owner-signed) the kind:30177 managed-agent record.
+    PublishManagedAgent {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        owner_nsec: String,
+        #[arg(long)]
+        agent_pubkey: String,
+        #[arg(long)]
+        content_file: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -178,6 +189,15 @@ async fn main() {
         Command::PublishAgentProfile { relay, agent_nsec, display_name, auth_tag } => {
             let builder = agent_events::build_agent_profile(&display_name, &auth_tag);
             match run_publish(&relay, &agent_nsec, builder).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+        Command::PublishManagedAgent { relay, owner_nsec, agent_pubkey, content_file } => {
+            let builder = std::fs::read_to_string(&content_file)
+                .map_err(anyhow::Error::from)
+                .and_then(|content| agent_events::build_managed_agent(&agent_pubkey, &content));
+            match run_publish(&relay, &owner_nsec, builder).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
