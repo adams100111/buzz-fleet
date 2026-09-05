@@ -656,3 +656,51 @@ def test_update_agent_does_not_touch_visibility_for_old_agent(tmp_path: Path, mo
 
     visibility_subcommands = {"compute-auth-tag", "publish-agent-profile", "publish-managed-agent"}
     assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)
+
+
+def test_delete_agent_leaves_channels_retracts_and_archives(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Doomed Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        channel_ids=["33333333-3333-3333-3333-333333333333"],
+    )
+    runner.calls.clear()
+
+    manager.delete_agent(agent.id)
+
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert "leave-channel" in subcommands
+    assert "retract-managed-agent" in subcommands
+    assert "archive-agent" in subcommands
+    archive_call = next(c for c in runner.calls if c[:2] == ["buzz-fleet-signer", "archive-agent"])
+    assert "--owner-nsec" in archive_call
+    assert "retired" in archive_call
+
+
+def test_delete_agent_skips_visibility_teardown_for_old_agent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Old Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    from buzz_fleet import state as state_module
+
+    old_style = agent.model_copy(update={"visibility_managed": False})
+    state_module.save_agent(old_style)
+    runner.calls.clear()
+
+    manager.delete_agent(agent.id)
+
+    visibility_subcommands = {"retract-managed-agent", "archive-agent", "leave-channel"}
+    assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)

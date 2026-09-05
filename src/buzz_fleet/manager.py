@@ -345,6 +345,31 @@ class AgentManager:
         agents = {a.id: a for a in self.list_agents()}
         agent = agents[agent_id]
         systemctl_client.disable_now(self._runner, agent_id)
+
+        if agent.visibility_managed:
+            owner_nsec = self._community.relay_admin_nsec.get_secret_value()
+            agent_nsec = agent.private_key.get_secret_value()
+            for channel_id in agent.channel_ids or []:
+                try:
+                    signer_client.leave_channel(self._runner, self._community.relay_url, agent_nsec, channel_id)
+                except (RuntimeError, json.JSONDecodeError, KeyError):
+                    # Best-effort, matches Desktop's own delete flow — a
+                    # channel leave failing must not block the rest of
+                    # deletion (the relay membership below still gets
+                    # revoked regardless).
+                    pass
+            try:
+                signer_client.retract_managed_agent(self._runner, self._community.relay_url, owner_nsec, agent.public_key)
+            except (RuntimeError, json.JSONDecodeError, KeyError):
+                pass
+            try:
+                auth_tag = signer_client.compute_auth_tag(self._runner, owner_nsec, agent.public_key)
+                signer_client.archive_agent(
+                    self._runner, self._community.relay_url, owner_nsec, agent.public_key, "retired", auth_tag
+                )
+            except (RuntimeError, json.JSONDecodeError, KeyError):
+                pass
+
         signer_client.remove_member(
             self._runner,
             self._community.relay_url,
