@@ -13,7 +13,10 @@ already (buzz-fleet is a CLI/TUI tool, not a GUI app launched outside one), so a
 from __future__ import annotations
 
 import shutil
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from buzz_fleet.proc import CommandRunner
 
 HarnessAvailability = Literal["available", "adapter_missing", "not_installed"]
 
@@ -44,6 +47,45 @@ _SORT_RANK: dict[HarnessAvailability, int] = {
     "adapter_missing": 1,
     "not_installed": 2,
 }
+
+# Verified against buzz's own desktop/src-tauri/src/managed_agents/discovery/{catalog,presets}.rs
+# and desktop/src/features/agents/ui/runtimeAvailabilityWarning.ts — the exact commands Buzz
+# Desktop's own "adapter missing" hint shows. codex-acp is pinned to 1.x: buzz's CHANGELOG notes
+# a minimum-version gate added when 1.x shipped (PR #1750) — an unpinned install can resolve 0.x.
+# goose has no known automated install here (not an npm package at all) — None means "point the
+# user at manual install instructions" rather than fabricate a command.
+_INSTALL_COMMANDS: dict[str, list[list[str]] | None] = {
+    "claude": [["npm", "install", "-g", "@agentclientprotocol/claude-agent-acp"]],
+    "codex": [["npm", "install", "-g", "@agentclientprotocol/codex-acp@^1"]],
+    "pi": [
+        ["npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"],
+        ["npm", "install", "-g", "pi-acp"],
+    ],
+    "goose": None,
+}
+
+
+def install_commands(harness: str) -> list[list[str]] | None:
+    """The npm command(s) that install `harness`'s adapter, or None if none is known."""
+    return _INSTALL_COMMANDS[harness]
+
+
+def install_adapter(runner: CommandRunner, harness: str) -> None:
+    """Run `harness`'s install command(s) in order. Raises RuntimeError on any failure."""
+    commands = install_commands(harness)
+    if commands is None:
+        raise RuntimeError(
+            f"No automated install is known for '{harness}' — see https://github.com/block/goose"
+            if harness == "goose"
+            else f"No automated install is known for '{harness}'."
+        )
+    for command in commands:
+        result = runner.run(command)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Installing {harness}'s adapter failed (`{' '.join(command)}`): "
+                f"{result.stderr.strip()}"
+            )
 
 
 def detect_harness_availability() -> dict[str, HarnessAvailability]:

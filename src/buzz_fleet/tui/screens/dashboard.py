@@ -47,6 +47,15 @@ class DashboardScreen(Screen):
     def on_mount(self) -> None:
         self.refresh_agents()
 
+    def on_screen_resume(self) -> None:
+        # Fires when this screen becomes visible again after AgentFormScreen/
+        # LogsScreen is popped (e.g. after creating, editing, or cancelling
+        # out of the form) — without this, a newly created/edited agent never
+        # shows up until the dashboard is torn down and rebuilt from scratch,
+        # even though it was really created (relay membership published,
+        # local state saved) — the table just never re-reads it.
+        self.refresh_agents()
+
     @work(exclusive=True)
     async def refresh_agents(self) -> None:
         table = self.query_one("#agent-table", DataTable)

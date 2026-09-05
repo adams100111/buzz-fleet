@@ -298,3 +298,55 @@ def test_agent_update_strips_whitespace_around_respond_to_allowlist_entries(monk
 
     assert result.exit_code == 0, result.output
     assert calls["changes"] == {"respond_to_allowlist": ["a" * 64, "b" * 64]}
+
+
+def test_harness_list_prints_availability(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+
+    monkeypatch.setattr(
+        harnesses.shutil, "which", lambda cmd: "/usr/bin/x" if cmd in ("claude-agent-acp", "codex") else None
+    )
+
+    result = runner_cli.invoke(app, ["harness", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "claude\tavailable" in result.output
+    assert "codex\tadapter_missing" in result.output
+
+
+def test_harness_install_runs_install_and_reports_success(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+
+    calls: list[tuple[object, str]] = []
+
+    def fake_install_adapter(runner: object, name: str) -> None:
+        calls.append((runner, name))
+
+    monkeypatch.setattr(harnesses, "install_adapter", fake_install_adapter)
+
+    result = runner_cli.invoke(app, ["harness", "install", "codex"])
+
+    assert result.exit_code == 0, result.output
+    assert "Installed codex" in result.output
+    assert calls == [(calls[0][0], "codex")]
+
+
+def test_harness_install_rejects_unknown_harness() -> None:
+    result = runner_cli.invoke(app, ["harness", "install", "bogus"])
+
+    assert result.exit_code == 1
+    assert "Unknown harness" in result.output
+
+
+def test_harness_install_reports_failure(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+
+    def fake_install_adapter(runner: object, name: str) -> None:
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(harnesses, "install_adapter", fake_install_adapter)
+
+    result = runner_cli.invoke(app, ["harness", "install", "codex"])
+
+    assert result.exit_code == 1
+    assert "network error" in result.output

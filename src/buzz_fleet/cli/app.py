@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from buzz_fleet import __version__, state
+from buzz_fleet import __version__, harnesses, state
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import SystemPromptSource
@@ -16,6 +16,8 @@ from buzz_fleet.proc import RealCommandRunner
 app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
 agent_app = typer.Typer(help="Manage agent identities")
 app.add_typer(agent_app, name="agent")
+harness_app = typer.Typer(help="Detect and install harness adapters")
+app.add_typer(harness_app, name="harness")
 
 
 def _version_callback(show_version: bool) -> None:
@@ -154,6 +156,26 @@ def agent_update(
         raise typer.Exit(code=1)
     updated = manager.update_agent(agent_id, **changes)
     typer.echo(f"Updated agent '{updated.id}'.")
+
+
+@harness_app.command("list")
+def harness_list() -> None:
+    availability = harnesses.detect_harness_availability()
+    for harness in harnesses.HARNESSES:
+        typer.echo(f"{harness}\t{availability[harness]}")
+
+
+@harness_app.command("install")
+def harness_install(name: Annotated[str, typer.Argument(help="claude, codex, pi, or goose")]) -> None:
+    if name not in harnesses.HARNESSES:
+        typer.echo(f"Unknown harness '{name}' — one of: {', '.join(harnesses.HARNESSES)}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        harnesses.install_adapter(RealCommandRunner(), name)
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    typer.echo(f"Installed {name}'s adapter.")
 
 
 @app.command()

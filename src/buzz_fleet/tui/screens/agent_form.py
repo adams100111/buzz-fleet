@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from textual.app import ComposeResult
+from textual.binding import Binding, BindingType
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Select, Static
 
 from buzz_fleet import harnesses, personas
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Agent, SystemPromptSource
+from buzz_fleet.proc import RealCommandRunner
 
 
 class AgentFormScreen(Screen):
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
     def __init__(self, manager: AgentManager, agent: Agent | None = None) -> None:
         super().__init__()
         self._manager = manager
         self._agent = agent
         self._original_prompt_text: str | None = None
         self._templates: list[personas.PersonaTemplate] = []
+        self._harness_availability: dict[str, harnesses.HarnessAvailability] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -57,9 +66,13 @@ class AgentFormScreen(Screen):
 
         yield Input(value=display_name, placeholder="Display name", id="display-name-input")
         yield Static("Harness:")
+        self._harness_availability = harnesses.detect_harness_availability()
         yield Select(
             harnesses.harness_select_options(), value=harness, allow_blank=False, id="harness-select"
         )
+        install_button = Button(f"Install {harness} adapter", id="install-adapter-button")
+        install_button.display = self._harness_availability[harness] != "available"
+        yield install_button
         yield Input(value=prompt_text, placeholder="System prompt", id="prompt-input")
         yield Input(
             value=self._agent.model if self._agent and self._agent.model else "",
@@ -104,6 +117,12 @@ class AgentFormScreen(Screen):
         yield Footer()
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "harness-select":
+            available = self._harness_availability.get(event.value) == "available"
+            button = self.query_one("#install-adapter-button", Button)
+            button.label = f"Install {event.value} adapter"
+            button.display = not available
+            return
         if event.select.id != "template-select":
             return
         if event.value is Select.BLANK:
@@ -129,6 +148,9 @@ class AgentFormScreen(Screen):
         # template — see the design spec.
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "install-adapter-button":
+            self._install_selected_harness_adapter()
+            return
         if event.button.id != "submit-button":
             return
         display_name = self.query_one("#display-name-input", Input).value
@@ -194,6 +216,21 @@ class AgentFormScreen(Screen):
             return
         self.app.pop_screen()
 
+    def action_cancel(self) -> None:
+        self.app.pop_screen()
+
     def _parse_optional_int(self, input_id: str) -> int | None:
         raw = self.query_one(input_id, Input).value.strip()
         return int(raw) if raw else None
+
+    def _install_selected_harness_adapter(self) -> None:
+        harness = self.query_one("#harness-select", Select).value
+        self.notify(f"Installing {harness}'s adapter — this may take a moment…")
+        try:
+            harnesses.install_adapter(RealCommandRunner(), harness)
+        except RuntimeError as e:
+            self.notify(str(e), severity="error")
+            return
+        self._harness_availability[harness] = "available"
+        self.query_one("#install-adapter-button", Button).display = False
+        self.notify(f"Installed {harness}'s adapter.")
