@@ -85,7 +85,7 @@ Expected: builds cleanly (no code uses `buzz_sdk` yet, so this only proves the g
 
 - [ ] **Step 3: Add the two `Command` variants and their handlers to `main.rs`**
 
-Add `Kind` to `main.rs`'s existing `use nostr::Keys;` import line, making it `use nostr::{Keys, Kind};` — needed by this task's own test (Step 4) and Task 5's, both of which reference `Kind::Custom(...)` directly in `main.rs`'s test module; `use super::*;` only pulls in what the file already imports at its top, and `main.rs` has no `Kind` import today.
+Leave `main.rs`'s existing `use nostr::Keys;` import line unchanged — `Kind` is needed only by this task's own test (Step 4) and Task 5's (both reference `Kind::Custom(...)`), never by production handler code, so it's imported inside the test module in Step 4 instead of at the top of the file. A top-level `use nostr::Kind;` would trigger an `unused import` warning on every plain (non-test) `cargo build`, forever — not something to introduce into a file that otherwise builds warning-free.
 
 Add to the `Command` enum (after the existing `RemoveMember` variant):
 
@@ -149,11 +149,13 @@ Add a `#[cfg(test)] mod tests` block at the bottom of `main.rs` (this file has n
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only referenced from test code below — kept scoped to this module so
+    // a plain (non-test) `cargo build` never warns about an unused import.
+    use nostr::Kind;
 
     #[test]
     fn join_channel_builds_self_add_with_bot_role() {
         let keys = Keys::generate();
-        let nsec = keys.secret_key().to_bech32().unwrap();
         let channel_id = uuid::Uuid::new_v4();
         let builder = buzz_sdk::builders::build_add_member(
             channel_id,
@@ -167,6 +169,19 @@ mod tests {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["role", "bot"]
         }));
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["h", channel_id.to_string().as_str()]
+        }));
+    }
+
+    #[test]
+    fn leave_channel_builds_self_remove() {
+        let keys = Keys::generate();
+        let channel_id = uuid::Uuid::new_v4();
+        let builder = buzz_sdk::builders::build_remove_member(channel_id, &keys.public_key().to_hex()).unwrap();
+        let event = builder.sign_with_keys(&keys).unwrap();
+        assert_eq!(event.kind, Kind::Custom(9001));
         assert!(event.tags.iter().any(|t| {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["h", channel_id.to_string().as_str()]
