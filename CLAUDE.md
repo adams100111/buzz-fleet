@@ -5,7 +5,7 @@
 `ensure_runtime_ready()` is the single entry point for "make sure a
 `buzz-agent@*` unit can actually run" — called from `create_agent`,
 `update_agent`, the dashboard's every refresh, and `agent list`. It exists
-because five real, previously-undiscovered incidents were found by
+because six real, previously-undiscovered incidents were found by
 actually running a live agent end-to-end, not by code review:
 
 1. **`buzz-acp` itself was never installed anywhere.** buzz-fleet's own
@@ -64,13 +64,43 @@ actually running a live agent end-to-end, not by code review:
    restarts the unit once) for any managed agent whose env file predates
    this fix — the relay's own ownership record is first-write-wins and
    permanent per community, so one successful reconnect with the tag is
-   enough, forever.
+   enough, forever. **This alone did not actually fix the reported bug —
+   see concern 6.**
+6. **The BUZZ_AUTH_TAG fix (concern 5) never took effect, because
+   `create_agent` also published a `kind:9030` event making every agent a
+   *direct* relay member.** The relay's own membership check
+   (`check_relay_membership` in `buzz-relay`) returns "already a member" as
+   soon as `is_relay_member` is true — before it ever looks at the AUTH
+   event's NIP-OA `auth` tag. A direct member therefore never reaches the
+   code path (`materialize_nip_oa_owner`) that backfills
+   `agent_owner_pubkey`, no matter what `BUZZ_AUTH_TAG` contains. Confirmed
+   live: an agent still connected and authenticated fine after its direct
+   relay membership was revoked, proving the target relay has NIP-OA
+   delegation enabled (`BUZZ_ALLOW_NIP_OA_AUTH=true`) and that direct
+   membership was never actually required. Fixed by no longer calling
+   `signer_client.add_member()` from `create_agent` at all — relying purely
+   on NIP-OA delegation for both relay connectivity and ownership, exactly
+   how Buzz Desktop's own agent-creation flow works
+   (`desktop/src-tauri/src/commands/agents.rs` never calls
+   `add_relay_member` either). `delete_agent`'s unconditional
+   `remove_member()` call (a leftover from when every agent was a direct
+   member) is now wrapped in the same best-effort try/except as its other
+   relay-side calls, since the relay rejects it as "member not found" for
+   any agent created after this fix — that must not block deletion. There
+   is no retroactive backfill for agents already made direct members before
+   this fix shipped (revoking membership out from under an unknown number
+   of live, working agents is not something to do unprompted) — recreate an
+   affected agent, or manually revoke its membership with
+   `buzz-fleet-signer remove-member`, to bring it onto the corrected path.
 
-All five heal automatically — no CLI flag, no doc a user has to know to
-run. `ensure_runtime_ready()` only rewrites/restarts an agent when
-something it actually needs changed (a resolved command differs from
-what's on disk, or the owner pubkey was just backfilled) — never on an
+Concerns 1–5 heal automatically through `ensure_runtime_ready()` — no CLI
+flag, no doc a user has to know to run; it only rewrites/restarts an agent
+when something it actually needs changed (a resolved command differs from
+what's on disk, or the owner pubkey was just backfilled), never on an
 already-healthy call, so it's cheap to call unconditionally and often.
+Concern 6 is preventive (fixed in `create_agent`/`delete_agent` directly,
+not in `ensure_runtime_ready`) — it has no retroactive backfill, per the
+note above.
 
 ## Known gaps / future work
 

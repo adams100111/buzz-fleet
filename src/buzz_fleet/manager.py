@@ -274,7 +274,6 @@ class AgentManager:
         respond_to_allowlist: list[str] | None = None,
         channel_ids: list[str] | None = None,
         channel_add_policy: str | None = None,
-        role: str | None = None,
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
     ) -> Agent:
@@ -303,21 +302,24 @@ class AgentManager:
             created_at=datetime.now(UTC),
         )
 
-        # Resolve (and thereby validate) the prompt source BEFORE publishing
-        # relay membership. A missing/invalid persona_file path must fail loudly
-        # here, before any relay-side effect happens — otherwise add_member below
-        # publishes a real kind:9030 event for a member that never gets recorded
-        # locally (write_agent_files failing after add_member would orphan it,
-        # with no local record of the secret key to ever revoke it). See Fix 3.
+        # Resolve (and thereby validate) the prompt source BEFORE any relay-side
+        # effect happens — a missing/invalid persona_file path must fail loudly
+        # here, not after state that would need to be unwound.
+        #
+        # Deliberately NOT calling signer_client.add_member() (kind:9030 direct
+        # relay membership) here, even though earlier versions of buzz-fleet did:
+        # a direct member short-circuits the relay's own membership check before
+        # it ever inspects the NIP-OA auth tag (see check_relay_membership in
+        # buzz-relay), which means agent_owner_pubkey — the column owner_only
+        # channel-add-policy reads — never gets backfilled for a direct member,
+        # no matter what BUZZ_AUTH_TAG says. Relying purely on NIP-OA delegation
+        # (BUZZ_AUTH_TAG, computed below) for both relay connectivity and
+        # ownership is exactly how Desktop's own agent-creation flow works
+        # (desktop/src-tauri/src/commands/agents.rs never calls add_relay_member
+        # either) — confirmed live against the real eltahir relay: an agent with
+        # its direct membership revoked still connects and authenticates fine.
         systemd.resolve_prompt_text(agent)
 
-        signer_client.add_member(
-            self._runner,
-            self._community.relay_url,
-            self._community.relay_admin_nsec.get_secret_value(),
-            public_key,
-            role=role,
-        )
         systemd.write_agent_files(
             agent, self._community, anthropic_api_key, openai_api_key, self._compute_agent_auth_tag(agent)
         )
@@ -431,12 +433,22 @@ class AgentManager:
             except (RuntimeError, json.JSONDecodeError, KeyError):
                 pass
 
-        signer_client.remove_member(
-            self._runner,
-            self._community.relay_url,
-            self._community.relay_admin_nsec.get_secret_value(),
-            agent.public_key,
-        )
+        # Best-effort: an agent created after direct relay membership was
+        # dropped from create_agent (see the comment there) was never added,
+        # so the relay rejects this as "member not found" for every such
+        # agent — that must not block the rest of deletion. Still attempted
+        # unconditionally because agents created before that change (or ones
+        # a future path re-adds directly) may still hold real membership to
+        # revoke.
+        try:
+            signer_client.remove_member(
+                self._runner,
+                self._community.relay_url,
+                self._community.relay_admin_nsec.get_secret_value(),
+                agent.public_key,
+            )
+        except (RuntimeError, json.JSONDecodeError, KeyError):
+            pass
         state.delete_agent(self._community.id, agent_id)
         # Remove the private-key-bearing env file and the persona prompt file —
         # without this the secret key survives "deletion" on disk, and a stale

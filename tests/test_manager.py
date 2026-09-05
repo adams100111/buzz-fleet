@@ -85,8 +85,12 @@ def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch
 
     assert agent.id == "laravel-backend-dev"
     assert agent.public_key == "ab" * 32
-    add_member_call = next(c for c in runner.calls if "add-member" in c)
-    assert "--pubkey" in add_member_call and "ab" * 32 in add_member_call
+    # Deliberately NOT a direct relay member (kind:9030) — see the comment in
+    # create_agent: a direct member short-circuits the relay's own membership
+    # check before it ever looks at the NIP-OA auth tag, which would silently
+    # break the owner_only channel-add-policy backfill. Matches Desktop's own
+    # agent-creation flow, which never adds agents as direct relay members.
+    assert not any("add-member" in c for c in runner.calls)
     assert ["systemctl", "--user", "enable", "--now", "buzz-agent@laravel-backend-dev"] in runner.calls
     assert manager.list_agents() == [agent]
 
@@ -121,22 +125,17 @@ def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatc
         harness="claude",
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
     )
-    add_member_calls_before = len([c for c in runner.calls if "add-member" in c])
-
     updated = manager.update_agent(agent.id, system_prompt_source=SystemPromptSource(kind="inline", text="y"))
 
-    add_member_calls_after = len([c for c in runner.calls if "add-member" in c])
-    assert add_member_calls_after == add_member_calls_before
     assert ["systemctl", "--user", "restart", "buzz-agent@throwaway"] in runner.calls
     assert updated.system_prompt_source.text == "y"
 
 
-def test_create_agent_with_missing_persona_file_fails_before_add_member(tmp_path: Path, monkeypatch) -> None:
+def test_create_agent_with_missing_persona_file_fails_before_publishing(tmp_path: Path, monkeypatch) -> None:
     """Regression test for Fix 3.
 
     A missing/invalid persona_file path must fail loudly before any relay-side
-    effect (add-member) happens — otherwise the relay membership is published
-    but never recorded locally, orphaning it with no way to revoke it.
+    effect happens — otherwise state would be orphaned with no local record.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
@@ -151,7 +150,39 @@ def test_create_agent_with_missing_persona_file_fails_before_add_member(tmp_path
             system_prompt_source=SystemPromptSource(kind="persona_file", path=Path("/nonexistent/persona.md")),
         )
 
-    assert not any("add-member" in c for c in runner.calls)
+    assert manager.list_agents() == []
+
+
+def test_delete_agent_survives_remove_member_failure_for_never_registered_agent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression test: an agent created after direct relay membership was
+    dropped from create_agent was never added as a member, so the relay
+    rejects remove-member as "member not found" on delete. That must not
+    crash deletion — it's expected steady state, not an error to surface.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+
+    class NeverMemberRunner(FakeRunner):
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            if "remove-member" in args:
+                stdout = json.dumps({"ok": False, "error": "invalid: member not found: ab" * 16})
+                return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+            return super().run(args)
+
+    runner = NeverMemberRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Throwaway",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+
+    manager.delete_agent(agent.id)  # must not raise
+
+    assert manager.list_agents() == []
 
 
 def test_delete_agent_removes_env_and_prompt_files(tmp_path: Path, monkeypatch) -> None:
@@ -237,8 +268,9 @@ def test_create_agent_is_recorded_locally_even_if_enable_now_fails(tmp_path: Pat
     recorded = manager.list_agents()
     assert len(recorded) == 1
     assert recorded[0].id == "orphan-test"
-    add_member_call = next(c for c in runner.calls if "add-member" in c)
-    assert add_member_call  # membership was published — the local record above is what makes it revocable
+    # Visibility events were published before enable_now raised — the local
+    # record above is what makes that published state discoverable/revocable.
+    assert any(tuple(c[:2]) == ("buzz-fleet-signer", "publish-agent-profile") for c in runner.calls)
 
 
 class LingerCantEnableRunner(FakeRunner):

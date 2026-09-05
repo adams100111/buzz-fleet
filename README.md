@@ -160,13 +160,44 @@ buzz-fleet agent delete --community eltahir test-echo
 
 Each command's actual effect on the systemd unit:
 
-- **create**: mints a key, registers it as a relay member, writes
-  `~/.config/buzz-fleet/agents/<id>.{env,prompt.md}`, and
-  `systemctl --user enable --now buzz-agent@<id>`.
+- **create**: mints a key, publishes the agent's visibility events (kind:0
+  profile, kind:9000 channel joins, kind:10100 add-policy, kind:30177
+  managed-agent record) with a NIP-OA `auth` tag proving the community
+  owner authorized it, writes `~/.config/buzz-fleet/agents/<id>.{env,
+  prompt.md}` (including that tag as `BUZZ_AUTH_TAG`, which `buzz-acp`
+  attaches to its own relay AUTH event on every connect), and
+  `systemctl --user enable --now buzz-agent@<id>`. Deliberately does *not*
+  register the agent as a direct relay member (kind:9030) — see "Why agents
+  aren't direct relay members" below.
 - **update**: rewrites those files and `systemctl --user restart`s the unit
   — there is no live-reload, `buzz-acp` reads its config once at startup.
-- **delete**: `systemctl --user disable --now`, revokes relay membership,
-  and deletes the agent's env/prompt files and local record.
+- **delete**: `systemctl --user disable --now`, best-effort revokes relay
+  membership if the agent ever held any (a no-op for any agent created after
+  this behavior changed), and deletes the agent's env/prompt files and local
+  record.
+
+#### Why agents aren't direct relay members
+
+Earlier versions of `buzz-fleet` published a `kind:9030` event making every
+agent a direct relay member — the only way, at the time, for an agent to
+connect to a relay that requires membership at all. This actively breaks
+`channel_add_policy=owner_only`: the relay's own membership check
+(`check_relay_membership` in `buzz-relay`) returns "already a member"
+*before* it ever looks at the agent's NIP-OA `auth` tag, so
+`agent_owner_pubkey` — the column that policy reads — never gets backfilled,
+and a third party adding the agent to a channel from another device fails
+with `policy:owner_only — agent has no owner set` no matter what the agent's
+env file contains. Relying purely on NIP-OA delegation (the `auth` tag,
+verified fresh on every AUTH) for both relay connectivity *and* ownership
+avoids this — it's also exactly how Buzz Desktop's own managed-agent
+creation flow works; it never adds an agent as a direct relay member either.
+This requires the relay to have NIP-OA delegation enabled
+(`BUZZ_ALLOW_NIP_OA_AUTH=true`) — confirmed live against the relay this
+project was built against, where a direct membership revoke on a running
+agent didn't interrupt its connection at all. Pointed at a relay with that
+flag off, a newly created agent won't be able to connect at all (rather than
+just failing owner_only channel adds) — if agents stop connecting after an
+upgrade, that flag is the first thing to check on the relay side.
 
 #### Persona templates
 
