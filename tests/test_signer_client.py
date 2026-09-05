@@ -1,7 +1,20 @@
 import json
 import subprocess
+from pathlib import Path
 
-from buzz_fleet.signer_client import add_member, check_connection, generate_key
+from buzz_fleet.signer_client import (
+    add_member,
+    archive_agent,
+    check_connection,
+    compute_auth_tag,
+    generate_key,
+    join_channel,
+    leave_channel,
+    publish_agent_add_policy,
+    publish_agent_profile,
+    publish_managed_agent,
+    retract_managed_agent,
+)
 
 
 class FakeRunner:
@@ -52,3 +65,80 @@ def test_add_member_passes_role_flag_when_given() -> None:
             "admin",
         ]
     ]
+
+
+def test_compute_auth_tag_returns_the_tag_string() -> None:
+    runner = FakeRunner(json.dumps({"ok": True, "auth_tag": '["auth","a","",  "b"]'}))
+    assert compute_auth_tag(runner, "nsec1owner", "c" * 64) == '["auth","a","",  "b"]'
+    assert runner.calls == [
+        ["buzz-fleet-signer", "compute-auth-tag", "--owner-nsec", "nsec1owner", "--agent-pubkey", "c" * 64]
+    ]
+
+
+def test_publish_agent_profile_passes_all_flags() -> None:
+    runner = FakeRunner(json.dumps({"ok": True}))
+    publish_agent_profile(runner, "wss://r", "nsec1agent", "Display Name", '["auth","a","","b"]')
+    assert runner.calls == [
+        [
+            "buzz-fleet-signer",
+            "publish-agent-profile",
+            "--relay",
+            "wss://r",
+            "--agent-nsec",
+            "nsec1agent",
+            "--display-name",
+            "Display Name",
+            "--auth-tag",
+            '["auth","a","","b"]',
+        ]
+    ]
+
+
+def test_publish_managed_agent_passes_content_file_path() -> None:
+    runner = FakeRunner(json.dumps({"ok": True}))
+    publish_managed_agent(runner, "wss://r", "nsec1owner", "c" * 64, Path("/tmp/content.json"))
+    assert runner.calls == [
+        [
+            "buzz-fleet-signer",
+            "publish-managed-agent",
+            "--relay",
+            "wss://r",
+            "--owner-nsec",
+            "nsec1owner",
+            "--agent-pubkey",
+            "c" * 64,
+            "--content-file",
+            "/tmp/content.json",
+        ]
+    ]
+
+
+def test_retract_managed_agent_raises_on_failure() -> None:
+    runner = FakeRunner(json.dumps({"ok": False, "error": "invalid: not found"}))
+    try:
+        retract_managed_agent(runner, "wss://r", "nsec1owner", "c" * 64)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "invalid: not found" in str(e)
+
+
+def test_publish_agent_add_policy_passes_policy() -> None:
+    runner = FakeRunner(json.dumps({"ok": True}))
+    publish_agent_add_policy(runner, "wss://r", "nsec1agent", "owner_only")
+    assert "--policy" in runner.calls[0] and "owner_only" in runner.calls[0]
+
+
+def test_join_channel_and_leave_channel_pass_channel_id() -> None:
+    runner = FakeRunner(json.dumps({"ok": True}))
+    join_channel(runner, "wss://r", "nsec1agent", "11111111-1111-1111-1111-111111111111")
+    leave_channel(runner, "wss://r", "nsec1agent", "11111111-1111-1111-1111-111111111111")
+    assert runner.calls[0][1] == "join-channel"
+    assert runner.calls[1][1] == "leave-channel"
+
+
+def test_archive_agent_passes_owner_nsec_and_reason() -> None:
+    runner = FakeRunner(json.dumps({"ok": True}))
+    archive_agent(runner, "wss://r", "nsec1owner", "c" * 64, "retired", '["auth","a","","b"]')
+    call = runner.calls[0]
+    assert "--owner-nsec" in call and "nsec1owner" in call
+    assert "--reason" in call and "retired" in call

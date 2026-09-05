@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from buzz_fleet.proc import CommandRunner
 
@@ -52,3 +53,119 @@ def remove_member(runner: CommandRunner, relay_url: str, admin_nsec: str, pubkey
     payload = json.loads(result.stdout)
     if not payload["ok"]:
         raise RuntimeError(f"remove-member failed: {payload.get('error')}")
+
+
+def compute_auth_tag(runner: CommandRunner, owner_nsec: str, agent_pubkey: str) -> str:
+    args = [BINARY, "compute-auth-tag", "--owner-nsec", owner_nsec, "--agent-pubkey", agent_pubkey]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"compute-auth-tag failed: {payload.get('error')}")
+    auth_tag: str = payload["auth_tag"]
+    return auth_tag
+
+
+def publish_agent_profile(
+    runner: CommandRunner, relay_url: str, agent_nsec: str, display_name: str, auth_tag: str
+) -> None:
+    args = [
+        BINARY,
+        "publish-agent-profile",
+        "--relay",
+        relay_url,
+        "--agent-nsec",
+        agent_nsec,
+        "--display-name",
+        display_name,
+        "--auth-tag",
+        auth_tag,
+    ]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"publish-agent-profile failed: {payload.get('error')}")
+
+
+def publish_managed_agent(
+    runner: CommandRunner, relay_url: str, owner_nsec: str, agent_pubkey: str, content_file: Path
+) -> None:
+    args = [
+        BINARY,
+        "publish-managed-agent",
+        "--relay",
+        relay_url,
+        "--owner-nsec",
+        owner_nsec,
+        "--agent-pubkey",
+        agent_pubkey,
+        "--content-file",
+        str(content_file),
+    ]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"publish-managed-agent failed: {payload.get('error')}")
+
+
+def retract_managed_agent(runner: CommandRunner, relay_url: str, owner_nsec: str, agent_pubkey: str) -> None:
+    args = [
+        BINARY,
+        "retract-managed-agent",
+        "--relay",
+        relay_url,
+        "--owner-nsec",
+        owner_nsec,
+        "--agent-pubkey",
+        agent_pubkey,
+    ]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"retract-managed-agent failed: {payload.get('error')}")
+
+
+def publish_agent_add_policy(runner: CommandRunner, relay_url: str, agent_nsec: str, policy: str) -> None:
+    args = [BINARY, "publish-agent-add-policy", "--relay", relay_url, "--agent-nsec", agent_nsec, "--policy", policy]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"publish-agent-add-policy failed: {payload.get('error')}")
+
+
+def join_channel(runner: CommandRunner, relay_url: str, agent_nsec: str, channel_id: str) -> None:
+    args = [BINARY, "join-channel", "--relay", relay_url, "--agent-nsec", agent_nsec, "--channel-id", channel_id]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"join-channel failed: {payload.get('error')}")
+
+
+def leave_channel(runner: CommandRunner, relay_url: str, agent_nsec: str, channel_id: str) -> None:
+    args = [BINARY, "leave-channel", "--relay", relay_url, "--agent-nsec", agent_nsec, "--channel-id", channel_id]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"leave-channel failed: {payload.get('error')}")
+
+
+def archive_agent(
+    runner: CommandRunner, relay_url: str, owner_nsec: str, agent_pubkey: str, reason: str, auth_tag: str
+) -> None:
+    args = [
+        BINARY,
+        "archive-agent",
+        "--relay",
+        relay_url,
+        "--owner-nsec",
+        owner_nsec,
+        "--agent-pubkey",
+        agent_pubkey,
+        "--reason",
+        reason,
+        "--auth-tag",
+        auth_tag,
+    ]
+    result = runner.run(args)
+    payload = json.loads(result.stdout)
+    if not payload["ok"]:
+        raise RuntimeError(f"archive-agent failed: {payload.get('error')}")
