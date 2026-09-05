@@ -171,6 +171,7 @@ def test_agent_create_passes_new_optional_fields(tmp_path, monkeypatch) -> None:
             "--display-name", "Test Agent",
             "--harness", "claude",
             "--prompt-file", str(prompt_file),
+            "--team-instructions", "Test-first always.",
             "--model", "claude-sonnet-5",
             "--parallelism", "3",
             "--idle-timeout-seconds", "120",
@@ -180,6 +181,7 @@ def test_agent_create_passes_new_optional_fields(tmp_path, monkeypatch) -> None:
     )
 
     assert result.exit_code == 0, result.output
+    assert calls["team_instructions"] == "Test-first always."
     assert calls["model"] == "claude-sonnet-5"
     assert calls["parallelism"] == 3
     assert calls["idle_timeout_seconds"] == 120
@@ -206,13 +208,18 @@ def test_agent_update_passes_new_optional_fields(monkeypatch) -> None:
         app,
         [
             "agent", "update", "--community", "eltahir", "agent-1",
+            "--team-instructions", "Test-first always.",
             "--model", "claude-sonnet-5",
             "--respond-to-allowlist", "a" * 64,
         ],
     )
 
     assert result.exit_code == 0, result.output
-    assert calls["changes"] == {"model": "claude-sonnet-5", "respond_to_allowlist": ["a" * 64]}
+    assert calls["changes"] == {
+        "team_instructions": "Test-first always.",
+        "model": "claude-sonnet-5",
+        "respond_to_allowlist": ["a" * 64],
+    }
 
 
 def test_agent_update_with_empty_respond_to_allowlist_clears_it(monkeypatch) -> None:

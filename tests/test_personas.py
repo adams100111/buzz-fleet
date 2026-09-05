@@ -57,6 +57,27 @@ def test_parse_persona_md_extracts_fields(tmp_path: Path) -> None:
     assert template.parallelism is None
 
 
+def test_parse_persona_md_reads_sibling_pack_instructions(tmp_path: Path) -> None:
+    (tmp_path / "pack_instructions.md").write_text("Test-first. Strict typing.\n")
+    path = tmp_path / "laravel.persona.md"
+    path.write_text("---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nPrompt body.\n")
+
+    template = parse_persona_md(path)
+
+    assert template is not None
+    assert template.team_instructions == "Test-first. Strict typing.\n"
+
+
+def test_parse_persona_md_team_instructions_is_none_without_sibling_file(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.persona.md"
+    path.write_text("---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nPrompt body.\n")
+
+    template = parse_persona_md(path)
+
+    assert template is not None
+    assert template.team_instructions is None
+
+
 def test_parse_persona_md_returns_none_without_display_name(tmp_path: Path) -> None:
     path = tmp_path / "broken.persona.md"
     path.write_text("---\nruntime: claude\n---\nBody text.\n")

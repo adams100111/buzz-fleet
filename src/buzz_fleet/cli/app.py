@@ -70,6 +70,7 @@ def agent_create(
     display_name: Annotated[str, typer.Option()],
     harness: Annotated[str, typer.Option()],
     prompt_file: Annotated[Path, typer.Option(help="Path to a persona .persona.md or plain prompt text file")],
+    team_instructions: Annotated[str | None, typer.Option()] = None,
     model: Annotated[str | None, typer.Option()] = None,
     parallelism: Annotated[int | None, typer.Option()] = None,
     idle_timeout_seconds: Annotated[int | None, typer.Option()] = None,
@@ -84,6 +85,7 @@ def agent_create(
             display_name=display_name,
             harness=harness,
             system_prompt_source=SystemPromptSource(kind="persona_file", path=prompt_file),
+            team_instructions=team_instructions,
             model=model,
             parallelism=parallelism,
             idle_timeout_seconds=idle_timeout_seconds,
@@ -124,6 +126,7 @@ def agent_update(
     prompt_file: Annotated[
         Path | None, typer.Option(help="Replace the system prompt with this persona/prompt file")
     ] = None,
+    team_instructions: Annotated[str | None, typer.Option()] = None,
     model: Annotated[str | None, typer.Option()] = None,
     parallelism: Annotated[int | None, typer.Option()] = None,
     idle_timeout_seconds: Annotated[int | None, typer.Option()] = None,
@@ -138,6 +141,8 @@ def agent_update(
         changes["display_name"] = display_name
     if prompt_file is not None:
         changes["system_prompt_source"] = SystemPromptSource(kind="persona_file", path=prompt_file)
+    if team_instructions is not None:
+        changes["team_instructions"] = team_instructions
     if model is not None:
         changes["model"] = model
     if parallelism is not None:

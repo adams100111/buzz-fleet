@@ -95,6 +95,11 @@ class AgentFormScreen(Screen):
                     )
             yield Input(value=prompt_text, placeholder="System prompt", id="prompt-input")
             yield Input(
+                value=self._agent.team_instructions if self._agent and self._agent.team_instructions else "",
+                placeholder="Team instructions (optional)",
+                id="team-instructions-input",
+            )
+            yield Input(
                 value=self._agent.model if self._agent and self._agent.model else "",
                 placeholder="Model (optional)",
                 id="model-input",
@@ -157,6 +162,7 @@ class AgentFormScreen(Screen):
         if template.harness in harnesses.HARNESSES:
             self.query_one("#harness-select", Select).value = template.harness
         self.query_one("#prompt-input", Input).value = template.prompt_body
+        self.query_one("#team-instructions-input", Input).value = template.team_instructions or ""
         self.query_one("#model-input", Input).value = template.model or ""
         self.query_one("#parallelism-input", Input).value = (
             str(template.parallelism) if template.parallelism is not None else ""
@@ -181,6 +187,7 @@ class AgentFormScreen(Screen):
         display_name = self.query_one("#display-name-input", Input).value
         prompt_text = self.query_one("#prompt-input", Input).value
         harness = self.query_one("#harness-select", Select).value
+        team_instructions = self.query_one("#team-instructions-input", Input).value.strip() or None
         model = self.query_one("#model-input", Input).value.strip() or None
         respond_to_raw = self.query_one("#respond-to-allowlist-input", Input).value.strip()
         respond_to_allowlist = (
@@ -205,6 +212,7 @@ class AgentFormScreen(Screen):
                 changes: dict[str, object] = {
                     "display_name": display_name,
                     "harness": harness,
+                    "team_instructions": team_instructions,
                     "model": model,
                     "parallelism": parallelism,
                     "idle_timeout_seconds": idle_timeout_seconds,
@@ -228,6 +236,7 @@ class AgentFormScreen(Screen):
                     display_name=display_name,
                     harness=harness,
                     system_prompt_source=prompt_source,
+                    team_instructions=team_instructions,
                     model=model,
                     parallelism=parallelism,
                     idle_timeout_seconds=idle_timeout_seconds,

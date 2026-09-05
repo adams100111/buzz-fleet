@@ -426,6 +426,86 @@ async def test_clicking_install_adapter_button_notifies_error_on_failure(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_selecting_template_prefills_team_instructions_from_sibling_pack_file(
+    tmp_path, monkeypatch
+) -> None:
+    from buzz_fleet import personas
+
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    (personas_dir / "pack_instructions.md").write_text("Test-first. Strict typing.\n")
+    (personas_dir / "laravel.persona.md").write_text(
+        "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nYou are the Laravel dev.\n"
+    )
+    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        select = app.screen.query_one("#template-select", Select)
+        select.value = 0
+        await pilot.pause()
+
+        assert (
+            app.screen.query_one("#team-instructions-input", Input).value
+            == "Test-first. Strict typing.\n"
+        )
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_passes_team_instructions_to_create_agent() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
+        app.screen.query_one("#team-instructions-input", Input).value = "Test-first always."
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    assert manager.created[0]["team_instructions"] == "Test-first always."
+
+
+@pytest.mark.asyncio
+async def test_editing_agent_shows_and_updates_team_instructions() -> None:
+    from datetime import UTC, datetime
+
+    from buzz_fleet.models import Agent, SystemPromptSource
+
+    manager = FakeManager()
+    existing = Agent(
+        id="laravel-dev",
+        community_id="eltahir",
+        display_name="Laravel Dev",
+        harness="claude",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="old prompt"),
+        team_instructions="Old team rules.",
+        created_at=datetime.now(UTC),
+    )
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager, agent=existing))
+        await pilot.pause()
+        assert app.screen.query_one("#team-instructions-input", Input).value == "Old team rules."
+
+        app.screen.query_one("#team-instructions-input", Input).value = "New team rules."
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    _agent_id, changes = manager.updated[0]
+    assert changes["team_instructions"] == "New team rules."
+
+
+@pytest.mark.asyncio
 async def test_submitting_form_passes_new_fields_to_create_agent() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()

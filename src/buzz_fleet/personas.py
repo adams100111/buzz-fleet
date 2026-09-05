@@ -10,6 +10,14 @@ the design spec for why.
 into `PersonaTemplate` at all — imported pubkeys are from a different
 community/relay and are meaningless (or dangerous) in a new one, matching
 Buzz Desktop's own import dialog default.
+
+A `.persona.md` pack (a directory of personas sharing one team) may include
+a sibling `pack_instructions.md` — team-wide discipline every persona in
+that directory inherits, kept separate from stack-specific expertise so it's
+defined once rather than repeated per persona and left to drift. When
+present, its content becomes `PersonaTemplate.team_instructions`, which the
+form maps onto `Agent.team_instructions` (`BUZZ_ACP_TEAM_INSTRUCTIONS`) —
+not part of `.agent.json`, which has no pack concept at all.
 """
 
 from __future__ import annotations
@@ -32,6 +40,17 @@ class PersonaTemplate(BaseModel):
     parallelism: int | None = None
     idle_timeout_seconds: int | None = None
     max_turn_duration_seconds: int | None = None
+    team_instructions: str | None = None
+
+
+def _sibling_pack_instructions(path: Path) -> str | None:
+    sibling = path.parent / "pack_instructions.md"
+    if not sibling.is_file():
+        return None
+    try:
+        return sibling.read_text()
+    except (UnicodeDecodeError, OSError):
+        return None
 
 
 def parse_persona_md(path: Path) -> PersonaTemplate | None:
@@ -62,6 +81,7 @@ def parse_persona_md(path: Path) -> PersonaTemplate | None:
             model=frontmatter.get("model"),
             prompt_body=body,
             source_path=path,
+            team_instructions=_sibling_pack_instructions(path),
         )
     except ValidationError:
         return None
