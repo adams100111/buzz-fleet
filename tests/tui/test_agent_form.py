@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Select, Static
+from textual.widgets import Button, Input, Select, Static
 
 from buzz_fleet.tui.app import BuzzFleetApp
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
@@ -141,6 +141,23 @@ async def test_submitting_blank_display_name_notifies_instead_of_crashing() -> N
 
         # The form screen is still on top — pop_screen was never reached.
         assert isinstance(app.screen, AgentFormScreen)
+
+
+@pytest.mark.asyncio
+async def test_escape_cancels_form_without_calling_manager() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        assert isinstance(app.screen, AgentFormScreen)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, AgentFormScreen)
+        assert manager.created == []
 
 
 @pytest.mark.asyncio
@@ -284,6 +301,128 @@ async def test_harness_select_keeps_existing_agent_harness_regardless_of_availab
         await pilot.pause()
 
         assert app.screen.query_one("#harness-select", Select).value == "goose"
+
+
+@pytest.mark.asyncio
+async def test_install_adapter_button_hidden_when_default_harness_is_available(
+    monkeypatch,
+) -> None:
+    from buzz_fleet import harnesses
+
+    monkeypatch.setattr(harnesses.shutil, "which", lambda cmd: "/usr/bin/claude-agent-acp")
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+
+        assert app.screen.query_one("#install-adapter-button", Button).display is False
+
+
+@pytest.mark.asyncio
+async def test_install_adapter_button_shown_when_default_harness_unavailable(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+
+    monkeypatch.setattr(harnesses.shutil, "which", lambda cmd: None)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+
+        button = app.screen.query_one("#install-adapter-button", Button)
+        assert button.display is True
+        assert "claude" in str(button.label)
+
+
+@pytest.mark.asyncio
+async def test_selecting_a_missing_harness_shows_install_button(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+
+    def fake_which(cmd: str) -> str | None:
+        return "/usr/bin/claude-agent-acp" if "claude" in cmd else None
+
+    monkeypatch.setattr(harnesses.shutil, "which", fake_which)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+
+        button = app.screen.query_one("#install-adapter-button", Button)
+        assert button.display is False
+
+        app.screen.query_one("#harness-select", Select).value = "codex"
+        await pilot.pause()
+
+        assert button.display is True
+        assert "codex" in str(button.label)
+
+
+@pytest.mark.asyncio
+async def test_clicking_install_adapter_button_runs_install_and_hides_itself(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+    from buzz_fleet.proc import RealCommandRunner
+
+    monkeypatch.setattr(harnesses.shutil, "which", lambda cmd: None)
+
+    calls: list[tuple[object, str]] = []
+
+    def fake_install_adapter(runner: object, harness: str) -> None:
+        calls.append((runner, harness))
+
+    monkeypatch.setattr(harnesses, "install_adapter", fake_install_adapter)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+
+        button = app.screen.query_one("#install-adapter-button", Button)
+        assert button.display is True
+
+        await pilot.click("#install-adapter-button")
+        await pilot.pause()
+
+        assert len(calls) == 1
+        assert isinstance(calls[0][0], RealCommandRunner)
+        assert calls[0][1] == "claude"
+        assert button.display is False
+
+
+@pytest.mark.asyncio
+async def test_clicking_install_adapter_button_notifies_error_on_failure(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+
+    monkeypatch.setattr(harnesses.shutil, "which", lambda cmd: None)
+
+    def fake_install_adapter(runner: object, harness: str) -> None:
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr(harnesses, "install_adapter", fake_install_adapter)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+
+        button = app.screen.query_one("#install-adapter-button", Button)
+        await pilot.click("#install-adapter-button")
+        await pilot.pause()
+
+        # Install failed — button stays visible, form is still open.
+        assert button.display is True
+        assert isinstance(app.screen, AgentFormScreen)
 
 
 @pytest.mark.asyncio

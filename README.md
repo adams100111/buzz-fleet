@@ -207,7 +207,8 @@ Shows a connect screen if no community is set up yet, otherwise a live
 dashboard of agents and their systemd status. Bindings: `c` create, `u`
 edit (display name and/or prompt — editing a persona-file agent without
 touching the prompt field leaves its persona file alone), `x` delete, `l`
-view live logs.
+view live logs. `esc` cancels the create/edit form or closes the log view
+without side effects.
 
 When creating an agent (`c`), the form shows a template dropdown that lists
 all `.persona.md` and `.agent.json` files from `~/.config/buzz-fleet/personas`
@@ -233,6 +234,20 @@ on its own:
 | codex | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` (must be 1.x) |
 | pi | `pi-acp` | `npm install -g --ignore-scripts @earendil-works/pi-coding-agent && npm install -g pi-acp` |
 | goose | `goose` | install `goose` itself — no separate adapter |
+
+When the selected harness isn't `available`, an **Install adapter** button
+appears next to the dropdown — clicking it runs that harness's install
+command(s) directly (blocking while `npm` runs) and hides itself once it
+succeeds; on failure it stays visible and shows the error. The same action
+is available without the TUI:
+
+```bash
+buzz-fleet harness list             # show all four harnesses' detected status
+buzz-fleet harness install codex    # run codex's install command(s) now
+```
+
+`harness install` has no automated path for `goose` (it isn't an npm
+package) — install it yourself, then re-check with `harness list`.
 
 ### Inspecting a running agent directly
 

@@ -44,14 +44,30 @@ compaction.
   `runtimeAvailabilityWarning.ts`: `npm install -g
   @agentclientprotocol/claude-agent-acp`, `@agentclientprotocol/codex-acp`
   — must be 1.x — `@earendil-works/pi-coding-agent` + `pi-acp`, plain
-  `goose`). CLI side still has no availability check/hint at all on
-  `agent create --harness` — that's a real, separate follow-up (behavior gap,
-  not just docs): should the CLI warn/print the same install hint the TUI's
-  label implies, or is silently letting you pick an unavailable harness on
-  the CLI acceptable since it's already the "manual, no hand-holding"
-  surface? Not decided.
+  `goose`).
+- ~~CLI had no availability check/hint on `--harness`~~ — done: added
+  `buzz-fleet harness list` and `buzz-fleet harness install <name>`
+  (`src/buzz_fleet/harnesses.py`'s `install_adapter`), plus a matching
+  "Install adapter" button in the TUI form next to the harness dropdown
+  (visible whenever the selected harness isn't `available`, hides itself on
+  success). Deliberately scoped opt-in, not baked into `get.sh`/
+  `install.sh` — see the ruling on this in the session that added it:
+  auto-installing npm packages as part of the core binary installer would
+  make Node/npm a hidden hard dependency of something that today needs
+  nothing but `curl`/`sha256sum`, and would install harnesses nobody asked
+  for. `goose` has no automated install path (not an npm package) — `harness
+  install goose` errors clearly rather than fabricating a command.
 - ~~"No templates found" empty-state undocumented~~ — done, folded into the
   same TUI section edit above.
+- ~~No way to cancel the create/edit form or close the log view~~ — real,
+  pre-existing bug, not just missing docs: neither `AgentFormScreen` nor
+  `LogsScreen` had ANY binding to leave without acting (no escape, no cancel
+  button) since the original v1 build — Textual's default `App` does not
+  bind escape to "pop the screen" on its own. Fixed: both screens now bind
+  `escape` (`action_cancel`/`action_close` → `self.app.pop_screen()`), shown
+  automatically in each screen's `Footer` the same way the dashboard's
+  `c`/`u`/`x`/`l` bindings already were. Documented in `### Manage agents
+  (TUI)`.
 - **No worked example of populating the templates directory.** The README
   names the two supported formats but never shows an actual example — e.g.
   copying one of `buzz-deploy`'s existing `packs/*/personas/*.persona.md`
