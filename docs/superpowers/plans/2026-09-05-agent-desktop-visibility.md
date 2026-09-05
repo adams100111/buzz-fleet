@@ -73,10 +73,10 @@ In `signer/Cargo.toml`, add alongside the existing `buzz-ws-client` line:
 
 ```toml
 buzz-sdk = { git = "https://github.com/block/buzz", rev = "b1f6b7ef770dddbb7f33c9f5861c379a47bca1d6" }
-uuid = { version = "1", features = ["v4"] }
+uuid = "1"
 ```
 
-(same rev already pinned for `buzz-ws-client` — keeps both dependencies from the same upstream commit.)
+(same rev already pinned for `buzz-ws-client` — keeps both dependencies from the same upstream commit. `uuid` needs no feature flags here — this crate only *parses* channel-id strings via `Uuid::parse_str`, never generates one, so the default `"v4"`-less feature set is enough; also, plain `"1"` lets Cargo's resolver unify with whatever compatible 1.x version `buzz-sdk`'s own workspace already pins, rather than risking two incompatible `Uuid` types across the crate boundary from an over-constrained feature request.)
 
 - [ ] **Step 2: Build to confirm the dependency resolves**
 
@@ -84,6 +84,8 @@ Run: `cd signer && cargo build`
 Expected: builds cleanly (no code uses `buzz_sdk` yet, so this only proves the git dependency fetches and compiles).
 
 - [ ] **Step 3: Add the two `Command` variants and their handlers to `main.rs`**
+
+Add `Kind` to `main.rs`'s existing `use nostr::Keys;` import line, making it `use nostr::{Keys, Kind};` — needed by this task's own test (Step 4) and Task 5's, both of which reference `Kind::Custom(...)` directly in `main.rs`'s test module; `use super::*;` only pulls in what the file already imports at its top, and `main.rs` has no `Kind` import today.
 
 Add to the `Command` enum (after the existing `RemoveMember` variant):
 
@@ -406,6 +408,8 @@ git commit -m "signer: add publish-agent-profile (kind:0 with NIP-OA auth tag)"
 
 - [ ] **Step 1: Add the failing test to `agent_events.rs`**
 
+This and the other `#[test] fn ...` snippets in this task append into the `#[cfg(test)] mod tests { use super::*; use nostr::Keys; ... }` block Task 3 already created at the bottom of `agent_events.rs` — do not create a second `mod tests` block in the same file (Rust rejects two modules with the same name in one scope).
+
 ```rust
     #[test]
     fn build_managed_agent_sets_d_tag_and_kind() {
@@ -620,6 +624,8 @@ git commit -m "signer: add retract-managed-agent (kind:5 via buzz-sdk)"
 
 - [ ] **Step 1: Write the failing test in `agent_events.rs`**
 
+This and the other `#[test] fn ...` snippets in this task append into the `#[cfg(test)] mod tests { use super::*; use nostr::Keys; ... }` block Task 3 already created at the bottom of `agent_events.rs` — do not create a second `mod tests` block in the same file (Rust rejects two modules with the same name in one scope).
+
 ```rust
     #[test]
     fn build_agent_add_policy_sets_content() {
@@ -704,6 +710,8 @@ git commit -m "signer: add publish-agent-add-policy (kind:10100)"
 - Produces: `agent_events::build_archive_agent(agent_pubkey_hex: &str, reason: &str, auth_tag_json: &str) -> anyhow::Result<EventBuilder>`; CLI `archive-agent --relay <url> --owner-nsec <nsec> --agent-pubkey <hex> --reason <text> --auth-tag <json>`.
 
 - [ ] **Step 1: Write the failing test in `agent_events.rs`**
+
+This and the other `#[test] fn ...` snippets in this task append into the `#[cfg(test)] mod tests { use super::*; use nostr::Keys; ... }` block Task 3 already created at the bottom of `agent_events.rs` — do not create a second `mod tests` block in the same file (Rust rejects two modules with the same name in one scope).
 
 ```rust
     #[test]
