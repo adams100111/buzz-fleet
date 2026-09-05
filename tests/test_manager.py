@@ -8,6 +8,19 @@ from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Community, SystemPromptSource
 from buzz_fleet.systemd import agent_env_path, agent_prompt_path
 
+# Visibility subcommands whose FakeRunner response is a plain {"ok": True} —
+# collected into a set (rather than one elif per subcommand) so the dispatch
+# stays a single readable branch instead of N branches with identical bodies.
+_SIGNER_OK_SUBCOMMANDS = {
+    ("buzz-fleet-signer", "publish-agent-profile"),
+    ("buzz-fleet-signer", "publish-managed-agent"),
+    ("buzz-fleet-signer", "retract-managed-agent"),
+    ("buzz-fleet-signer", "publish-agent-add-policy"),
+    ("buzz-fleet-signer", "join-channel"),
+    ("buzz-fleet-signer", "leave-channel"),
+    ("buzz-fleet-signer", "archive-agent"),
+}
+
 
 class FakeRunner:
     def __init__(self) -> None:
@@ -19,7 +32,9 @@ class FakeRunner:
             stdout = json.dumps({"public_key": "ab" * 32, "secret_key": "nsec1agent"})
         elif args[:2] == ["buzz-fleet-signer", "pubkey-from-nsec"]:
             stdout = json.dumps({"ok": True, "public_key": "c" * 64})
-        elif "add-member" in args or "remove-member" in args:
+        elif args[:2] == ["buzz-fleet-signer", "compute-auth-tag"]:
+            stdout = json.dumps({"ok": True, "auth_tag": json.dumps(["auth", "d" * 64, "", "e" * 128])})
+        elif "add-member" in args or "remove-member" in args or tuple(args[:2]) in _SIGNER_OK_SUBCOMMANDS:
             stdout = json.dumps({"ok": True})
         elif args[:2] == ["loginctl", "show-user"]:
             stdout = "yes"  # already lingering — the common case in these tests
@@ -292,6 +307,62 @@ def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) ->
     assert agent.idle_timeout_seconds == 120
     assert agent.max_turn_duration_seconds == 600
     assert agent.respond_to_allowlist == ["a" * 64]
+
+
+def test_create_agent_publishes_visibility_events_in_order(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+
+    agent = manager.create_agent(
+        display_name="Visible Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="You are visible."),
+        channel_ids=["11111111-1111-1111-1111-111111111111"],
+    )
+
+    assert agent.visibility_managed is True
+    assert agent.visibility_state.profile_published is True
+    assert agent.visibility_state.managed_agent_published is True
+    assert agent.visibility_state.add_policy_published is True
+    assert agent.visibility_state.channels["11111111-1111-1111-1111-111111111111"] == "joined"
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert subcommands.index("compute-auth-tag") < subcommands.index("publish-agent-profile")
+    assert "join-channel" in subcommands
+
+
+def test_create_agent_records_permanent_channel_error_without_failing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+
+    class BadChannelRunner(FakeRunner):
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ["buzz-fleet-signer", "join-channel"]:
+                self.calls.append(args)
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=json.dumps({"ok": False, "error": "invalid: channel not found"}), stderr=""
+                )
+            return super().run(args)
+
+    runner = BadChannelRunner()
+    manager = AgentManager(runner, _community())
+
+    agent = manager.create_agent(
+        display_name="Bad Channel Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        channel_ids=["22222222-2222-2222-2222-222222222222"],
+    )
+
+    # create_agent must not raise despite the channel join failing.
+    assert agent.visibility_state.channel_errors["22222222-2222-2222-2222-222222222222"] == (
+        "join-channel failed: invalid: channel not found"
+    )
+    assert agent.visibility_state.channels["22222222-2222-2222-2222-222222222222"] == "error"
+    assert agent.visibility_state.profile_published is True  # unrelated steps still succeeded
 
 
 def test_ensure_runtime_ready_restarts_existing_agents_when_buzz_acp_just_installed(

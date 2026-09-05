@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
-from buzz_fleet import buzz_acp, harnesses, signer_client, state, systemctl_client, systemd
+from buzz_fleet import (
+    buzz_acp,
+    harnesses,
+    signer_client,
+    state,
+    systemctl_client,
+    systemd,
+    visibility,
+)
 from buzz_fleet.models import Agent, Community, SystemPromptSource
 from buzz_fleet.proc import CommandRunner
 from buzz_fleet.slug import agent_slug
@@ -123,6 +134,76 @@ class AgentManager:
                 # dashboard refresh's status column shows the truth.
                 pass
 
+    def _sync_visibility(self, agent: Agent) -> Agent:
+        """Publish whatever's missing from `agent.visibility_state` and
+        return an updated copy — the single per-step function `create_agent`,
+        `ensure_runtime_ready`, and `update_agent` all call, so there is
+        exactly one place that knows how to publish/retry each event.
+
+        Never raises: every step's failure is caught, classified via
+        `visibility.classify_signer_error`, and recorded into the returned
+        agent's `visibility_state` instead of propagating — a visibility
+        publish must never block or roll back agent creation/update. A step
+        already marked with a permanent error is never retried; a step with
+        no error and not yet published is retried every call, which is the
+        entire self-healing mechanism for a merely transient failure.
+        """
+        if not agent.visibility_managed:
+            return agent
+
+        relay_url = self._community.relay_url
+        owner_nsec = self._community.relay_admin_nsec.get_secret_value()
+        agent_nsec = agent.private_key.get_secret_value()
+        vs = agent.visibility_state.model_copy(deep=True)
+
+        if not vs.profile_published and vs.profile_error is None:
+            try:
+                auth_tag = signer_client.compute_auth_tag(self._runner, owner_nsec, agent.public_key)
+                signer_client.publish_agent_profile(self._runner, relay_url, agent_nsec, agent.display_name, auth_tag)
+                vs.profile_published = True
+            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+                if visibility.classify_signer_error(e) == "permanent":
+                    vs.profile_error = str(e)
+
+        if not vs.managed_agent_published and vs.managed_agent_error is None:
+            try:
+                content = visibility.managed_agent_content(agent)
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                    json.dump(content, f)
+                    content_path = Path(f.name)
+                try:
+                    signer_client.publish_managed_agent(self._runner, relay_url, owner_nsec, agent.public_key, content_path)
+                finally:
+                    content_path.unlink(missing_ok=True)
+                vs.managed_agent_published = True
+            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+                if visibility.classify_signer_error(e) == "permanent":
+                    vs.managed_agent_error = str(e)
+
+        if not vs.add_policy_published and vs.add_policy_error is None:
+            try:
+                policy = visibility.resolved_channel_add_policy(agent)
+                signer_client.publish_agent_add_policy(self._runner, relay_url, agent_nsec, policy)
+                vs.add_policy_published = True
+            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+                if visibility.classify_signer_error(e) == "permanent":
+                    vs.add_policy_error = str(e)
+
+        for channel_id in agent.channel_ids or []:
+            if vs.channels.get(channel_id) == "joined" or channel_id in vs.channel_errors:
+                continue
+            try:
+                signer_client.join_channel(self._runner, relay_url, agent_nsec, channel_id)
+                vs.channels[channel_id] = "joined"
+            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+                if visibility.classify_signer_error(e) == "permanent":
+                    vs.channel_errors[channel_id] = str(e)
+                    vs.channels[channel_id] = "error"
+                else:
+                    vs.channels[channel_id] = "pending"
+
+        return agent.model_copy(update={"visibility_state": vs})
+
     def create_agent(
         self,
         *,
@@ -135,6 +216,8 @@ class AgentManager:
         idle_timeout_seconds: int | None = None,
         max_turn_duration_seconds: int | None = None,
         respond_to_allowlist: list[str] | None = None,
+        channel_ids: list[str] | None = None,
+        channel_add_policy: str | None = None,
         role: str | None = None,
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
@@ -158,6 +241,9 @@ class AgentManager:
             idle_timeout_seconds=idle_timeout_seconds,
             max_turn_duration_seconds=max_turn_duration_seconds,
             respond_to_allowlist=respond_to_allowlist,
+            channel_ids=channel_ids,
+            channel_add_policy=channel_add_policy,
+            visibility_managed=True,
             created_at=datetime.now(UTC),
         )
 
@@ -184,6 +270,8 @@ class AgentManager:
         # local record to ever see or revoke them. Saving first means a failed
         # enable_now is retryable (`agent list` still shows the agent; the
         # unit can be enabled by hand or via a future retry) instead of orphaning.
+        state.save_agent(agent)
+        agent = self._sync_visibility(agent)
         state.save_agent(agent)
         systemctl_client.enable_now(self._runner, agent.id)
         return agent
