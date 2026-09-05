@@ -507,3 +507,76 @@ def test_ensure_runtime_ready_continues_healing_other_agents_if_one_restart_fail
     manager.ensure_runtime_ready()  # must not raise despite the first restart failing
 
     assert ["systemctl", "--user", "restart", f"buzz-agent@{second.id}"] in runner.calls
+
+
+def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for the old-agent exemption — the single most
+    important invariant in this feature. An agent created before this
+    feature existed (visibility_managed=False) must never have any
+    visibility signer subcommand invoked against it, ever.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Old Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    # Simulate a pre-feature record: flip visibility_managed back to False
+    # and re-save, as if this agent had been loaded from disk before the
+    # field existed (Pydantic's own default, never explicitly True).
+    from buzz_fleet import state as state_module
+
+    old_style = agent.model_copy(update={"visibility_managed": False})
+    state_module.save_agent(old_style)
+    runner.calls.clear()
+
+    manager.ensure_runtime_ready()
+
+    visibility_subcommands = {
+        "compute-auth-tag",
+        "publish-agent-profile",
+        "publish-managed-agent",
+        "publish-agent-add-policy",
+        "join-channel",
+        "leave-channel",
+        "archive-agent",
+    }
+    assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)
+
+
+def test_ensure_runtime_ready_retries_a_still_pending_visibility_step(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+
+    class FlakyProfileRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.profile_calls = 0
+
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ["buzz-fleet-signer", "publish-agent-profile"]:
+                self.profile_calls += 1
+                self.calls.append(args)
+                if self.profile_calls == 1:
+                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="connection refused")
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"ok": True}), stderr="")
+            return super().run(args)
+
+    runner = FlakyProfileRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Flaky Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    assert agent.visibility_state.profile_published is False  # first attempt failed transiently
+
+    manager.ensure_runtime_ready()
+
+    reloaded = next(a for a in manager.list_agents() if a.id == agent.id)
+    assert reloaded.visibility_state.profile_published is True

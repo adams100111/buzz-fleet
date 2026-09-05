@@ -115,6 +115,12 @@ class AgentManager:
         needs_full_refresh = buzz_acp_just_installed or owner_pubkey_just_backfilled
 
         for agent in self.list_agents():
+            if agent.visibility_managed:
+                synced = self._sync_visibility(agent)
+                if synced.visibility_state != agent.visibility_state:
+                    state.save_agent(synced)
+                agent = synced
+
             resolved_command = harnesses.resolve_adapter_command(agent.harness)
             if not needs_full_refresh and _read_agent_command(agent.id) == resolved_command:
                 continue
