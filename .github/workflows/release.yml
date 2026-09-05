@@ -21,6 +21,14 @@ jobs:
       - run: uv run pytest
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --manifest-path signer/Cargo.toml
+      - name: Package bundled personas
+        run: |
+          mkdir -p out
+          tar -czf out/personas.tar.gz -C personas .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: personas
+          path: out/personas.tar.gz
 
   binary:
     needs: [checks]
@@ -88,8 +96,9 @@ jobs:
           cp artifacts/buzz-fleet-x86_64/buzz-fleet-x86_64 out/
           cp artifacts/buzz-fleet-aarch64/buzz-fleet-signer-aarch64 out/
           cp artifacts/buzz-fleet-aarch64/buzz-fleet-aarch64 out/
+          cp artifacts/personas/personas.tar.gz out/
           ( cd out && sha256sum buzz-fleet-signer-x86_64 buzz-fleet-x86_64 \
-              buzz-fleet-signer-aarch64 buzz-fleet-aarch64 > checksums.txt )
+              buzz-fleet-signer-aarch64 buzz-fleet-aarch64 personas.tar.gz > checksums.txt )
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
@@ -98,4 +107,5 @@ jobs:
             out/buzz-fleet-x86_64
             out/buzz-fleet-signer-aarch64
             out/buzz-fleet-aarch64
+            out/personas.tar.gz
             out/checksums.txt

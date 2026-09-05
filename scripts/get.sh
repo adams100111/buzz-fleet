@@ -10,6 +10,7 @@ set -Eeuo pipefail
 GS_REPO="adams100111/buzz-fleet"
 GS_BASE="https://github.com/${GS_REPO}/releases/latest/download"
 GS_PREFIX="${HOME}/.local/share/buzz-fleet"
+GS_PERSONAS_DIR="${HOME}/.config/buzz-fleet/personas"
 
 gs_err() { echo "get.sh: $*" >&2; }
 
@@ -85,7 +86,32 @@ gs_main() {
     sudo -n ln -sf "${GS_PREFIX}/bin/buzz-fleet-signer" /usr/local/bin/buzz-fleet-signer 2>/dev/null || true
   fi
 
+  gs_seed_personas "$tmp"
+
   gs_err "done. Run: buzz-fleet tui"
+}
+
+# gs_seed_personas TMPDIR — populate the personas directory with buzz-fleet's
+# bundled starter templates, but ONLY on a first install (the directory
+# doesn't exist yet). Re-running get.sh to update never touches it again —
+# this is a one-time seed, not something that overwrites a user's own
+# customizations on every upgrade.
+gs_seed_personas() {
+  local tmp="$1"
+  if [ -e "$GS_PERSONAS_DIR" ]; then
+    return 0
+  fi
+  gs_fetch "${GS_BASE}/personas.tar.gz" "${tmp}/personas.tar.gz" || {
+    gs_err "note: couldn't fetch bundled personas (non-fatal) — buzz-fleet works fine without them"
+    return 0
+  }
+  gs_verify "$tmp" "personas.tar.gz" || {
+    gs_err "note: bundled personas failed checksum verification (non-fatal), skipping"
+    return 0
+  }
+  mkdir -p "$GS_PERSONAS_DIR"
+  tar -xzf "${tmp}/personas.tar.gz" -C "$GS_PERSONAS_DIR"
+  gs_err "seeded starter templates into ${GS_PERSONAS_DIR}"
 }
 
 # Run only when executed (incl. via `curl | bash`), not when sourced for tests.
