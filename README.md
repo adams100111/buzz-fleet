@@ -170,18 +170,30 @@ Each command's actual effect on the systemd unit:
 
 #### Persona templates
 
-Persona templates live in `~/.config/buzz-fleet/personas` — this directory is
-auto-created on first use. Place `.persona.md` files (YAML frontmatter + body)
-or `.agent.json` files (Buzz Desktop `buzz-agent-snapshot` v1 exports) there.
-Each template's fields are optionally pre-filled into the create/update form in
-the TUI. `.agent.png` files (PNG exports of agents) are detected but not parsed
-(counted as unsupported).
+Persona templates live in `~/.config/buzz-fleet/personas` — auto-seeded on
+first install (see `scripts/get.sh`) with this repo's bundled
+[`personas/`](personas/) starter templates (six stack-specific developer
+personas), and auto-created empty if that seeding is ever skipped (e.g. a
+release with no network access at install time). Seeding is one-time —
+updating never touches or overwrites the directory again, so anything you
+add or change there is yours to keep.
+
+Place `.persona.md` files (YAML frontmatter + body) or `.agent.json` files
+(Buzz Desktop `buzz-agent-snapshot` v1 exports) there yourself to add more.
+Each template's fields are optionally pre-filled into the create/update form
+in the TUI. `.agent.png` files (PNG exports of agents) are detected but not
+parsed (counted as unsupported). A `.persona.md` file's directory may also
+contain a sibling `pack_instructions.md` — team-wide instructions shared by
+every persona in that directory, pre-filled into the form's separate "Team
+instructions" field (`BUZZ_ACP_TEAM_INSTRUCTIONS`) alongside the
+persona-specific prompt.
 
 The new `agent create` and `agent update` flags for harness configuration:
 
 ```bash
 buzz-fleet agent create --community eltahir --display-name "Advanced Agent" \
   --harness claude --prompt-file ./persona.md \
+  --team-instructions "Test-first. Strict typing." \
   --model claude-3-5-sonnet-20241022 \
   --parallelism 4 \
   --idle-timeout-seconds 300 \
@@ -190,6 +202,7 @@ buzz-fleet agent create --community eltahir --display-name "Advanced Agent" \
 ```
 
 These optional fields map to systemd env vars on the agent's unit:
+- `--team-instructions` → `BUZZ_ACP_TEAM_INSTRUCTIONS`
 - `--model` → `BUZZ_ACP_MODEL`
 - `--parallelism` → `BUZZ_ACP_AGENTS`
 - `--idle-timeout-seconds` → `BUZZ_ACP_IDLE_TIMEOUT`

@@ -70,6 +70,15 @@ already-healthy call, so it's cheap to call unconditionally and often.
     to add one: `avatarDataUrl`/`avatarUrl`, `sourceIsBuiltin`, `namePool`,
     `description`/`about` (dropped from `buzz-fleet`'s `Agent` model
     entirely — there's nowhere for it to live or do anything).
+  - `team_instructions` (`BUZZ_ACP_TEAM_INSTRUCTIONS`) is a real `Agent`
+    field that existed since the original build but had zero exposure
+    anywhere (no TUI input, no CLI flag) until it was wired up alongside
+    bundling `personas/` — not part of `.persona.md`'s own schema at all;
+    `personas.py`'s `_sibling_pack_instructions` reads it from a
+    `pack_instructions.md` file living in the *same directory* as the
+    `.persona.md` files (buzz-fleet's own convention — simpler than
+    `buzz-deploy`'s, which nests personas one directory below
+    `pack_instructions.md` instead of alongside it; see `personas/README.md`).
 
 ## Documentation debt (not yet reflected in README.md)
 
@@ -109,11 +118,13 @@ compaction.
   automatically in each screen's `Footer` the same way the dashboard's
   `c`/`u`/`x`/`l` bindings already were. Documented in `### Manage agents
   (TUI)`.
-- **No worked example of populating the templates directory.** The README
-  names the two supported formats but never shows an actual example — e.g.
-  copying one of `buzz-deploy`'s existing `packs/*/personas/*.persona.md`
-  files in. Worth a one-line `cp`/`ln` example once that flow's been used
-  for real at least once.
+- ~~No worked example of populating the templates directory~~ — done, and
+  taken further than a doc example: `personas/` is now bundled into the
+  repo itself (starter templates, sourced from `buzz-deploy`'s `developers`
+  pack) and auto-seeded into `~/.config/buzz-fleet/personas/` by
+  `scripts/get.sh` on first install only (never overwrites an existing
+  directory — see `gs_seed_personas`). The release workflow packages
+  `personas/` into `personas.tar.gz`, checksummed alongside the binaries.
 - **No CHANGELOG.** Three releases in (`v0.1.0`/`v0.2.0`/`v0.3.0`) with no
   changelog file — not urgent, but the "Releasing a new version" README
   section could at least point at GitHub Releases' auto-generated notes if
