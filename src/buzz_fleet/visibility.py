@@ -59,7 +59,10 @@ def visibility_status_text(agent: Agent) -> str:
     errors = [e for e in (state.profile_error, state.managed_agent_error, state.add_policy_error) if e]
     errors.extend(state.channel_errors.values())
     if errors:
-        return f"error: {errors[0]}"
+        reason = errors[0]
+        if len(reason) > 60:
+            reason = reason[:60] + "…"
+        return f"error: {reason}"
     channels_joined = all(status == "joined" for status in state.channels.values())
     if state.profile_published and state.managed_agent_published and state.add_policy_published and channels_joined:
         return "synced"

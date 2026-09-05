@@ -212,6 +212,33 @@ These optional fields map to systemd env vars on the agent's unit:
 - `--respond-to-allowlist` → `BUZZ_ACP_RESPOND_TO_ALLOWLIST` (comma-separated
   pubkeys; also sets `BUZZ_ACP_RESPOND_TO=allowlist`)
 
+`agent create`/`agent update` also take two flags for NIP-29 channel
+membership:
+- `--channel-ids` → comma-separated NIP-29 channel UUIDs the agent should
+  join (e.g. `--channel-ids "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222"`)
+- `--channel-add-policy` → who may add this agent to a channel: `anyone`,
+  `owner_only`, or `nobody` (default `owner_only`)
+
+#### Desktop/mobile visibility
+
+`agent create` also publishes a handful of additional Nostr events —
+a kind:0 profile, a kind:30177 managed-agent record, a kind:10100
+add-policy record, and (if `--channel-ids` was given) a kind:9000
+channel-join per channel — so the agent shows up owner-attributed in Buzz
+Desktop's and mobile's Agents view. This is automatic: no extra command to
+run, no CLI flag to remember, the same self-healing philosophy as the other
+runtime concerns documented under "Runtime self-healing" below. `agent
+delete` mirrors this on the way out — it also leaves any joined channels,
+retracts the managed-agent record, and files an archive request (matching
+Desktop's own real delete behavior), so a deleted agent stops appearing in
+Desktop's pickers/autocomplete too.
+
+`agent list` (CLI) and the TUI dashboard both show a "Visibility" status
+column reflecting this: `—` (an agent created before this feature existed,
+not covered by it), `pending` (still publishing), `synced` (every step
+succeeded), or `error: <reason>` (a permanent failure, e.g. a malformed
+channel UUID).
+
 ### Manage agents (TUI)
 
 ```bash
@@ -232,8 +259,14 @@ empty dropdown when there's nothing there yet). Selecting a template pre-fills
 the display name, harness, system prompt, model, parallelism, and idle/max-turn
 timeouts — all fields are editable before submit, and re-selecting a different
 template overwrites them again. The new fields for model, parallelism, idle
-timeout, max turn duration, and respond-to allowlist are available as
-blank-by-default inputs on both the create and edit forms.
+timeout, max turn duration, respond-to allowlist, channel IDs, and channel
+add-policy are available as blank-by-default inputs on both the create and
+edit forms.
+
+The dashboard's agent table (and `agent list` on the CLI) both show a
+"Visibility" status column: `—` for an agent created before this feature
+existed, `pending` while events are still publishing, `synced` once every
+step has succeeded, or `error: <reason>` for a permanent failure.
 
 The harness dropdown auto-detects what's actually usable on this machine and
 labels each option accordingly — `available`, `adapter missing` (the base CLI

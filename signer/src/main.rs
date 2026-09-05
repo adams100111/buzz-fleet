@@ -341,11 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn leave_channel_rejects_malformed_channel_id() {
-        assert!(uuid::Uuid::parse_str("not-a-uuid").is_err());
-    }
-
-    #[test]
     fn retract_managed_agent_builds_correct_coordinate() {
         let owner = Keys::generate();
         let agent_pubkey = "d".repeat(64);

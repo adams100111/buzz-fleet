@@ -25,10 +25,13 @@ pub const KIND_MANAGED_AGENT: u16 = 30177;
 /// Mirrors `ManagedAgentEventContent`
 /// (`desktop/src-tauri/src/managed_agents/agent_events.rs:38-60`) exactly —
 /// snake_case field names, `persona_id`/`provider`/`persona_source_version`
-/// always absent for buzz-fleet's always-standalone agents, `parallelism`
-/// and `respond_to` non-optional. This struct exists only to *validate* the
-/// content JSON `manager.py` builds — buzz-fleet-signer never constructs
-/// this content itself (see Task 9's `visibility.managed_agent_content`).
+/// always null in practice for buzz-fleet's always-standalone agents (though
+/// the Python-built content may include them as explicit JSON nulls rather
+/// than omitting the keys — this struct only validates, never constructs,
+/// the content), `parallelism` and `respond_to` non-optional. This struct
+/// exists only to *validate* the content JSON `manager.py` builds —
+/// buzz-fleet-signer never constructs this content itself (see Task 9's
+/// `visibility.managed_agent_content`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentContent {
     pub name: String,

@@ -658,6 +658,66 @@ def test_update_agent_does_not_touch_visibility_for_old_agent(tmp_path: Path, mo
     assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)
 
 
+def test_update_agent_with_unchanged_display_name_does_not_republish(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for Item 6: the TUI always submits the entire form on
+    every save, so `update_agent` must only reset/re-publish a visibility
+    step when the new value actually differs from the current one — not
+    merely because the field was present in `changes`. Presence-only checks
+    force a republish (and silently clear any recorded permanent error) on
+    every TUI edit, even a no-op one.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Stable Name",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    assert agent.visibility_state.profile_published is True
+    assert agent.visibility_state.managed_agent_published is True
+    runner.calls.clear()
+
+    updated = manager.update_agent(agent.id, display_name="Stable Name")
+
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert "publish-agent-profile" not in subcommands
+    assert "publish-managed-agent" not in subcommands
+    assert updated.visibility_state.profile_published is True
+    assert updated.visibility_state.managed_agent_published is True
+
+
+def test_update_agent_drops_caller_supplied_visibility_managed(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for Item 7: `visibility_managed` is the single most
+    safety-critical invariant in the visibility feature (it permanently
+    exempts pre-existing agents from any retroactive backfill). No current
+    caller passes it through `update_agent`, but it must be silently
+    dropped — never honored, and never an error either — so a future/
+    careless caller can't flip it.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Old Name",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    from buzz_fleet import state as state_module
+
+    old_style = agent.model_copy(update={"visibility_managed": False})
+    state_module.save_agent(old_style)
+
+    updated = manager.update_agent(old_style.id, visibility_managed=True, display_name="New Name")
+
+    assert updated.visibility_managed is False
+    assert updated.display_name == "New Name"
+
+
 def test_delete_agent_leaves_channels_retracts_and_archives(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
@@ -730,6 +790,51 @@ def test_delete_agent_continues_leaving_other_channels_if_one_leave_fails(tmp_pa
     subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
     assert "retract-managed-agent" in subcommands
     assert "archive-agent" in subcommands
+
+
+def test_ensure_runtime_ready_survives_deleted_persona_file(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for Item 1: a persona_file whose path is moved/deleted
+    after agent creation makes `systemd.resolve_prompt_text` (called via
+    `visibility.managed_agent_content`) raise `FileNotFoundError`, an
+    `OSError` subclass NOT covered by the original
+    `except (RuntimeError, json.JSONDecodeError, KeyError)` tuple in
+    `_sync_visibility`'s managed-agent step. Since `_sync_visibility` runs
+    unconditionally at the top of `ensure_runtime_ready`'s per-agent loop,
+    an uncaught `FileNotFoundError` here used to crash `agent list`, the
+    dashboard refresh, and every future `create_agent` call. This must
+    instead be swallowed and classified as a transient failure (the file
+    could reappear), leaving `managed_agent_published=False` and
+    `managed_agent_error=None` so a future call retries it.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    persona_path = tmp_path / "persona.md"
+    persona_path.write_text("You are a persona-backed agent.")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Persona Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="persona_file", path=persona_path),
+    )
+    assert agent.visibility_state.managed_agent_published is True  # published fine while the file existed
+
+    # Simulate the file being moved/deleted after creation, and force a
+    # re-publish attempt by clearing the previously-recorded success.
+    persona_path.unlink()
+    from buzz_fleet import state as state_module
+
+    stale = agent.model_copy(
+        update={"visibility_state": agent.visibility_state.model_copy(update={"managed_agent_published": False})}
+    )
+    state_module.save_agent(stale)
+
+    manager.ensure_runtime_ready()  # must not raise despite the missing persona file
+
+    reloaded = next(a for a in manager.list_agents() if a.id == agent.id)
+    assert reloaded.visibility_state.managed_agent_published is False
+    assert reloaded.visibility_state.managed_agent_error is None
 
 
 def test_delete_agent_skips_visibility_teardown_for_old_agent(tmp_path: Path, monkeypatch) -> None:

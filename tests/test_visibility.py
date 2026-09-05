@@ -87,3 +87,24 @@ def test_visibility_status_text_surfaces_permanent_error() -> None:
         visibility_state=AgentVisibilityState(channel_errors={"c1": "invalid: channel not found"}),
     )
     assert visibility_status_text(agent) == "error: invalid: channel not found"
+
+
+def test_visibility_status_text_truncates_long_error() -> None:
+    long_reason = "invalid: " + "x" * 200
+    agent = _agent(
+        visibility_managed=True,
+        visibility_state=AgentVisibilityState(profile_error=long_reason),
+    )
+    result = visibility_status_text(agent)
+    assert result.startswith("error: ")
+    assert result.endswith("…")
+    assert len(result) < len(f"error: {long_reason}")
+    assert len(result) == len("error: ") + 60 + 1
+
+
+def test_visibility_status_text_does_not_alter_short_error() -> None:
+    agent = _agent(
+        visibility_managed=True,
+        visibility_state=AgentVisibilityState(profile_error="invalid: short reason"),
+    )
+    assert visibility_status_text(agent) == "error: invalid: short reason"

@@ -166,7 +166,7 @@ class AgentManager:
                 auth_tag = signer_client.compute_auth_tag(self._runner, owner_nsec, agent.public_key)
                 signer_client.publish_agent_profile(self._runner, relay_url, agent_nsec, agent.display_name, auth_tag)
                 vs.profile_published = True
-            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+            except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
                 if visibility.classify_signer_error(e) == "permanent":
                     vs.profile_error = str(e)
 
@@ -181,7 +181,7 @@ class AgentManager:
                 finally:
                     content_path.unlink(missing_ok=True)
                 vs.managed_agent_published = True
-            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+            except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
                 if visibility.classify_signer_error(e) == "permanent":
                     vs.managed_agent_error = str(e)
 
@@ -190,7 +190,7 @@ class AgentManager:
                 policy = visibility.resolved_channel_add_policy(agent)
                 signer_client.publish_agent_add_policy(self._runner, relay_url, agent_nsec, policy)
                 vs.add_policy_published = True
-            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+            except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
                 if visibility.classify_signer_error(e) == "permanent":
                     vs.add_policy_error = str(e)
 
@@ -200,7 +200,7 @@ class AgentManager:
             try:
                 signer_client.join_channel(self._runner, relay_url, agent_nsec, channel_id)
                 vs.channels[channel_id] = "joined"
-            except (RuntimeError, json.JSONDecodeError, KeyError) as e:
+            except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
                 if visibility.classify_signer_error(e) == "permanent":
                     vs.channel_errors[channel_id] = str(e)
                     vs.channels[channel_id] = "error"
@@ -282,6 +282,13 @@ class AgentManager:
         return agent
 
     def update_agent(self, agent_id: str, **changes: object) -> Agent:
+        # visibility_managed is the single most safety-critical invariant in
+        # the whole visibility feature — it permanently exempts agents
+        # created before this feature shipped from ever being retroactively
+        # backfilled. No current caller passes it, but silently drop it here
+        # (rather than honoring it or erroring) so it can never be overridden
+        # through this path even by a future/careless caller.
+        changes = {k: v for k, v in changes.items() if k != "visibility_managed"}
         self._ensure_owner_pubkey()
         agents = {a.id: a for a in self.list_agents()}
         current = agents[agent_id]
@@ -297,13 +304,13 @@ class AgentManager:
                 "respond_to_allowlist",
             }
             vs = updated.visibility_state.model_copy(deep=True)
-            if any(f in changes for f in content_fields):
+            if any(f in changes and getattr(updated, f) != getattr(current, f) for f in content_fields):
                 vs.managed_agent_published = False
                 vs.managed_agent_error = None
-            if "display_name" in changes:
+            if "display_name" in changes and updated.display_name != current.display_name:
                 vs.profile_published = False
                 vs.profile_error = None
-            if "channel_add_policy" in changes:
+            if "channel_add_policy" in changes and updated.channel_add_policy != current.channel_add_policy:
                 vs.add_policy_published = False
                 vs.add_policy_error = None
             if "channel_ids" in changes:

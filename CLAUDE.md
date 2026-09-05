@@ -5,7 +5,7 @@
 `ensure_runtime_ready()` is the single entry point for "make sure a
 `buzz-agent@*` unit can actually run" — called from `create_agent`,
 `update_agent`, the dashboard's every refresh, and `agent list`. It exists
-because three real, previously-undiscovered incidents were found by
+because four real, previously-undiscovered incidents were found by
 actually running a live agent end-to-end, not by code review:
 
 1. **`buzz-acp` itself was never installed anywhere.** buzz-fleet's own
@@ -34,8 +34,21 @@ actually running a live agent end-to-end, not by code review:
    a new subcommand) at `connect` time, with `AgentManager.
    _ensure_owner_pubkey()` backfilling it (and persisting) for any
    `Community` saved before this field existed.
+4. **Agents were invisible to Buzz Desktop's actual Agents-view
+   pipeline.** `create_agent` previously only ever published a bare
+   `kind:9030` relay-membership event — nothing Desktop's Agents view
+   actually reads. Fixed by `AgentManager._sync_visibility()`
+   (`manager.py`), called from `create_agent`, `update_agent`, and
+   `ensure_runtime_ready` alike, publishing the real kind:0 profile,
+   kind:9000 channel-join, kind:10100 add-policy, and kind:30177
+   managed-agent record Desktop expects (content built by `visibility.py`,
+   published via 7 new `buzz-fleet-signer` subcommands). The
+   `visibility_managed` flag on `Agent` permanently exempts any agent
+   created before this feature shipped from ever being retroactively
+   backfilled — `ensure_runtime_ready()` and `update_agent()` both check it
+   before touching visibility state at all.
 
-All three heal automatically — no CLI flag, no doc a user has to know to
+All four heal automatically — no CLI flag, no doc a user has to know to
 run. `ensure_runtime_ready()` only rewrites/restarts an agent when
 something it actually needs changed (a resolved command differs from
 what's on disk, or the owner pubkey was just backfilled) — never on an
