@@ -1,7 +1,7 @@
 mod events;
 
 use clap::{Parser, Subcommand};
-use nostr::Keys;
+use nostr::{Keys, Kind};
 use nostr::nips::nip19::ToBech32;
 use buzz_ws_client::connection::NostrWsConnection;
 use serde_json::json;
@@ -48,6 +48,24 @@ enum Command {
         admin_nsec: String,
         #[arg(long)]
         pubkey: String,
+    },
+    /// Self-join one NIP-29 channel as role=bot.
+    JoinChannel {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        agent_nsec: String,
+        #[arg(long)]
+        channel_id: String,
+    },
+    /// Self-leave one NIP-29 channel.
+    LeaveChannel {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        agent_nsec: String,
+        #[arg(long)]
+        channel_id: String,
     },
 }
 
@@ -106,6 +124,32 @@ async fn main() {
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
+        Command::JoinChannel { relay, agent_nsec, channel_id } => {
+            let builder = uuid::Uuid::parse_str(&channel_id)
+                .map_err(anyhow::Error::from)
+                .and_then(|id| {
+                    let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
+                    buzz_sdk::builders::build_add_member(id, &agent_pubkey, Some(buzz_sdk::MemberRole::Bot))
+                        .map_err(|e| anyhow::anyhow!(e))
+                });
+            match run_publish(&relay, &agent_nsec, builder).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+        Command::LeaveChannel { relay, agent_nsec, channel_id } => {
+            let builder = uuid::Uuid::parse_str(&channel_id)
+                .map_err(anyhow::Error::from)
+                .and_then(|id| {
+                    let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
+                    buzz_sdk::builders::build_remove_member(id, &agent_pubkey)
+                        .map_err(|e| anyhow::anyhow!(e))
+                });
+            match run_publish(&relay, &agent_nsec, builder).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
     };
     std::process::exit(code);
 }
@@ -131,4 +175,37 @@ async fn run_publish(
         anyhow::bail!("relay rejected event: {}", response.message);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_channel_builds_self_add_with_bot_role() {
+        let keys = Keys::generate();
+        let nsec = keys.secret_key().to_bech32().unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let builder = buzz_sdk::builders::build_add_member(
+            channel_id,
+            &keys.public_key().to_hex(),
+            Some(buzz_sdk::MemberRole::Bot),
+        )
+        .unwrap();
+        let event = builder.sign_with_keys(&keys).unwrap();
+        assert_eq!(event.kind, Kind::Custom(9000));
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["role", "bot"]
+        }));
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["h", channel_id.to_string().as_str()]
+        }));
+    }
+
+    #[test]
+    fn leave_channel_rejects_malformed_channel_id() {
+        assert!(uuid::Uuid::parse_str("not-a-uuid").is_err());
+    }
 }

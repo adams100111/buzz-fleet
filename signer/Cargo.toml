@@ -10,6 +10,8 @@ path = "src/main.rs"
 [dependencies]
 nostr = { version = "0.44", features = ["nip44", "nip98"] }
 buzz-ws-client = { git = "https://github.com/block/buzz", rev = "b1f6b7ef770dddbb7f33c9f5861c379a47bca1d6" }
+buzz-sdk = { git = "https://github.com/block/buzz", rev = "b1f6b7ef770dddbb7f33c9f5861c379a47bca1d6" }
+uuid = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
