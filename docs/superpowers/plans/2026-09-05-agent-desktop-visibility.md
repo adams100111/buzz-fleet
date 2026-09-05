@@ -2121,68 +2121,157 @@ This completes `manager.py` — every lifecycle method now correctly publishes, 
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_cli.py` (read the existing file first to match its exact `CliRunner`/fixture style before adding these — the shape below assumes the same pattern as the file's other `agent create`/`agent update` tests):
+`tests/test_cli.py` already has an established isolation pattern for every `agent create`/`agent update` test: `monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))` plus `monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)` (a small per-test fake class), invoked via the module-level `runner_cli = CliRunner()` and `runner_cli.invoke(app, [...])` — never a real `state.load_community` call and never a real `AgentManager`/signer/relay round trip. Use this exact pattern below; do not invoke `app` without both monkeypatches, or the test would try to load a real `~/.config/buzz-fleet/communities/<id>.json` and construct a real `AgentManager` against whatever community happens to be configured on the machine running the tests — a real, not hypothetical, test-isolation hazard.
+
+Add to `tests/test_cli.py`:
 
 ```python
-def test_agent_create_rejects_malformed_channel_id(runner, tmp_path) -> None:
-    result = runner.invoke(
+def test_agent_create_rejects_malformed_channel_id(tmp_path, monkeypatch) -> None:
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def create_agent(self, **kwargs: object) -> object:
+            raise AssertionError("create_agent should not be called for an invalid channel id")
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are a test agent.")
+
+    result = runner_cli.invoke(
         app,
         [
-            "agent",
-            "create",
-            "--community",
-            "eltahir",
-            "--display-name",
-            "Bad Channel",
-            "--harness",
-            "claude",
-            "--prompt-file",
-            str(tmp_path / "prompt.md"),
-            "--channel-ids",
-            "not-a-uuid",
+            "agent", "create",
+            "--community", "eltahir",
+            "--display-name", "Bad Channel",
+            "--harness", "claude",
+            "--prompt-file", str(prompt_file),
+            "--channel-ids", "not-a-uuid",
         ],
     )
+
     assert result.exit_code != 0
     assert "channel" in result.output.lower()
 
 
-def test_agent_create_accepts_channel_add_policy_choice(runner, tmp_path) -> None:
-    (tmp_path / "prompt.md").write_text("You are a test agent.")
-    result = runner.invoke(
+def test_agent_create_accepts_channel_add_policy_choice(tmp_path, monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def create_agent(self, **kwargs: object) -> object:
+            calls.update(kwargs)
+            return SimpleNamespace(id="test-agent", public_key="ab" * 32)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are a test agent.")
+
+    result = runner_cli.invoke(
         app,
         [
-            "agent",
-            "create",
-            "--community",
-            "eltahir",
-            "--display-name",
-            "Policy Agent",
-            "--harness",
-            "claude",
-            "--prompt-file",
-            str(tmp_path / "prompt.md"),
-            "--channel-add-policy",
-            "nobody",
+            "agent", "create",
+            "--community", "eltahir",
+            "--display-name", "Policy Agent",
+            "--harness", "claude",
+            "--prompt-file", str(prompt_file),
+            "--channel-add-policy", "nobody",
         ],
     )
-    assert result.exit_code == 0
+
+    assert result.exit_code == 0, result.output
+    assert calls["channel_add_policy"] == "nobody"
 
 
-def test_agent_list_shows_visibility_status(runner) -> None:
-    result = runner.invoke(app, ["agent", "list", "--community", "eltahir"])
-    assert result.exit_code == 0
-    # Every row gets a fourth column now — a freshly connected community with
-    # no agents just produces no rows, so this only asserts the command still
-    # runs cleanly with the new column wired in; per-agent content is covered
-    # by test_visibility.py's direct tests of visibility_status_text.
+def test_agent_update_rejects_invalid_channel_add_policy(monkeypatch) -> None:
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            raise AssertionError("update_agent should not be called for an invalid policy")
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    result = runner_cli.invoke(
+        app,
+        ["agent", "update", "--community", "eltahir", "agent-1", "--channel-add-policy", "everyone"],
+    )
+
+    assert result.exit_code == 1
+    assert "channel-add-policy" in result.output
+
+
+def test_agent_update_parses_channel_ids(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return SimpleNamespace(id=agent_id)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    channel_id = "12345678-1234-5678-1234-567812345678"
+    result = runner_cli.invoke(
+        app,
+        ["agent", "update", "--community", "eltahir", "agent-1", "--channel-ids", channel_id],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["changes"] == {"channel_ids": [channel_id]}
+
+
+def test_agent_list_shows_visibility_status(monkeypatch) -> None:
+    """Two agents in different visibility states are listed to prove the
+    per-row loop renders a status for each one, not just the first."""
+    unmanaged = _agent(id="agent-unmanaged", display_name="Unmanaged")
+    synced = _agent(
+        id="agent-synced",
+        display_name="Synced",
+        visibility_managed=True,
+        visibility_state=AgentVisibilityState(
+            profile_published=True, managed_agent_published=True, add_policy_published=True
+        ),
+    )
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def ensure_runtime_ready(self) -> None:
+            pass
+
+        def list_agents(self) -> list[object]:
+            return [unmanaged, synced]
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    result = runner_cli.invoke(app, ["agent", "list", "--community", "eltahir"])
+
+    assert result.exit_code == 0, result.output
+    assert "agent-unmanaged\tUnmanaged\tclaude\t—" in result.output
+    assert "agent-synced\tSynced\tclaude\tsynced" in result.output
 ```
 
-(Adapt the exact fixture names — `runner`, `app`, and how `--community eltahir` gets a real connected community in test setup — to whatever `test_cli.py` already establishes; do not invent a different test harness than the file already uses.)
+This uses `tests/test_cli.py`'s existing `_agent(**overrides) -> Agent` helper (already present in the file, building a minimal `Agent` with sensible defaults) and its `AgentVisibilityState` import — both already available at the top of the file; add `AgentVisibilityState` to the existing `from buzz_fleet.models import Agent, SystemPromptSource` import line if it isn't already there.
 
-- [ ] **Step 2: Run to verify the first two fail**
+- [ ] **Step 2: Run to verify the new tests fail**
 
-Run: `uv run pytest tests/test_cli.py -k "malformed_channel_id or channel_add_policy" -v`
-Expected: FAIL — neither flag exists yet.
+Run: `uv run pytest tests/test_cli.py -k "channel_id or channel_add_policy or shows_visibility_status" -v`
+Expected: FAIL — neither flag nor the status column exists yet.
 
 - [ ] **Step 3: Implement in `cli/app.py`**
 
@@ -2253,9 +2342,9 @@ def agent_list(community: Annotated[str, typer.Option()]) -> None:
         typer.echo(f"{agent.id}\t{agent.display_name}\t{agent.harness}\t{status}")
 ```
 
-- [ ] **Step 4: Run to verify all three pass**
+- [ ] **Step 4: Run to verify all five pass**
 
-Run: `uv run pytest tests/test_cli.py -k "malformed_channel_id or channel_add_policy or shows_visibility_status" -v`
+Run: `uv run pytest tests/test_cli.py -k "channel_id or channel_add_policy or shows_visibility_status" -v`
 Expected: all pass.
 
 - [ ] **Step 5: Run the full CLI test suite**
