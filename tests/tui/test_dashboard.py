@@ -2,27 +2,62 @@ from datetime import UTC, datetime
 
 import pytest
 
-from buzz_fleet.models import Agent, SystemPromptSource
+from buzz_fleet.models import Agent, AgentVisibilityState, SystemPromptSource
 from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.tui.app import BuzzFleetApp
-from buzz_fleet.tui.screens.dashboard import DashboardScreen
+from buzz_fleet.tui.screens.dashboard import DashboardScreen, _visibility_display
 
 # The "no connected community by default" isolation fixture lives in
 # tests/tui/conftest.py — every file in this directory constructs a real
 # BuzzFleetApp(), so it's shared rather than duplicated per file.
 
 
-def _agent(agent_id: str) -> Agent:
-    return Agent(
-        id=agent_id,
-        community_id="eltahir",
-        display_name=agent_id.title(),
-        harness="claude",
-        private_key="nsec1x",
-        public_key="a" * 64,
-        system_prompt_source=SystemPromptSource(kind="inline", text="hi"),
-        created_at=datetime.now(UTC),
+def _agent(agent_id: str = "test-agent", **overrides) -> Agent:
+    # Shared builder for every test in this file: the pre-existing dashboard
+    # tests below call `_agent("some-id")` positionally, while the
+    # visibility tests need `visibility_managed`/`visibility_state`
+    # overrides — merged into one helper (with `**overrides` folded into
+    # its defaults) rather than keeping a second, colliding `_agent()`
+    # definition side by side.
+    defaults = {
+        "id": agent_id,
+        "community_id": "eltahir",
+        "display_name": agent_id.title(),
+        "harness": "claude",
+        "private_key": "nsec1x",
+        "public_key": "a" * 64,
+        "system_prompt_source": SystemPromptSource(kind="inline", text="hi"),
+        "created_at": datetime.now(UTC),
+    }
+    defaults.update(overrides)
+    return Agent(**defaults)
+
+
+def test_visibility_display_old_agent_is_inactive_colored_dash() -> None:
+    text, _color = _visibility_display(_agent())
+    assert text == "—"
+
+
+def test_visibility_display_synced_is_success_colored() -> None:
+    agent = _agent(
+        visibility_managed=True,
+        visibility_state=AgentVisibilityState(
+            profile_published=True, managed_agent_published=True, add_policy_published=True
+        ),
     )
+    text, _color = _visibility_display(agent)
+    assert text == "synced"
+
+
+def test_visibility_display_pending_is_warning_colored() -> None:
+    text, _color = _visibility_display(_agent(visibility_managed=True))
+    assert text == "pending"
+
+
+def test_visibility_display_error_is_error_colored() -> None:
+    agent = _agent(visibility_managed=True, visibility_state=AgentVisibilityState(profile_error="invalid: bad thing"))
+    text, _color = _visibility_display(agent)
+    assert text.startswith("error:")
 
 
 @pytest.mark.asyncio
@@ -43,8 +78,10 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
         await pilot.pause()
         table = app.screen.query_one("#agent-table")
         # Displayed status text borrows systemd's own vocabulary ("active"),
-        # not the internal AgentStatus.RUNNING enum name.
-        assert ("laravel-dev", "Laravel-Dev", "claude", "active") in [
+        # not the internal AgentStatus.RUNNING enum name. Trailing "—" is the
+        # visibility column: this agent has visibility_managed=False (an old,
+        # unmanaged agent), which is what the "—" dash denotes.
+        assert ("laravel-dev", "Laravel-Dev", "claude", "active", "—") in [
             tuple(str(v) for v in table.get_row_at(i)) for i in range(table.row_count)
         ]
 

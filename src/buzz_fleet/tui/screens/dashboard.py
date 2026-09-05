@@ -11,8 +11,9 @@ from textual.binding import Binding, BindingType
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header
 
-from buzz_fleet import state
+from buzz_fleet import state, visibility
 from buzz_fleet.manager import AgentManager
+from buzz_fleet.models import Agent
 from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.systemctl_client import status as systemctl_status
@@ -36,6 +37,17 @@ _STATUS_DISPLAY: dict[AgentStatus, tuple[str, str]] = {
     AgentStatus.FAILED: ("failed", "#C1553A"),
     AgentStatus.UNKNOWN: ("unknown", STATUS_INACTIVE),
 }
+
+
+def _visibility_display(agent: Agent) -> tuple[str, str]:
+    text = visibility.visibility_status_text(agent)
+    if text == "—":
+        return text, STATUS_INACTIVE
+    if text == "synced":
+        return text, "#7FB069"
+    if text.startswith("error:"):
+        return text, "#C1553A"
+    return text, "#C98A2C"  # "pending"
 
 
 def list_agents() -> list:
@@ -68,7 +80,7 @@ class DashboardScreen(Screen):
         yield Header()
         table = DataTable(id="agent-table")
         table.border_title = "Agents"
-        table.add_columns("id", "display name", "harness", "status")
+        table.add_columns("id", "display name", "harness", "status", "visibility")
         yield table
         yield Footer()
 
@@ -99,7 +111,14 @@ class DashboardScreen(Screen):
         table.clear()
         for agent in list_agents():
             text, color = _STATUS_DISPLAY[agent_status(agent.id)]
-            table.add_row(agent.id, agent.display_name, agent.harness, Text(text, style=f"bold {color}"))
+            vis_text, vis_color = _visibility_display(agent)
+            table.add_row(
+                agent.id,
+                agent.display_name,
+                agent.harness,
+                Text(text, style=f"bold {color}"),
+                Text(vis_text, style=f"bold {vis_color}"),
+            )
 
     def _selected_agent_id(self) -> str | None:
         table = self.query_one("#agent-table", DataTable)
