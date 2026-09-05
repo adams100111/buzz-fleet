@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from buzz_fleet import state
+from buzz_fleet import __version__, state
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import SystemPromptSource
@@ -16,6 +16,22 @@ from buzz_fleet.proc import RealCommandRunner
 app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
 agent_app = typer.Typer(help="Manage agent identities")
 app.add_typer(agent_app, name="agent")
+
+
+def _version_callback(show_version: bool) -> None:
+    if show_version:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def main_callback(
+    version: Annotated[
+        bool,
+        typer.Option("--version", callback=_version_callback, is_eager=True, help="Show the version and exit."),
+    ] = False,
+) -> None:
+    pass
 
 
 @app.command()

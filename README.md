@@ -43,6 +43,21 @@ clone. Afterward `buzz-fleet` works from anywhere:
 buzz-fleet tui
 ```
 
+Check what's installed with `buzz-fleet --version`.
+
+### Updating
+
+Re-run the exact same install command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/adams100111/buzz-fleet/main/scripts/get.sh | bash
+```
+
+`get.sh` always fetches whatever is tagged `latest` on GitHub Releases and
+overwrites the installed binaries in place — there's no separate "update"
+command, no version diffing, and no confirmation prompt. Run
+`buzz-fleet --version` afterward to confirm you're on the new version.
+
 ### Building from source instead
 
 If you're on an architecture the releases don't cover yet, or you're

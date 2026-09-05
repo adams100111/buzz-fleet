@@ -14,6 +14,15 @@ class FakeRunner:
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"ok": True}), stderr="")
 
 
+def test_version_flag_prints_version_and_exits() -> None:
+    from buzz_fleet import __version__
+
+    result = runner_cli.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == __version__
+
+
 def test_connect_saves_community_on_success(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", lambda: FakeRunner())
