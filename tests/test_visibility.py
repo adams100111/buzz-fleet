@@ -33,6 +33,33 @@ def test_classify_signer_error_transient_otherwise() -> None:
     assert classify_signer_error(ValueError("Expecting value: line 1 column 1")) == "transient"
 
 
+def test_classify_signer_error_permanent_on_signer_local_validation_failures() -> None:
+    """The signer's own local validation failures (never reach the relay)
+    must classify as permanent too, matching the "invalid: " convention
+    documented on classify_signer_error — otherwise a malformed channel
+    UUID, auth tag, or channel_add_policy value retries forever instead of
+    surfacing as a visible error.
+    """
+    assert (
+        classify_signer_error(RuntimeError("join-channel failed: invalid: channel_id invalid length: expected..."))
+        == "permanent"
+    )
+    assert (
+        classify_signer_error(
+            RuntimeError('publish-agent-add-policy failed: invalid: channel_add_policy "sometimes" (must be ...)')
+        )
+        == "permanent"
+    )
+    assert (
+        classify_signer_error(
+            RuntimeError(
+                'publish-agent-profile failed: invalid: auth tag must be a 4-element JSON array starting with "auth"'
+            )
+        )
+        == "permanent"
+    )
+
+
 def test_resolved_channel_add_policy_defaults_to_owner_only() -> None:
     assert resolved_channel_add_policy(_agent()) == "owner_only"
     assert resolved_channel_add_policy(_agent(channel_add_policy="anyone")) == "anyone"

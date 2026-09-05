@@ -18,6 +18,15 @@ def classify_signer_error(exc: Exception) -> Literal["transient", "permanent"]:
     (the input itself is wrong and retrying changes nothing); anything else
     — a connection failure, a timeout, unparseable signer output — is
     transient and safe to retry on the next `ensure_runtime_ready` pass.
+
+    `buzz-fleet-signer`'s own local validation failures (a malformed auth
+    tag, an invalid channel_add_policy value, a malformed channel UUID —
+    none of which ever reach the relay) are equally permanent, and the
+    signer deliberately formats all of them with this same "invalid: "
+    prefix so this one check classifies both sources correctly. Any new
+    signer-side validation error must follow this convention (`anyhow::
+    bail!("invalid: ...")` / `anyhow::anyhow!("invalid: ...")` in Rust) or
+    it will be silently misclassified as transient and retried forever.
     """
     return "permanent" if "invalid:" in str(exc) else "transient"
 

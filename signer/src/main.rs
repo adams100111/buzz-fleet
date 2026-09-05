@@ -187,7 +187,7 @@ async fn main() {
         }
         Command::JoinChannel { relay, agent_nsec, channel_id } => {
             let builder = uuid::Uuid::parse_str(&channel_id)
-                .map_err(anyhow::Error::from)
+                .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
                 .and_then(|id| {
                     let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
                     buzz_sdk::builders::build_add_member(id, &agent_pubkey, Some(buzz_sdk::MemberRole::Bot))
@@ -200,7 +200,7 @@ async fn main() {
         }
         Command::LeaveChannel { relay, agent_nsec, channel_id } => {
             let builder = uuid::Uuid::parse_str(&channel_id)
-                .map_err(anyhow::Error::from)
+                .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
                 .and_then(|id| {
                     let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
                     buzz_sdk::builders::build_remove_member(id, &agent_pubkey)

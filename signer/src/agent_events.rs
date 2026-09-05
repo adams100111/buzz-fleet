@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub fn build_agent_profile(display_name: &str, auth_tag_json: &str) -> anyhow::Result<EventBuilder> {
     let parts: Vec<String> = serde_json::from_str(auth_tag_json)?;
     if parts.len() != 4 || parts[0] != "auth" {
-        anyhow::bail!("invalid auth tag: expected a 4-element JSON array starting with \"auth\"");
+        anyhow::bail!("invalid: auth tag must be a 4-element JSON array starting with \"auth\"");
     }
     let auth_tag = Tag::parse(parts)?;
     let content = serde_json::json!({"display_name": display_name}).to_string();
@@ -66,7 +66,7 @@ pub const KIND_AGENT_PROFILE: u16 = 10100;
 /// concept of any of those to publish.
 pub fn build_agent_add_policy(policy: &str) -> anyhow::Result<EventBuilder> {
     if !matches!(policy, "anyone" | "owner_only" | "nobody") {
-        anyhow::bail!("invalid channel_add_policy {policy:?} (must be anyone, owner_only, or nobody)");
+        anyhow::bail!("invalid: channel_add_policy {policy:?} (must be anyone, owner_only, or nobody)");
     }
     let content = serde_json::json!({"channel_add_policy": policy}).to_string();
     Ok(EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE), content))
@@ -84,7 +84,7 @@ pub const KIND_IA_ARCHIVE_REQUEST: u16 = 9035;
 pub fn build_archive_agent(agent_pubkey_hex: &str, reason: &str, auth_tag_json: &str) -> anyhow::Result<EventBuilder> {
     let parts: Vec<String> = serde_json::from_str(auth_tag_json)?;
     if parts.len() != 4 || parts[0] != "auth" {
-        anyhow::bail!("invalid auth tag: expected a 4-element JSON array starting with \"auth\"");
+        anyhow::bail!("invalid: auth tag must be a 4-element JSON array starting with \"auth\"");
     }
     let tags = vec![
         Tag::parse(["-"])?,
