@@ -1655,14 +1655,19 @@ def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(
 
     manager.ensure_runtime_ready()
 
+    # archive-agent is delete-only (never called by ensure_runtime_ready/
+    # _sync_visibility) and correctly excluded; retract-managed-agent is a
+    # real subcommand a future unpublish path could call and must be
+    # included so this test still catches that regression if it ever
+    # happens.
     visibility_subcommands = {
         "compute-auth-tag",
         "publish-agent-profile",
         "publish-managed-agent",
+        "retract-managed-agent",
         "publish-agent-add-policy",
         "join-channel",
         "leave-channel",
-        "archive-agent",
     }
     assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)
 
@@ -1712,11 +1717,10 @@ In `ensure_runtime_ready`'s existing `for agent in self.list_agents():` loop, ad
 
 ```python
         for agent in self.list_agents():
-            if agent.visibility_managed:
-                synced = self._sync_visibility(agent)
-                if synced.visibility_state != agent.visibility_state:
-                    state.save_agent(synced)
-                agent = synced
+            synced = self._sync_visibility(agent)
+            if synced.visibility_state != agent.visibility_state:
+                state.save_agent(synced)
+            agent = synced
 
             resolved_command = harnesses.resolve_adapter_command(agent.harness)
             if not needs_full_refresh and _read_agent_command(agent.id) == resolved_command:
@@ -1734,7 +1738,7 @@ In `ensure_runtime_ready`'s existing `for agent in self.list_agents():` loop, ad
                 pass
 ```
 
-(Only the first four new lines are added; the rest of the loop body is unchanged — shown in full so the insertion point is unambiguous.)
+(Only the first four new lines are added; the rest of the loop body is unchanged — shown in full so the insertion point is unambiguous. Note there is deliberately no `if agent.visibility_managed:` guard here: `_sync_visibility` already checks that itself as its own first line — see Task 10 — and this is the single most safety-critical check in the whole feature, so it has exactly one source of truth rather than two copies of the same condition that could silently drift apart if either one is ever edited without the other.)
 
 - [ ] **Step 4: Run to verify both pass**
 
