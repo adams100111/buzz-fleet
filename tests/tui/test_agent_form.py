@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Select
+from textual.widgets import Input, Select, Static
 
 from buzz_fleet.tui.app import BuzzFleetApp
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
@@ -26,7 +26,7 @@ async def test_submitting_form_calls_create_agent() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         # Set values directly rather than simulating keystrokes: Textual's
@@ -61,7 +61,7 @@ async def test_submitting_form_in_edit_mode_calls_update_agent() -> None:
     )
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
         assert app.screen.query_one("#display-name-input", Input).value == "Laravel Dev"
@@ -102,7 +102,7 @@ async def test_editing_only_display_name_does_not_touch_persona_file_prompt() ->
     )
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
         # persona_file agents never get their prompt Input pre-filled.
@@ -132,7 +132,7 @@ async def test_submitting_blank_display_name_notifies_instead_of_crashing() -> N
     manager = RaisingManager()
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "!!!"
@@ -147,12 +147,17 @@ async def test_submitting_blank_display_name_notifies_instead_of_crashing() -> N
 async def test_template_select_present_only_in_create_mode(tmp_path, monkeypatch) -> None:
     from buzz_fleet import personas
 
-    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", tmp_path / "personas")
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    (personas_dir / "laravel.persona.md").write_text(
+        "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nPrompt body.\n"
+    )
+    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
 
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         assert app.screen.query("#template-select")
@@ -179,6 +184,26 @@ async def test_template_select_present_only_in_create_mode(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_no_templates_found_shows_explanatory_message_instead_of_blank_select(
+    tmp_path, monkeypatch
+) -> None:
+    from buzz_fleet import personas
+
+    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", tmp_path / "personas")
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+
+        assert not app.screen.query("#template-select")
+        message = app.screen.query_one("#no-templates-message", Static)
+        assert "No templates found" in message.render().plain
+
+
+@pytest.mark.asyncio
 async def test_selecting_template_prefills_and_overwrites_form_fields(tmp_path, monkeypatch) -> None:
     from buzz_fleet import personas
 
@@ -193,7 +218,7 @@ async def test_selecting_template_prefills_and_overwrites_form_fields(tmp_path, 
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Something Typed First"
@@ -212,11 +237,61 @@ async def test_selecting_template_prefills_and_overwrites_form_fields(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_harness_select_defaults_to_first_available_harness(monkeypatch) -> None:
+    from buzz_fleet import harnesses
+
+    def fake_which(cmd: str) -> str | None:
+        return "/usr/bin/codex-acp" if cmd == "codex-acp" else None
+
+    monkeypatch.setattr(harnesses.shutil, "which", fake_which)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+
+        assert app.screen.query_one("#harness-select", Select).value == "codex"
+
+
+@pytest.mark.asyncio
+async def test_harness_select_keeps_existing_agent_harness_regardless_of_availability(
+    monkeypatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from buzz_fleet import harnesses
+    from buzz_fleet.models import Agent, SystemPromptSource
+
+    monkeypatch.setattr(harnesses.shutil, "which", lambda cmd: None)
+
+    manager = FakeManager()
+    existing = Agent(
+        id="x",
+        community_id="eltahir",
+        display_name="X",
+        harness="goose",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="hi"),
+        created_at=datetime.now(UTC),
+    )
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 50)) as pilot:
+        await app.push_screen(AgentFormScreen(manager, agent=existing))
+        await pilot.pause()
+
+        assert app.screen.query_one("#harness-select", Select).value == "goose"
+
+
+@pytest.mark.asyncio
 async def test_submitting_form_passes_new_fields_to_create_agent() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -243,7 +318,7 @@ async def test_submitting_form_with_blank_optional_fields_passes_none() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -264,7 +339,7 @@ async def test_submitting_form_with_non_numeric_parallelism_notifies_instead_of_
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"

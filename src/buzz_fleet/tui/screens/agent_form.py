@@ -4,37 +4,14 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Select
+from textual.widgets import Button, Footer, Header, Input, Select, Static
 
-from buzz_fleet import personas
+from buzz_fleet import harnesses, personas
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Agent, SystemPromptSource
 
-_HARNESSES = ["claude", "codex", "pi", "goose"]
-
 
 class AgentFormScreen(Screen):
-    # Compact the form's fields (borderless, single-row) so that the full set
-    # of inputs plus the submit button fits within the default terminal
-    # height used by tests (and small real terminals) without scrolling.
-    DEFAULT_CSS = """
-    AgentFormScreen {
-        Input {
-            height: 1;
-            border: none;
-            padding: 0 1;
-        }
-        Select > SelectCurrent {
-            height: 1;
-            border: none;
-        }
-        Button {
-            height: 1;
-            border: none;
-        }
-    }
-    """
-
     def __init__(self, manager: AgentManager, agent: Agent | None = None) -> None:
         super().__init__()
         self._manager = manager
@@ -45,7 +22,7 @@ class AgentFormScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
         display_name = self._agent.display_name if self._agent else ""
-        harness = self._agent.harness if self._agent else "claude"
+        harness = self._agent.harness if self._agent else harnesses.default_harness()
         prompt_text = ""
         if self._agent and self._agent.system_prompt_source.kind == "inline":
             prompt_text = self._agent.system_prompt_source.text or ""
@@ -60,19 +37,28 @@ class AgentFormScreen(Screen):
 
         if self._agent is None:
             self._templates, skipped = personas.discover_personas(personas.DEFAULT_PERSONAS_DIR)
-            options = [
-                (f"{t.display_name} ({t.source_path.name})", i) for i, t in enumerate(self._templates)
-            ]
-            prompt = (
-                "Start from a template…"
-                if not skipped
-                else f"Start from a template… ({skipped} unsupported file(s) found)"
-            )
-            yield Select(options, prompt=prompt, id="template-select")
+            if self._templates or skipped:
+                options = [
+                    (f"{t.display_name} ({t.source_path.name})", i)
+                    for i, t in enumerate(self._templates)
+                ]
+                prompt = (
+                    "Start from a template…"
+                    if not skipped
+                    else f"Start from a template… ({skipped} unsupported file(s) found)"
+                )
+                yield Static("Template:")
+                yield Select(options, prompt=prompt, id="template-select")
+            else:
+                yield Static(
+                    f"No templates found in {personas.DEFAULT_PERSONAS_DIR}",
+                    id="no-templates-message",
+                )
 
         yield Input(value=display_name, placeholder="Display name", id="display-name-input")
+        yield Static("Harness:")
         yield Select(
-            [(h, h) for h in _HARNESSES], value=harness, allow_blank=False, id="harness-select"
+            harnesses.harness_select_options(), value=harness, allow_blank=False, id="harness-select"
         )
         yield Input(value=prompt_text, placeholder="System prompt", id="prompt-input")
         yield Input(
@@ -124,7 +110,7 @@ class AgentFormScreen(Screen):
             return
         template = self._templates[event.value]
         self.query_one("#display-name-input", Input).value = template.display_name
-        if template.harness in _HARNESSES:
+        if template.harness in harnesses.HARNESSES:
             self.query_one("#harness-select", Select).value = template.harness
         self.query_one("#prompt-input", Input).value = template.prompt_body
         self.query_one("#model-input", Input).value = template.model or ""
