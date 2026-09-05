@@ -286,6 +286,47 @@ class AgentManager:
         agents = {a.id: a for a in self.list_agents()}
         current = agents[agent_id]
         updated = current.model_copy(update=changes)
+
+        if current.visibility_managed:
+            content_fields = {
+                "display_name",
+                "system_prompt_source",
+                "team_instructions",
+                "model",
+                "parallelism",
+                "respond_to_allowlist",
+            }
+            vs = updated.visibility_state.model_copy(deep=True)
+            if any(f in changes for f in content_fields):
+                vs.managed_agent_published = False
+                vs.managed_agent_error = None
+            if "display_name" in changes:
+                vs.profile_published = False
+                vs.profile_error = None
+            if "channel_add_policy" in changes:
+                vs.add_policy_published = False
+                vs.add_policy_error = None
+            if "channel_ids" in changes:
+                old_ids = set(current.channel_ids or [])
+                new_ids = set(updated.channel_ids or [])
+                agent_nsec = updated.private_key.get_secret_value()
+                for channel_id in old_ids - new_ids:
+                    try:
+                        signer_client.leave_channel(
+                            self._runner, self._community.relay_url, agent_nsec, channel_id
+                        )
+                    except (RuntimeError, json.JSONDecodeError, KeyError):
+                        # Best-effort — a failed leave here isn't retried by
+                        # ensure_runtime_ready (that only retries joins); the
+                        # relay's own state simply lags until the next edit.
+                        pass
+                    vs.channels.pop(channel_id, None)
+                    vs.channel_errors.pop(channel_id, None)
+                for channel_id in new_ids - old_ids:
+                    vs.channels.setdefault(channel_id, "pending")
+            updated = updated.model_copy(update={"visibility_state": vs})
+            updated = self._sync_visibility(updated)
+
         # Preserve any previously-set API keys instead of wiping them on every
         # update — write_agent_files takes explicit key args rather than
         # merging, so we read the existing .env file forward here (Fix 9).

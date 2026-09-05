@@ -585,3 +585,74 @@ def test_ensure_runtime_ready_retries_a_still_pending_visibility_step(tmp_path: 
 
     reloaded = next(a for a in manager.list_agents() if a.id == agent.id)
     assert reloaded.visibility_state.profile_published is True
+
+
+def test_update_agent_republishes_managed_agent_on_display_name_change(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Old Name",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    runner.calls.clear()
+
+    updated = manager.update_agent(agent.id, display_name="New Name")
+
+    assert updated.visibility_state.profile_published is True
+    assert updated.visibility_state.managed_agent_published is True
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert "publish-agent-profile" in subcommands
+    assert "publish-managed-agent" in subcommands
+
+
+def test_update_agent_joins_new_channel_and_leaves_removed_one(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Channel Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        channel_ids=["11111111-1111-1111-1111-111111111111"],
+    )
+    runner.calls.clear()
+
+    updated = manager.update_agent(
+        agent.id, channel_ids=["22222222-2222-2222-2222-222222222222"]
+    )
+
+    leave_calls = [c for c in runner.calls if c[:2] == ["buzz-fleet-signer", "leave-channel"]]
+    join_calls = [c for c in runner.calls if c[:2] == ["buzz-fleet-signer", "join-channel"]]
+    assert any("11111111-1111-1111-1111-111111111111" in c for c in leave_calls)
+    assert any("22222222-2222-2222-2222-222222222222" in c for c in join_calls)
+    assert "11111111-1111-1111-1111-111111111111" not in updated.visibility_state.channels
+    assert updated.visibility_state.channels["22222222-2222-2222-2222-222222222222"] == "joined"
+
+
+def test_update_agent_does_not_touch_visibility_for_old_agent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Old Name",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    from buzz_fleet import state as state_module
+
+    old_style = agent.model_copy(update={"visibility_managed": False})
+    state_module.save_agent(old_style)
+    runner.calls.clear()
+
+    manager.update_agent(agent.id, display_name="New Name")
+
+    visibility_subcommands = {"compute-auth-tag", "publish-agent-profile", "publish-managed-agent"}
+    assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)
