@@ -67,19 +67,12 @@ class AgentFormScreen(Screen):
         )
         install_button.display = self._harness_availability[harness] != "available"
 
-        with _section("Identity"):
-            yield Input(value=display_name, placeholder="Display name", id="display-name-input")
-            yield Static("Harness:")
-            yield Select(
-                harnesses.harness_select_options(),
-                value=harness,
-                allow_blank=False,
-                id="harness-select",
-            )
-            yield install_button
-
-        with _section("Behavior"):
-            if self._agent is None:
+        # Template selection comes first (create mode only) because picking a
+        # template overwrites display name, harness, prompt, team
+        # instructions, model, and limits below it — choosing it after typing
+        # those in would silently clobber what the user just entered.
+        if self._agent is None:
+            with _section("Template"):
                 self._templates, skipped = personas.discover_personas(personas.DEFAULT_PERSONAS_DIR)
                 if self._templates or skipped:
                     options = [
@@ -98,6 +91,19 @@ class AgentFormScreen(Screen):
                         f"No templates found in {personas.DEFAULT_PERSONAS_DIR}",
                         id="no-templates-message",
                     )
+
+        with _section("Identity"):
+            yield Input(value=display_name, placeholder="Display name", id="display-name-input")
+            yield Static("Harness:")
+            yield Select(
+                harnesses.harness_select_options(),
+                value=harness,
+                allow_blank=False,
+                id="harness-select",
+            )
+            yield install_button
+
+        with _section("Behavior"):
             yield TextArea(text=prompt_text, placeholder="System prompt", id="prompt-input")
             yield TextArea(
                 text=self._agent.team_instructions if self._agent and self._agent.team_instructions else "",
