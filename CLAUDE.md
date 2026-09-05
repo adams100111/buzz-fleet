@@ -1,5 +1,46 @@
 # buzz-fleet — notes for AI agents
 
+## Self-healing runtime (`AgentManager.ensure_runtime_ready`)
+
+`ensure_runtime_ready()` is the single entry point for "make sure a
+`buzz-agent@*` unit can actually run" — called from `create_agent`,
+`update_agent`, the dashboard's every refresh, and `agent list`. It exists
+because three real, previously-undiscovered incidents were found by
+actually running a live agent end-to-end, not by code review:
+
+1. **`buzz-acp` itself was never installed anywhere.** buzz-fleet's own
+   installer (`get.sh`/`install.sh`) only ever installed `buzz-fleet`/
+   `buzz-fleet-signer` — the binary every `buzz-agent@*.service` unit execs
+   didn't exist on a machine that never separately built it, crash-looping
+   775+ times with `status=203/EXEC`. Fixed by `buzz_acp.py`: downloads
+   Sprig (`block/sprout`'s rolling `sprig-latest` GitHub release — the only
+   standalone, non-Tauri-bundled distribution of `buzz-acp` that exists) to
+   `~/.local/share/buzz-fleet/bin/buzz-acp`, a per-user path (not
+   `/usr/local/bin`) specifically so this needs no sudo and can happen
+   silently. `TEMPLATE_UNIT`'s `ExecStart` points there now.
+2. **systemd's own PATH excludes version-manager install dirs.** Even
+   with a harness adapter genuinely installed (`npm install -g
+   @agentclientprotocol/codex-acp`, say), systemd `--user`'s fixed, minimal
+   PATH (`/usr/local/bin:/usr/bin:...`) won't include wherever mise/nvm/
+   asdf/volta actually put it. Fixed by `harnesses.resolve_adapter_command`:
+   resolves to an absolute path via `shutil.which()` at the point
+   `buzz-fleet` itself writes the env file (inheriting the *user's* PATH),
+   not inside the unit file.
+3. **No agent owner was ever configured.** `buzz-acp`'s own default is
+   `respond_to=owner-only` — with `BUZZ_ACP_AGENT_OWNER` never set, every
+   agent buzz-fleet ever created ran "successfully" while silently dropping
+   100% of events, forever. Fixed by deriving the community's owner pubkey
+   from its already-known admin nsec (`buzz-fleet-signer pubkey-from-nsec`,
+   a new subcommand) at `connect` time, with `AgentManager.
+   _ensure_owner_pubkey()` backfilling it (and persisting) for any
+   `Community` saved before this field existed.
+
+All three heal automatically — no CLI flag, no doc a user has to know to
+run. `ensure_runtime_ready()` only rewrites/restarts an agent when
+something it actually needs changed (a resolved command differs from
+what's on disk, or the owner pubkey was just backfilled) — never on an
+already-healthy call, so it's cheap to call unconditionally and often.
+
 ## Known gaps / future work
 
 - **No per-agent MCP server support, and no generic per-agent env-var

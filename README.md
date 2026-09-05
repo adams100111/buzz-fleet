@@ -263,6 +263,19 @@ create time via `AgentManager.create_agent(..., anthropic_api_key=...)`
 `~/.config/buzz-fleet/agents/<id>.env` and `systemctl --user restart` it in
 the meantime).
 
+### Runtime self-healing
+
+`buzz-fleet` doesn't just create agents — every `agent list`, dashboard
+refresh, create, or update also makes sure they can actually run, with no
+extra command to remember: installs `buzz-acp` itself the first time it's
+needed (a static binary, no separate build/install step of your own),
+resolves each harness's adapter to an absolute path so a systemd `--user`
+unit can find something installed via mise/nvm/asdf even though systemd's
+own `PATH` doesn't include those directories, and derives the connected
+community's owner pubkey once so agents don't silently drop every event.
+Nothing here needs a manual restart — the next `agent list` or dashboard
+load fixes it.
+
 ## Development
 
 ```bash
