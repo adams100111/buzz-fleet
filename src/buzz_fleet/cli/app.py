@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +13,20 @@ from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import SystemPromptSource
 from buzz_fleet.proc import RealCommandRunner
+
+
+def _parse_channel_ids(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    ids = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    for entry in ids:
+        try:
+            uuid.UUID(entry)
+        except ValueError as e:
+            typer.echo(f"Invalid channel id {entry!r} — must be a UUID.", err=True)
+            raise typer.Exit(code=1) from e
+    return ids or None
+
 
 app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
 agent_app = typer.Typer(help="Manage agent identities")
@@ -78,8 +93,18 @@ def agent_create(
     respond_to_allowlist: Annotated[
         str | None, typer.Option(help="Comma-separated pubkeys")
     ] = None,
+    channel_ids: Annotated[
+        str | None, typer.Option(help="Comma-separated NIP-29 channel UUIDs to join")
+    ] = None,
+    channel_add_policy: Annotated[
+        str | None, typer.Option(help="Who may add this agent to a new channel: anyone, owner_only, nobody")
+    ] = None,
 ) -> None:
     manager = _load_manager(community)
+    parsed_channel_ids = _parse_channel_ids(channel_ids)
+    if channel_add_policy is not None and channel_add_policy not in ("anyone", "owner_only", "nobody"):
+        typer.echo("--channel-add-policy must be one of: anyone, owner_only, nobody", err=True)
+        raise typer.Exit(code=1)
     try:
         agent = manager.create_agent(
             display_name=display_name,
@@ -95,6 +120,8 @@ def agent_create(
                 if respond_to_allowlist
                 else None
             ),
+            channel_ids=parsed_channel_ids,
+            channel_add_policy=channel_add_policy,
         )
     except ValueError as e:
         # e.g. a blank/punctuation-only --display-name (agent_slug raises)
@@ -105,10 +132,13 @@ def agent_create(
 
 @agent_app.command("list")
 def agent_list(community: Annotated[str, typer.Option()]) -> None:
+    from buzz_fleet import visibility
+
     manager = _load_manager(community)
     manager.ensure_runtime_ready()
     for agent in manager.list_agents():
-        typer.echo(f"{agent.id}\t{agent.display_name}\t{agent.harness}")
+        status = visibility.visibility_status_text(agent)
+        typer.echo(f"{agent.id}\t{agent.display_name}\t{agent.harness}\t{status}")
 
 
 @agent_app.command("delete")
@@ -134,6 +164,12 @@ def agent_update(
     respond_to_allowlist: Annotated[
         str | None, typer.Option(help="Comma-separated pubkeys")
     ] = None,
+    channel_ids: Annotated[
+        str | None, typer.Option(help="Comma-separated NIP-29 channel UUIDs to join")
+    ] = None,
+    channel_add_policy: Annotated[
+        str | None, typer.Option(help="Who may add this agent to a new channel: anyone, owner_only, nobody")
+    ] = None,
 ) -> None:
     manager = _load_manager(community)
     changes: dict[str, object] = {}
@@ -157,6 +193,13 @@ def agent_update(
             if respond_to_allowlist
             else None
         )
+    if channel_ids is not None:
+        changes["channel_ids"] = _parse_channel_ids(channel_ids)
+    if channel_add_policy is not None:
+        if channel_add_policy not in ("anyone", "owner_only", "nobody"):
+            typer.echo("--channel-add-policy must be one of: anyone, owner_only, nobody", err=True)
+            raise typer.Exit(code=1)
+        changes["channel_add_policy"] = channel_add_policy
     if not changes:
         typer.echo("Nothing to update — pass at least one field to change.", err=True)
         raise typer.Exit(code=1)

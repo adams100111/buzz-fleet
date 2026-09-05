@@ -1,12 +1,29 @@
 import json
 import subprocess
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from buzz_fleet.cli.app import app
+from buzz_fleet.models import Agent, AgentVisibilityState, SystemPromptSource
 
 runner_cli = CliRunner()
+
+
+def _agent(**overrides: object) -> Agent:
+    defaults: dict[str, object] = {
+        "id": "test-agent",
+        "community_id": "eltahir",
+        "display_name": "Test Agent",
+        "harness": "claude",
+        "private_key": "nsec1x",
+        "public_key": "a" * 64,
+        "system_prompt_source": SystemPromptSource(kind="inline", text="You are a test agent."),
+        "created_at": datetime.now(UTC),
+    }
+    defaults.update(overrides)
+    return Agent(**defaults)
 
 
 class FakeRunner:
@@ -361,3 +378,148 @@ def test_harness_install_reports_failure(monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "network error" in result.output
+
+
+def test_agent_create_rejects_malformed_channel_id(tmp_path, monkeypatch) -> None:
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def create_agent(self, **kwargs: object) -> object:
+            raise AssertionError("create_agent should not be called for an invalid channel id")
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are a test agent.")
+
+    result = runner_cli.invoke(
+        app,
+        [
+            "agent", "create",
+            "--community", "eltahir",
+            "--display-name", "Bad Channel",
+            "--harness", "claude",
+            "--prompt-file", str(prompt_file),
+            "--channel-ids", "not-a-uuid",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "channel" in result.output.lower()
+
+
+def test_agent_create_accepts_channel_add_policy_choice(tmp_path, monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def create_agent(self, **kwargs: object) -> object:
+            calls.update(kwargs)
+            return SimpleNamespace(id="test-agent", public_key="ab" * 32)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("You are a test agent.")
+
+    result = runner_cli.invoke(
+        app,
+        [
+            "agent", "create",
+            "--community", "eltahir",
+            "--display-name", "Policy Agent",
+            "--harness", "claude",
+            "--prompt-file", str(prompt_file),
+            "--channel-add-policy", "nobody",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["channel_add_policy"] == "nobody"
+
+
+def test_agent_update_rejects_invalid_channel_add_policy(monkeypatch) -> None:
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            raise AssertionError("update_agent should not be called for an invalid policy")
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    result = runner_cli.invoke(
+        app,
+        ["agent", "update", "--community", "eltahir", "agent-1", "--channel-add-policy", "everyone"],
+    )
+
+    assert result.exit_code == 1
+    assert "channel-add-policy" in result.output
+
+
+def test_agent_update_parses_channel_ids(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return SimpleNamespace(id=agent_id)
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    channel_id = "12345678-1234-5678-1234-567812345678"
+    result = runner_cli.invoke(
+        app,
+        ["agent", "update", "--community", "eltahir", "agent-1", "--channel-ids", channel_id],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["changes"] == {"channel_ids": [channel_id]}
+
+
+def test_agent_list_shows_visibility_status(monkeypatch) -> None:
+    """Every row now gets a fourth, status column driven by
+    `visibility.visibility_status_text`. Two agents in different visibility
+    states are listed to prove the loop renders a status for each row, not
+    just the first.
+    """
+    unmanaged = _agent(id="agent-unmanaged", display_name="Unmanaged")
+    synced = _agent(
+        id="agent-synced",
+        display_name="Synced",
+        visibility_managed=True,
+        visibility_state=AgentVisibilityState(
+            profile_published=True,
+            managed_agent_published=True,
+            add_policy_published=True,
+        ),
+    )
+
+    class FakeAgentManager:
+        def __init__(self, runner: object, community: object) -> None:
+            pass
+
+        def ensure_runtime_ready(self) -> None:
+            pass
+
+        def list_agents(self) -> list[object]:
+            return [unmanaged, synced]
+
+    monkeypatch.setattr("buzz_fleet.cli.app.state.load_community", lambda cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr("buzz_fleet.cli.app.AgentManager", FakeAgentManager)
+
+    result = runner_cli.invoke(app, ["agent", "list", "--community", "eltahir"])
+
+    assert result.exit_code == 0, result.output
+    assert "agent-unmanaged\tUnmanaged\tclaude\t—" in result.output
+    assert "agent-synced\tSynced\tclaude\tsynced" in result.output
