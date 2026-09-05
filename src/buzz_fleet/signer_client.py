@@ -124,24 +124,59 @@ def retract_managed_agent(runner: CommandRunner, relay_url: str, owner_nsec: str
         raise RuntimeError(f"retract-managed-agent failed: {payload.get('error')}")
 
 
-def publish_agent_add_policy(runner: CommandRunner, relay_url: str, agent_nsec: str, policy: str) -> None:
-    args = [BINARY, "publish-agent-add-policy", "--relay", relay_url, "--agent-nsec", agent_nsec, "--policy", policy]
+def publish_agent_add_policy(
+    runner: CommandRunner, relay_url: str, agent_nsec: str, policy: str, auth_tag: str
+) -> None:
+    args = [
+        BINARY,
+        "publish-agent-add-policy",
+        "--relay",
+        relay_url,
+        "--agent-nsec",
+        agent_nsec,
+        "--policy",
+        policy,
+        "--auth-tag",
+        auth_tag,
+    ]
     result = runner.run(args)
     payload = json.loads(result.stdout)
     if not payload["ok"]:
         raise RuntimeError(f"publish-agent-add-policy failed: {payload.get('error')}")
 
 
-def join_channel(runner: CommandRunner, relay_url: str, agent_nsec: str, channel_id: str) -> None:
-    args = [BINARY, "join-channel", "--relay", relay_url, "--agent-nsec", agent_nsec, "--channel-id", channel_id]
+def join_channel(runner: CommandRunner, relay_url: str, agent_nsec: str, channel_id: str, auth_tag: str) -> None:
+    args = [
+        BINARY,
+        "join-channel",
+        "--relay",
+        relay_url,
+        "--agent-nsec",
+        agent_nsec,
+        "--channel-id",
+        channel_id,
+        "--auth-tag",
+        auth_tag,
+    ]
     result = runner.run(args)
     payload = json.loads(result.stdout)
     if not payload["ok"]:
         raise RuntimeError(f"join-channel failed: {payload.get('error')}")
 
 
-def leave_channel(runner: CommandRunner, relay_url: str, agent_nsec: str, channel_id: str) -> None:
-    args = [BINARY, "leave-channel", "--relay", relay_url, "--agent-nsec", agent_nsec, "--channel-id", channel_id]
+def leave_channel(runner: CommandRunner, relay_url: str, agent_nsec: str, channel_id: str, auth_tag: str) -> None:
+    args = [
+        BINARY,
+        "leave-channel",
+        "--relay",
+        relay_url,
+        "--agent-nsec",
+        agent_nsec,
+        "--channel-id",
+        channel_id,
+        "--auth-tag",
+        auth_tag,
+    ]
     result = runner.run(args)
     payload = json.loads(result.stdout)
     if not payload["ok"]:

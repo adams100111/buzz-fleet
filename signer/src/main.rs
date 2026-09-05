@@ -58,6 +58,8 @@ enum Command {
         agent_nsec: String,
         #[arg(long)]
         channel_id: String,
+        #[arg(long)]
+        auth_tag: String,
     },
     /// Self-leave one NIP-29 channel.
     LeaveChannel {
@@ -67,6 +69,8 @@ enum Command {
         agent_nsec: String,
         #[arg(long)]
         channel_id: String,
+        #[arg(long)]
+        auth_tag: String,
     },
     /// Compute (never publish) an owner-signed NIP-OA auth tag for an agent pubkey.
     ComputeAuthTag {
@@ -114,6 +118,8 @@ enum Command {
         agent_nsec: String,
         #[arg(long)]
         policy: String,
+        #[arg(long)]
+        auth_tag: String,
     },
     /// File a NIP-IA archive request (used only at delete time, owner-signed).
     ArchiveAgent {
@@ -174,18 +180,18 @@ async fn main() {
             }
         },
         Command::AddMember { relay, admin_nsec, pubkey, role } => {
-            match run_publish(&relay, &admin_nsec, events::build_add_member(&pubkey, role.as_deref())).await {
+            match run_publish(&relay, &admin_nsec, events::build_add_member(&pubkey, role.as_deref()), None).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
         Command::RemoveMember { relay, admin_nsec, pubkey } => {
-            match run_publish(&relay, &admin_nsec, events::build_remove_member(&pubkey)).await {
+            match run_publish(&relay, &admin_nsec, events::build_remove_member(&pubkey), None).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
-        Command::JoinChannel { relay, agent_nsec, channel_id } => {
+        Command::JoinChannel { relay, agent_nsec, channel_id, auth_tag } => {
             let builder = uuid::Uuid::parse_str(&channel_id)
                 .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
                 .and_then(|id| {
@@ -193,12 +199,17 @@ async fn main() {
                     buzz_sdk::builders::build_add_member(id, &agent_pubkey, Some(buzz_sdk::MemberRole::Bot))
                         .map_err(|e| anyhow::anyhow!(e))
                 });
-            match run_publish(&relay, &agent_nsec, builder).await {
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
+            let result = match tag {
+                Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
-        Command::LeaveChannel { relay, agent_nsec, channel_id } => {
+        Command::LeaveChannel { relay, agent_nsec, channel_id, auth_tag } => {
             let builder = uuid::Uuid::parse_str(&channel_id)
                 .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
                 .and_then(|id| {
@@ -206,7 +217,12 @@ async fn main() {
                     buzz_sdk::builders::build_remove_member(id, &agent_pubkey)
                         .map_err(|e| anyhow::anyhow!(e))
                 });
-            match run_publish(&relay, &agent_nsec, builder).await {
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
+            let result = match tag {
+                Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
@@ -219,7 +235,12 @@ async fn main() {
         }
         Command::PublishAgentProfile { relay, agent_nsec, display_name, auth_tag } => {
             let builder = agent_events::build_agent_profile(&display_name, &auth_tag);
-            match run_publish(&relay, &agent_nsec, builder).await {
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
+            let result = match tag {
+                Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
@@ -228,7 +249,7 @@ async fn main() {
             let builder = std::fs::read_to_string(&content_file)
                 .map_err(anyhow::Error::from)
                 .and_then(|content| agent_events::build_managed_agent(&agent_pubkey, &content));
-            match run_publish(&relay, &owner_nsec, builder).await {
+            match run_publish(&relay, &owner_nsec, builder, None).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
@@ -244,21 +265,26 @@ async fn main() {
                     )
                     .map_err(|e| anyhow::anyhow!(e))
                 });
-            match run_publish(&relay, &owner_nsec, builder).await {
+            match run_publish(&relay, &owner_nsec, builder, None).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
-        Command::PublishAgentAddPolicy { relay, agent_nsec, policy } => {
+        Command::PublishAgentAddPolicy { relay, agent_nsec, policy, auth_tag } => {
             let builder = agent_events::build_agent_add_policy(&policy);
-            match run_publish(&relay, &agent_nsec, builder).await {
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
+            let result = match tag {
+                Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
+                Err(e) => Err(e),
+            };
+            match result {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
         Command::ArchiveAgent { relay, owner_nsec, agent_pubkey, reason, auth_tag } => {
             let builder = agent_events::build_archive_agent(&agent_pubkey, &reason, &auth_tag);
-            match run_publish(&relay, &owner_nsec, builder).await {
+            match run_publish(&relay, &owner_nsec, builder, None).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
@@ -282,14 +308,20 @@ async fn run_check_connection(relay: &str, nsec: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `auth_tag` is the NIP-OA credential attached to *this call's own*
+/// connection AUTH event (`None` for a call signed by the community owner,
+/// who is already a direct relay member; `Some` for a call signed by an
+/// agent key, which is not a direct member and depends on NIP-OA delegation
+/// to connect at all — see the comment in `AgentManager.create_agent`).
 async fn run_publish(
     relay: &str,
-    admin_nsec: &str,
+    signer_nsec: &str,
     builder: anyhow::Result<nostr::EventBuilder>,
+    auth_tag: Option<&nostr::Tag>,
 ) -> anyhow::Result<()> {
-    let keys = Keys::parse(admin_nsec)?;
+    let keys = Keys::parse(signer_nsec)?;
     let event = builder?.sign_with_keys(&keys)?;
-    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, None).await?;
+    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, auth_tag).await?;
     let response = conn.send_event(event).await?;
     conn.disconnect().await?;
     if !response.accepted {

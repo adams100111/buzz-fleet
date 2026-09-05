@@ -239,7 +239,8 @@ class AgentManager:
         if not vs.add_policy_published and vs.add_policy_error is None:
             try:
                 policy = visibility.resolved_channel_add_policy(agent)
-                signer_client.publish_agent_add_policy(self._runner, relay_url, agent_nsec, policy)
+                auth_tag = signer_client.compute_auth_tag(self._runner, owner_nsec, agent.public_key)
+                signer_client.publish_agent_add_policy(self._runner, relay_url, agent_nsec, policy, auth_tag)
                 vs.add_policy_published = True
             except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
                 if visibility.classify_signer_error(e) == "permanent":
@@ -249,7 +250,8 @@ class AgentManager:
             if vs.channels.get(channel_id) == "joined" or channel_id in vs.channel_errors:
                 continue
             try:
-                signer_client.join_channel(self._runner, relay_url, agent_nsec, channel_id)
+                auth_tag = signer_client.compute_auth_tag(self._runner, owner_nsec, agent.public_key)
+                signer_client.join_channel(self._runner, relay_url, agent_nsec, channel_id, auth_tag)
                 vs.channels[channel_id] = "joined"
             except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
                 if visibility.classify_signer_error(e) == "permanent":
@@ -372,10 +374,12 @@ class AgentManager:
                 old_ids = set(current.channel_ids or [])
                 new_ids = set(updated.channel_ids or [])
                 agent_nsec = updated.private_key.get_secret_value()
+                owner_nsec = self._community.relay_admin_nsec.get_secret_value()
                 for channel_id in old_ids - new_ids:
                     try:
+                        auth_tag = signer_client.compute_auth_tag(self._runner, owner_nsec, updated.public_key)
                         signer_client.leave_channel(
-                            self._runner, self._community.relay_url, agent_nsec, channel_id
+                            self._runner, self._community.relay_url, agent_nsec, channel_id, auth_tag
                         )
                     except (RuntimeError, json.JSONDecodeError, KeyError):
                         # Best-effort — a failed leave here isn't retried by
@@ -414,7 +418,10 @@ class AgentManager:
             agent_nsec = agent.private_key.get_secret_value()
             for channel_id in agent.channel_ids or []:
                 try:
-                    signer_client.leave_channel(self._runner, self._community.relay_url, agent_nsec, channel_id)
+                    auth_tag = signer_client.compute_auth_tag(self._runner, owner_nsec, agent.public_key)
+                    signer_client.leave_channel(
+                        self._runner, self._community.relay_url, agent_nsec, channel_id, auth_tag
+                    )
                 except (RuntimeError, json.JSONDecodeError, KeyError):
                     # Best-effort, matches Desktop's own delete flow — a
                     # channel leave failing must not block the rest of

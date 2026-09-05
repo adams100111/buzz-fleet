@@ -5,7 +5,7 @@
 `ensure_runtime_ready()` is the single entry point for "make sure a
 `buzz-agent@*` unit can actually run" — called from `create_agent`,
 `update_agent`, the dashboard's every refresh, and `agent list`. It exists
-because six real, previously-undiscovered incidents were found by
+because seven real, previously-undiscovered incidents were found by
 actually running a live agent end-to-end, not by code review:
 
 1. **`buzz-acp` itself was never installed anywhere.** buzz-fleet's own
@@ -92,15 +92,45 @@ actually running a live agent end-to-end, not by code review:
    of live, working agents is not something to do unprompted) — recreate an
    affected agent, or manually revoke its membership with
    `buzz-fleet-signer remove-member`, to bring it onto the corrected path.
+7. **Concern 6's own fix broke publishing, because it only fixed the
+   agent's long-lived `buzz-acp` connection — not `buzz-fleet-signer`'s
+   short-lived one-off connections.** `_sync_visibility` calls
+   `publish-agent-profile`, `publish-agent-add-policy`, `join-channel`, and
+   `leave-channel`, each of which opens its own brand-new WebSocket
+   connection *as the agent* (its content must be agent-signed) just to
+   publish one event and disconnect. Once concern 6 stopped registering the
+   agent as a direct member, every one of those connections started failing
+   with `"restricted: not a relay member"` before the event was even
+   considered — visibility got stuck at `pending` forever (`profile_error`/
+   `add_policy_error` stayed `null` because the failure classifies as
+   transient and is silently retried every call, which is why it wasn't
+   caught by the concern-6 fix's own tests: nothing exercises a real relay
+   connection). Fixed by giving `buzz-fleet-signer`'s `run_publish` helper
+   an `Option<&Tag>` auth-tag parameter — mirroring `buzz-acp`'s own
+   `send_auth_response` exactly — threaded through to every agent-signed
+   subcommand (`publish-agent-profile` already took `--auth-tag` for the
+   *event content*; `publish-agent-add-policy`/`join-channel`/
+   `leave-channel` each needed a new `--auth-tag` flag for the *connection*).
+   Owner-signed subcommands (`add-member`, `remove-member`,
+   `publish-managed-agent`, `retract-managed-agent`, `archive-agent`) pass
+   `None` — the owner is already a direct member. Confirmed live: a
+   `publish-agent-profile` call that failed with the old binary succeeded
+   immediately after rebuilding with this fix, and a real stuck-`pending`
+   agent (created between concerns 6 and 7 shipping) self-healed to `synced`
+   on the very next `ensure_runtime_ready()` call with no other action taken.
 
-Concerns 1–5 heal automatically through `ensure_runtime_ready()` — no CLI
-flag, no doc a user has to know to run; it only rewrites/restarts an agent
-when something it actually needs changed (a resolved command differs from
-what's on disk, or the owner pubkey was just backfilled), never on an
-already-healthy call, so it's cheap to call unconditionally and often.
-Concern 6 is preventive (fixed in `create_agent`/`delete_agent` directly,
-not in `ensure_runtime_ready`) — it has no retroactive backfill, per the
-note above.
+Concerns 1–5 and 7 heal automatically through `ensure_runtime_ready()` — no
+CLI flag, no doc a user has to know to run; it only rewrites/restarts an
+agent when something it actually needs changed (a resolved command differs
+from what's on disk, or the owner pubkey was just backfilled), never on an
+already-healthy call, so it's cheap to call unconditionally and often (for
+concern 7 specifically: every `_sync_visibility` call already retries any
+step that isn't published yet and hasn't recorded a permanent error, so a
+stuck-`pending` agent self-heals to `synced` the next time it runs — no
+special-casing needed beyond the underlying signer fix itself). Concern 6
+is preventive (fixed in `create_agent`/`delete_agent` directly, not in
+`ensure_runtime_ready`) — it has no retroactive backfill, per the note
+above.
 
 ## Known gaps / future work
 

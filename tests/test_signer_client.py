@@ -124,16 +124,22 @@ def test_retract_managed_agent_raises_on_failure() -> None:
 
 def test_publish_agent_add_policy_passes_policy() -> None:
     runner = FakeRunner(json.dumps({"ok": True}))
-    publish_agent_add_policy(runner, "wss://r", "nsec1agent", "owner_only")
+    publish_agent_add_policy(runner, "wss://r", "nsec1agent", "owner_only", '["auth","a","","b"]')
     assert "--policy" in runner.calls[0] and "owner_only" in runner.calls[0]
+    assert "--auth-tag" in runner.calls[0]
 
 
-def test_join_channel_and_leave_channel_pass_channel_id() -> None:
+def test_join_channel_and_leave_channel_pass_channel_id_and_auth_tag() -> None:
     runner = FakeRunner(json.dumps({"ok": True}))
-    join_channel(runner, "wss://r", "nsec1agent", "11111111-1111-1111-1111-111111111111")
-    leave_channel(runner, "wss://r", "nsec1agent", "11111111-1111-1111-1111-111111111111")
+    join_channel(
+        runner, "wss://r", "nsec1agent", "11111111-1111-1111-1111-111111111111", '["auth","a","","b"]'
+    )
+    leave_channel(
+        runner, "wss://r", "nsec1agent", "11111111-1111-1111-1111-111111111111", '["auth","a","","b"]'
+    )
     assert runner.calls[0][1] == "join-channel"
     assert runner.calls[1][1] == "leave-channel"
+    assert "--auth-tag" in runner.calls[0] and "--auth-tag" in runner.calls[1]
 
 
 def test_archive_agent_passes_owner_nsec_and_reason() -> None:

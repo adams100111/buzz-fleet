@@ -95,6 +95,36 @@ def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch
     assert manager.list_agents() == [agent]
 
 
+def test_create_agent_publishes_profile_and_add_policy_with_connection_auth_tag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression test: publish-agent-profile and publish-agent-add-policy
+    connect to the relay AS THE AGENT (not the owner) to sign their own
+    events, and the agent is not a direct relay member — that connection
+    itself needs an --auth-tag or the relay rejects it as "not a relay
+    member" before the event is ever considered, regardless of what auth
+    tag is embedded in the event content.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+
+    manager.create_agent(
+        display_name="Laravel Backend Dev",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="You are the dev."),
+    )
+
+    profile_call = next(c for c in runner.calls if tuple(c[:2]) == ("buzz-fleet-signer", "publish-agent-profile"))
+    add_policy_call = next(
+        c for c in runner.calls if tuple(c[:2]) == ("buzz-fleet-signer", "publish-agent-add-policy")
+    )
+    assert "--auth-tag" in profile_call
+    assert "--auth-tag" in add_policy_call
+
+
 def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
