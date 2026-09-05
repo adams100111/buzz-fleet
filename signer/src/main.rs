@@ -1,3 +1,4 @@
+mod agent_events;
 mod events;
 
 use clap::{Parser, Subcommand};
@@ -73,6 +74,17 @@ enum Command {
         owner_nsec: String,
         #[arg(long)]
         agent_pubkey: String,
+    },
+    /// Publish the agent's own kind:0 profile, embedding a pre-computed auth tag.
+    PublishAgentProfile {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        agent_nsec: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        auth_tag: String,
     },
 }
 
@@ -160,6 +172,13 @@ async fn main() {
         Command::ComputeAuthTag { owner_nsec, agent_pubkey } => {
             match run_compute_auth_tag(&owner_nsec, &agent_pubkey) {
                 Ok(auth_tag) => { println!("{}", json!({"ok": true, "auth_tag": auth_tag})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+        Command::PublishAgentProfile { relay, agent_nsec, display_name, auth_tag } => {
+            let builder = agent_events::build_agent_profile(&display_name, &auth_tag);
+            match run_publish(&relay, &agent_nsec, builder).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
