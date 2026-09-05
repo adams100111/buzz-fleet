@@ -67,6 +67,13 @@ enum Command {
         #[arg(long)]
         channel_id: String,
     },
+    /// Compute (never publish) an owner-signed NIP-OA auth tag for an agent pubkey.
+    ComputeAuthTag {
+        #[arg(long)]
+        owner_nsec: String,
+        #[arg(long)]
+        agent_pubkey: String,
+    },
 }
 
 #[tokio::main]
@@ -150,8 +157,22 @@ async fn main() {
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
+        Command::ComputeAuthTag { owner_nsec, agent_pubkey } => {
+            match run_compute_auth_tag(&owner_nsec, &agent_pubkey) {
+                Ok(auth_tag) => { println!("{}", json!({"ok": true, "auth_tag": auth_tag})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
     };
     std::process::exit(code);
+}
+
+fn run_compute_auth_tag(owner_nsec: &str, agent_pubkey: &str) -> anyhow::Result<String> {
+    let owner_keys = Keys::parse(owner_nsec)?;
+    let agent_pk = nostr::PublicKey::from_hex(agent_pubkey)?;
+    // conditions is always "" — matches Desktop's own kind:0-embedding call
+    // site (`relay.rs`'s call to compute_auth_tag(&owner, &agent, "")).
+    Ok(buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_pk, "")?)
 }
 
 async fn run_check_connection(relay: &str, nsec: &str) -> anyhow::Result<()> {
@@ -222,5 +243,21 @@ mod tests {
     #[test]
     fn leave_channel_rejects_malformed_channel_id() {
         assert!(uuid::Uuid::parse_str("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn compute_auth_tag_round_trips_through_verify() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let tag_json = run_compute_auth_tag(
+            &owner.secret_key().to_bech32().unwrap(),
+            &agent.public_key().to_hex(),
+        )
+        .unwrap();
+        // verify_auth_tag(auth_tag_json: &str, agent_pubkey: &PublicKey) -> Result<PublicKey, SdkError>
+        // (confirmed against crates/buzz-sdk/src/nip_oa.rs — it takes the raw JSON-array
+        // string directly, not a parsed `Tag`, and returns the owner's pubkey on success).
+        let verified_owner = buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent.public_key()).unwrap();
+        assert_eq!(verified_owner, owner.public_key());
     }
 }
