@@ -1951,19 +1951,68 @@ def test_delete_agent_leaves_channels_retracts_and_archives(tmp_path: Path, monk
         display_name="Doomed Agent",
         harness="claude",
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
-        channel_ids=["33333333-3333-3333-3333-333333333333"],
+        channel_ids=[
+            "33333333-3333-3333-3333-333333333333",
+            "44444444-4444-4444-4444-444444444444",
+        ],
     )
     runner.calls.clear()
 
     manager.delete_agent(agent.id)
 
+    leave_calls = [c for c in runner.calls if c[:2] == ["buzz-fleet-signer", "leave-channel"]]
+    # Both channels must be left, not just the first — proves the loop
+    # actually iterates every channel_id rather than leaving one and
+    # stopping (the exact regression a single-channel test can't catch).
+    assert any("33333333-3333-3333-3333-333333333333" in c for c in leave_calls)
+    assert any("44444444-4444-4444-4444-444444444444" in c for c in leave_calls)
     subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
-    assert "leave-channel" in subcommands
     assert "retract-managed-agent" in subcommands
     assert "archive-agent" in subcommands
     archive_call = next(c for c in runner.calls if c[:2] == ["buzz-fleet-signer", "archive-agent"])
     assert "--owner-nsec" in archive_call
     assert "retired" in archive_call
+
+
+def test_delete_agent_continues_leaving_other_channels_if_one_leave_fails(tmp_path: Path, monkeypatch) -> None:
+    """Regression test: a failure leaving one channel must not stop the
+    loop before it reaches the others, and must not block retract/archive
+    afterward — this is the specific fault-isolation behavior a
+    single-channel test cannot exercise.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+
+    class FlakyLeaveRunner(FakeRunner):
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ["buzz-fleet-signer", "leave-channel"] and "33333333-3333-3333-3333-333333333333" in args:
+                self.calls.append(args)
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=json.dumps({"ok": False, "error": "invalid: channel not found"}), stderr=""
+                )
+            return super().run(args)
+
+    runner = FlakyLeaveRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Doomed Agent Two",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        channel_ids=[
+            "33333333-3333-3333-3333-333333333333",
+            "44444444-4444-4444-4444-444444444444",
+        ],
+    )
+    runner.calls.clear()
+
+    manager.delete_agent(agent.id)  # must not raise despite the first leave-channel failing
+
+    leave_calls = [c for c in runner.calls if c[:2] == ["buzz-fleet-signer", "leave-channel"]]
+    assert any("44444444-4444-4444-4444-444444444444" in c for c in leave_calls)
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert "retract-managed-agent" in subcommands
+    assert "archive-agent" in subcommands
 
 
 def test_delete_agent_skips_visibility_teardown_for_old_agent(tmp_path: Path, monkeypatch) -> None:
