@@ -97,6 +97,15 @@ enum Command {
         #[arg(long)]
         content_file: std::path::PathBuf,
     },
+    /// Retract (NIP-09 kind:5) the kind:30177 managed-agent record.
+    RetractManagedAgent {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        owner_nsec: String,
+        #[arg(long)]
+        agent_pubkey: String,
+    },
 }
 
 #[tokio::main]
@@ -202,6 +211,22 @@ async fn main() {
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
+        Command::RetractManagedAgent { relay, owner_nsec, agent_pubkey } => {
+            let builder = Keys::parse(&owner_nsec)
+                .map_err(anyhow::Error::from)
+                .and_then(|owner_keys| {
+                    buzz_sdk::builders::build_delete_addressable(
+                        30177,
+                        &owner_keys.public_key().to_hex(),
+                        &agent_pubkey,
+                    )
+                    .map_err(|e| anyhow::anyhow!(e))
+                });
+            match run_publish(&relay, &owner_nsec, builder).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
     };
     std::process::exit(code);
 }
@@ -282,6 +307,22 @@ mod tests {
     #[test]
     fn leave_channel_rejects_malformed_channel_id() {
         assert!(uuid::Uuid::parse_str("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn retract_managed_agent_builds_correct_coordinate() {
+        let owner = Keys::generate();
+        let agent_pubkey = "d".repeat(64);
+        let event = buzz_sdk::builders::build_delete_addressable(30177, &owner.public_key().to_hex(), &agent_pubkey)
+            .unwrap()
+            .sign_with_keys(&owner)
+            .unwrap();
+        assert_eq!(event.kind, Kind::Custom(5));
+        let expected_coord = format!("30177:{}:{}", owner.public_key().to_hex(), agent_pubkey);
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["a", expected_coord.as_str()]
+        }));
     }
 
     #[test]
