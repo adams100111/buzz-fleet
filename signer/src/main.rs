@@ -1,7 +1,7 @@
 mod events;
 
 use clap::{Parser, Subcommand};
-use nostr::{Keys, Kind};
+use nostr::Keys;
 use nostr::nips::nip19::ToBech32;
 use buzz_ws_client::connection::NostrWsConnection;
 use serde_json::json;
@@ -180,11 +180,13 @@ async fn run_publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only referenced from test code below — kept scoped to this module so
+    // a plain (non-test) `cargo build` never warns about an unused import.
+    use nostr::Kind;
 
     #[test]
     fn join_channel_builds_self_add_with_bot_role() {
         let keys = Keys::generate();
-        let nsec = keys.secret_key().to_bech32().unwrap();
         let channel_id = uuid::Uuid::new_v4();
         let builder = buzz_sdk::builders::build_add_member(
             channel_id,
@@ -198,6 +200,19 @@ mod tests {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["role", "bot"]
         }));
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["h", channel_id.to_string().as_str()]
+        }));
+    }
+
+    #[test]
+    fn leave_channel_builds_self_remove() {
+        let keys = Keys::generate();
+        let channel_id = uuid::Uuid::new_v4();
+        let builder = buzz_sdk::builders::build_remove_member(channel_id, &keys.public_key().to_hex()).unwrap();
+        let event = builder.sign_with_keys(&keys).unwrap();
+        assert_eq!(event.kind, Kind::Custom(9001));
         assert!(event.tags.iter().any(|t| {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["h", channel_id.to_string().as_str()]
