@@ -51,6 +51,13 @@ SECTION_CSS = f"""
         border: none;
         background: $surface;
     }}
+
+    & > TextArea {{
+        border: none;
+        background: $surface;
+        height: 4;
+        margin-bottom: 1;
+    }}
 }}
 """
 

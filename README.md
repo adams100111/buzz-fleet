@@ -186,7 +186,9 @@ parsed (counted as unsupported). A `.persona.md` file's directory may also
 contain a sibling `pack_instructions.md` — team-wide instructions shared by
 every persona in that directory, pre-filled into the form's separate "Team
 instructions" field (`BUZZ_ACP_TEAM_INSTRUCTIONS`) alongside the
-persona-specific prompt.
+persona-specific prompt. The System prompt and Team instructions fields are
+scrollable multi-line text areas (not single-line inputs) since persona
+content is routinely several paragraphs long.
 
 The new `agent create` and `agent update` flags for harness configuration:
 

@@ -7,7 +7,7 @@ from typing import ClassVar
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Select, Static
+from textual.widgets import Button, Footer, Header, Input, Select, Static, TextArea
 
 from buzz_fleet import harnesses, personas
 from buzz_fleet.manager import AgentManager
@@ -21,6 +21,10 @@ class AgentFormScreen(Screen):
     DEFAULT_CSS = f"""
     AgentFormScreen {{
         {SECTION_CSS}
+
+        .form-section {{
+            height: auto;
+        }}
 
         #no-templates-message {{
             margin-bottom: 1;
@@ -93,9 +97,9 @@ class AgentFormScreen(Screen):
                         f"No templates found in {personas.DEFAULT_PERSONAS_DIR}",
                         id="no-templates-message",
                     )
-            yield Input(value=prompt_text, placeholder="System prompt", id="prompt-input")
-            yield Input(
-                value=self._agent.team_instructions if self._agent and self._agent.team_instructions else "",
+            yield TextArea(text=prompt_text, placeholder="System prompt", id="prompt-input")
+            yield TextArea(
+                text=self._agent.team_instructions if self._agent and self._agent.team_instructions else "",
                 placeholder="Team instructions (optional)",
                 id="team-instructions-input",
             )
@@ -161,8 +165,8 @@ class AgentFormScreen(Screen):
         self.query_one("#display-name-input", Input).value = template.display_name
         if template.harness in harnesses.HARNESSES:
             self.query_one("#harness-select", Select).value = template.harness
-        self.query_one("#prompt-input", Input).value = template.prompt_body
-        self.query_one("#team-instructions-input", Input).value = template.team_instructions or ""
+        self.query_one("#prompt-input", TextArea).text = template.prompt_body
+        self.query_one("#team-instructions-input", TextArea).text = template.team_instructions or ""
         self.query_one("#model-input", Input).value = template.model or ""
         self.query_one("#parallelism-input", Input).value = (
             str(template.parallelism) if template.parallelism is not None else ""
@@ -185,9 +189,9 @@ class AgentFormScreen(Screen):
         if event.button.id != "submit-button":
             return
         display_name = self.query_one("#display-name-input", Input).value
-        prompt_text = self.query_one("#prompt-input", Input).value
+        prompt_text = self.query_one("#prompt-input", TextArea).text
         harness = self.query_one("#harness-select", Select).value
-        team_instructions = self.query_one("#team-instructions-input", Input).value.strip() or None
+        team_instructions = self.query_one("#team-instructions-input", TextArea).text.strip() or None
         model = self.query_one("#model-input", Input).value.strip() or None
         respond_to_raw = self.query_one("#respond-to-allowlist-input", Input).value.strip()
         respond_to_allowlist = (

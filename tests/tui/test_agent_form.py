@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Input, Select, Static, TextArea
 
 from buzz_fleet.tui.app import BuzzFleetApp
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
@@ -34,7 +34,7 @@ async def test_submitting_form_calls_create_agent() -> None:
         # press(*"Test Agent") would break on the space in "Test Agent" —
         # this is the standard way to fill an Input in a Textual test.
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
-        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
+        app.screen.query_one("#prompt-input", TextArea).text = "You are a test agent."
         await pilot.click("#submit-button")
         await pilot.pause()
 
@@ -65,8 +65,8 @@ async def test_submitting_form_in_edit_mode_calls_update_agent() -> None:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
         assert app.screen.query_one("#display-name-input", Input).value == "Laravel Dev"
-        assert app.screen.query_one("#prompt-input", Input).value == "old prompt"
-        app.screen.query_one("#prompt-input", Input).value = "new prompt"
+        assert app.screen.query_one("#prompt-input", TextArea).text == "old prompt"
+        app.screen.query_one("#prompt-input", TextArea).text = "new prompt"
         await pilot.click("#submit-button")
         await pilot.pause()
 
@@ -106,7 +106,7 @@ async def test_editing_only_display_name_does_not_touch_persona_file_prompt() ->
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
         # persona_file agents never get their prompt Input pre-filled.
-        assert app.screen.query_one("#prompt-input", Input).value == ""
+        assert app.screen.query_one("#prompt-input", TextArea).text == ""
         app.screen.query_one("#display-name-input", Input).value = "Laravel Dev (renamed)"
         await pilot.click("#submit-button")
         await pilot.pause()
@@ -249,7 +249,7 @@ async def test_selecting_template_prefills_and_overwrites_form_fields(tmp_path, 
         await pilot.pause()
 
         assert app.screen.query_one("#display-name-input", Input).value == "Laravel Backend Dev"
-        assert app.screen.query_one("#prompt-input", Input).value == "You are the Laravel dev.\n"
+        assert app.screen.query_one("#prompt-input", TextArea).text == "You are the Laravel dev.\n"
         assert app.screen.query_one("#model-input", Input).value == "claude-sonnet-5"
 
 
@@ -450,7 +450,7 @@ async def test_selecting_template_prefills_team_instructions_from_sibling_pack_f
         await pilot.pause()
 
         assert (
-            app.screen.query_one("#team-instructions-input", Input).value
+            app.screen.query_one("#team-instructions-input", TextArea).text
             == "Test-first. Strict typing.\n"
         )
 
@@ -464,8 +464,8 @@ async def test_submitting_form_passes_team_instructions_to_create_agent() -> Non
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
-        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
-        app.screen.query_one("#team-instructions-input", Input).value = "Test-first always."
+        app.screen.query_one("#prompt-input", TextArea).text = "You are a test agent."
+        app.screen.query_one("#team-instructions-input", TextArea).text = "Test-first always."
         await pilot.click("#submit-button")
         await pilot.pause()
 
@@ -495,9 +495,9 @@ async def test_editing_agent_shows_and_updates_team_instructions() -> None:
     async with app.run_test(size=(80, 50)) as pilot:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
-        assert app.screen.query_one("#team-instructions-input", Input).value == "Old team rules."
+        assert app.screen.query_one("#team-instructions-input", TextArea).text == "Old team rules."
 
-        app.screen.query_one("#team-instructions-input", Input).value = "New team rules."
+        app.screen.query_one("#team-instructions-input", TextArea).text = "New team rules."
         await pilot.click("#submit-button")
         await pilot.pause()
 
@@ -514,7 +514,7 @@ async def test_submitting_form_passes_new_fields_to_create_agent() -> None:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
-        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
+        app.screen.query_one("#prompt-input", TextArea).text = "You are a test agent."
         app.screen.query_one("#model-input", Input).value = "claude-sonnet-5"
         app.screen.query_one("#parallelism-input", Input).value = "3"
         app.screen.query_one("#idle-timeout-input", Input).value = "120"
@@ -541,7 +541,7 @@ async def test_submitting_form_with_blank_optional_fields_passes_none() -> None:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
-        app.screen.query_one("#prompt-input", Input).value = "You are a test agent."
+        app.screen.query_one("#prompt-input", TextArea).text = "You are a test agent."
         await pilot.click("#submit-button")
         await pilot.pause()
 
@@ -562,7 +562,7 @@ async def test_submitting_form_with_non_numeric_parallelism_notifies_instead_of_
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
-        app.screen.query_one("#prompt-input", Input).value = "hi"
+        app.screen.query_one("#prompt-input", TextArea).text = "hi"
         app.screen.query_one("#parallelism-input", Input).value = "not-a-number"
         await pilot.click("#submit-button")
         await pilot.pause()

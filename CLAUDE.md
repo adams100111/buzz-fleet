@@ -125,6 +125,25 @@ compaction.
   `scripts/get.sh` on first install only (never overwrites an existing
   directory — see `gs_seed_personas`). The release workflow packages
   `personas/` into `personas.tar.gz`, checksummed alongside the binaries.
+- ~~System prompt / Team instructions used single-line `Input` widgets~~ —
+  real bug, not just missing docs: real persona content (`prompt_body`,
+  `pack_instructions.md`) is routinely several paragraphs. `Input` can't
+  render a newline — the system-prompt field silently truncated to its
+  first line, and the team-instructions field (visually taller due to
+  Textual's cursor/scroll bookkeeping for a value containing `\n`) rendered
+  as a floating box that broke out of its own section and overlapped
+  everything below it, which is almost certainly also what made the
+  harness `Select` next to it appear unclickable (a corrupted absolute-
+  positioned region intercepting clicks meant for widgets under/behind it).
+  Fixed: both are now `TextArea` (`agent_form.py`), each a real scrollable
+  multi-line box (height 4, own scrollbar) instead of a single line that
+  either truncates or corrupts. This also required changing `.form-section`
+  from the default `height: 1fr` (all four sections split the screen into
+  equal shares, silently clipping whatever didn't fit — how Model/Team
+  instructions could go missing from view entirely) to `height: auto` (see
+  `theme.py`'s `SECTION_CSS` and `AgentFormScreen.DEFAULT_CSS`) — a longer
+  form now grows and the screen scrolls, rather than fixed-share sections
+  clipping their own content.
 - **No CHANGELOG.** Three releases in (`v0.1.0`/`v0.2.0`/`v0.3.0`) with no
   changelog file — not urgent, but the "Releasing a new version" README
   section could at least point at GitHub Releases' auto-generated notes if
