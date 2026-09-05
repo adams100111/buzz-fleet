@@ -18,6 +18,7 @@ from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.systemctl_client import status as systemctl_status
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
+from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 from buzz_fleet.tui.screens.logs import LogsScreen
 from buzz_fleet.tui.theme import PANEL_BORDER, STATUS_INACTIVE
 
@@ -73,6 +74,7 @@ class DashboardScreen(Screen):
         Binding("c", "create_agent", "Create agent"),
         Binding("u", "edit_agent", "Edit agent"),
         Binding("x", "delete_agent", "Delete agent"),
+        Binding("delete", "delete_agent", "Delete agent", show=False),
         Binding("l", "view_logs", "View logs"),
     ]
 
@@ -162,8 +164,19 @@ class DashboardScreen(Screen):
         manager = self._manager_or_notify()
         if manager is None:
             return
-        manager.delete_agent(agent_id)
-        self.refresh_agents()
+        agent = next((a for a in manager.list_agents() if a.id == agent_id), None)
+        if agent is None:
+            return
+
+        def on_confirmed(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            manager.delete_agent(agent_id)
+            self.refresh_agents()
+
+        self.app.push_screen(
+            ConfirmDeleteScreen(agent.id, agent.display_name), on_confirmed
+        )
 
     def action_view_logs(self) -> None:
         agent_id = self._selected_agent_id()

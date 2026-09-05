@@ -248,9 +248,11 @@ buzz-fleet tui
 Shows a connect screen if no community is set up yet, otherwise a live
 dashboard of agents and their systemd status. Bindings: `c` create, `u`
 edit (display name and/or prompt — editing a persona-file agent without
-touching the prompt field leaves its persona file alone), `x` delete, `l`
-view live logs. `esc` cancels the create/edit form or closes the log view
-without side effects.
+touching the prompt field leaves its persona file alone), `x` (or `Delete`)
+delete, `l` view live logs. `esc` cancels the create/edit form or closes the
+log view without side effects. Delete is destructive and not undoable, so
+`x`/`Delete` opens a confirmation dialog first (`y`/click Delete to confirm,
+`n`/`esc`/click Cancel to back out) rather than deleting on the keypress.
 
 When creating an agent (`c`), the form shows a template dropdown that lists
 all `.persona.md` and `.agent.json` files from `~/.config/buzz-fleet/personas`
