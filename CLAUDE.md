@@ -29,3 +29,35 @@
     to add one: `avatarDataUrl`/`avatarUrl`, `sourceIsBuiltin`, `namePool`,
     `description`/`about` (dropped from `buzz-fleet`'s `Agent` model
     entirely — there's nowhere for it to live or do anything).
+
+## Documentation debt (not yet reflected in README.md)
+
+Running list, added to as work lands ahead of the docs catching up. Clear an
+item only once README.md (or the file it names) actually reflects it — don't
+delete on "I'll remember," this list exists because that doesn't survive
+compaction.
+
+- ~~Harness auto-detection undocumented~~ — done: `### Manage agents (TUI)`
+  now documents the `available`/`adapter missing`/`not installed` states, the
+  exact binary checked per harness, and install commands for each adapter
+  (verified against `buzz`'s own `catalog.rs`/`presets.rs`/
+  `runtimeAvailabilityWarning.ts`: `npm install -g
+  @agentclientprotocol/claude-agent-acp`, `@agentclientprotocol/codex-acp`
+  — must be 1.x — `@earendil-works/pi-coding-agent` + `pi-acp`, plain
+  `goose`). CLI side still has no availability check/hint at all on
+  `agent create --harness` — that's a real, separate follow-up (behavior gap,
+  not just docs): should the CLI warn/print the same install hint the TUI's
+  label implies, or is silently letting you pick an unavailable harness on
+  the CLI acceptable since it's already the "manual, no hand-holding"
+  surface? Not decided.
+- ~~"No templates found" empty-state undocumented~~ — done, folded into the
+  same TUI section edit above.
+- **No worked example of populating the templates directory.** The README
+  names the two supported formats but never shows an actual example — e.g.
+  copying one of `buzz-deploy`'s existing `packs/*/personas/*.persona.md`
+  files in. Worth a one-line `cp`/`ln` example once that flow's been used
+  for real at least once.
+- **No CHANGELOG.** Three releases in (`v0.1.0`/`v0.2.0`/`v0.3.0`) with no
+  changelog file — not urgent, but the "Releasing a new version" README
+  section could at least point at GitHub Releases' auto-generated notes if
+  nothing more structured is wanted.

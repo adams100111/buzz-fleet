@@ -210,13 +210,29 @@ touching the prompt field leaves its persona file alone), `x` delete, `l`
 view live logs.
 
 When creating an agent (`c`), the form shows a template dropdown that lists
-all `.persona.md` and `.agent.json` files from `~/.config/buzz-fleet/personas`.
-Selecting a template pre-fills the display name, harness, system prompt, model,
-parallelism, and idle/max-turn timeouts — all fields are editable before
-submit, and re-selecting a different template overwrites them again. The new
-fields for model, parallelism, idle timeout, max turn duration, and respond-to
-allowlist are available as blank-by-default inputs on both the create and edit
-forms.
+all `.persona.md` and `.agent.json` files from `~/.config/buzz-fleet/personas`
+(auto-created if missing; shows "No templates found in `<dir>`" instead of an
+empty dropdown when there's nothing there yet). Selecting a template pre-fills
+the display name, harness, system prompt, model, parallelism, and idle/max-turn
+timeouts — all fields are editable before submit, and re-selecting a different
+template overwrites them again. The new fields for model, parallelism, idle
+timeout, max turn duration, and respond-to allowlist are available as
+blank-by-default inputs on both the create and edit forms.
+
+The harness dropdown auto-detects what's actually usable on this machine and
+labels each option accordingly — `available`, `adapter missing` (the base CLI
+is installed but not the ACP adapter `buzz-acp` needs), or `not installed`
+(neither) — sorting available harnesses first and defaulting new agents to
+one of them when possible. `buzz-acp` shells out to a specific adapter binary
+per harness, not the bare CLI, so having e.g. `claude` on `PATH` isn't enough
+on its own:
+
+| Harness | Checks for | Install if missing |
+|---|---|---|
+| claude | `claude-agent-acp` (or `claude-code-acp`) | `npm install -g @agentclientprotocol/claude-agent-acp` |
+| codex | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` (must be 1.x) |
+| pi | `pi-acp` | `npm install -g --ignore-scripts @earendil-works/pi-coding-agent && npm install -g pi-acp` |
+| goose | `goose` | install `goose` itself — no separate adapter |
 
 ### Inspecting a running agent directly
 
