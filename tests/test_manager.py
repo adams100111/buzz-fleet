@@ -858,3 +858,112 @@ def test_delete_agent_skips_visibility_teardown_for_old_agent(tmp_path: Path, mo
 
     visibility_subcommands = {"retract-managed-agent", "archive-agent", "leave-channel"}
     assert not any(len(c) > 1 and c[1] in visibility_subcommands for c in runner.calls)
+
+
+def _expected_fake_auth_tag() -> str:
+    return json.dumps(["auth", "d" * 64, "", "e" * 128])
+
+
+def test_create_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for a real production incident: without BUZZ_AUTH_TAG
+    in the agent's env file, buzz-acp never attaches a NIP-OA auth tag to its
+    own NIP-42 AUTH event, so the relay's agent_owner_pubkey column is never
+    populated — a human adding the agent to a channel from Desktop then fails
+    with "policy:owner_only — agent has no owner set", even though every
+    visibility event (kind:0/30177/10100) published fine.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+
+    agent = manager.create_agent(
+        display_name="Auth Tag Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert f"BUZZ_AUTH_TAG={_expected_fake_auth_tag()}" in env_content
+
+
+def test_ensure_runtime_ready_retroactively_adds_missing_auth_tag(tmp_path: Path, monkeypatch) -> None:
+    """The exact real-world scenario: an agent created by an earlier version
+    of buzz-fleet (before BUZZ_AUTH_TAG existed) is visibility_managed=True
+    but its env file lacks BUZZ_AUTH_TAG — ensure_runtime_ready must notice
+    and fix it on the very next call, without needing the agent recreated.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Retrofit Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    # Simulate a pre-fix env file: strip the BUZZ_AUTH_TAG line back out.
+    env_path = agent_env_path(agent.id)
+    stripped = "\n".join(
+        line for line in env_path.read_text().splitlines() if not line.startswith("BUZZ_AUTH_TAG=")
+    )
+    env_path.write_text(stripped + "\n")
+    assert "BUZZ_AUTH_TAG" not in env_path.read_text()
+    runner.calls.clear()
+
+    manager.ensure_runtime_ready()
+
+    assert f"BUZZ_AUTH_TAG={_expected_fake_auth_tag()}" in env_path.read_text()
+    assert ["systemctl", "--user", "restart", f"buzz-agent@{agent.id}"] in runner.calls
+
+
+def test_ensure_runtime_ready_does_not_add_auth_tag_for_old_agent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Old Agent Two",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    from buzz_fleet import state as state_module
+
+    old_style = agent.model_copy(update={"visibility_managed": False})
+    state_module.save_agent(old_style)
+    env_path = agent_env_path(agent.id)
+    stripped = "\n".join(
+        line for line in env_path.read_text().splitlines() if not line.startswith("BUZZ_AUTH_TAG=")
+    )
+    env_path.write_text(stripped + "\n")
+    runner.calls.clear()
+
+    manager.ensure_runtime_ready()
+
+    assert "BUZZ_AUTH_TAG" not in env_path.read_text()
+    assert not any(c[:2] == ["buzz-fleet-signer", "compute-auth-tag"] for c in runner.calls)
+
+
+def test_update_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Update Auth Tag Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    env_path = agent_env_path(agent.id)
+    stripped = "\n".join(
+        line for line in env_path.read_text().splitlines() if not line.startswith("BUZZ_AUTH_TAG=")
+    )
+    env_path.write_text(stripped + "\n")
+
+    manager.update_agent(agent.id, display_name="Renamed")
+
+    assert f"BUZZ_AUTH_TAG={_expected_fake_auth_tag()}" in env_path.read_text()

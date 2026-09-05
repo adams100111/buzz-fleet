@@ -227,8 +227,31 @@ def test_write_agent_files_omits_optional_fields_when_unset(tmp_path: Path, monk
         "BUZZ_ACP_MAX_TURN_DURATION",
         "BUZZ_ACP_RESPOND_TO",
         "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+        "BUZZ_AUTH_TAG",
     ):
         assert key not in env_content
+
+
+def test_write_agent_files_emits_auth_tag_when_given(tmp_path: Path, monkeypatch) -> None:
+    """Regression test for a real production incident: without BUZZ_AUTH_TAG,
+    buzz-acp never attaches a NIP-OA auth tag to its own NIP-42 AUTH event,
+    so the relay's `agent_owner_pubkey` column is never populated — a
+    third-party kind:9000 add (e.g. a human adding the agent to a channel
+    from Desktop) against a channel_add_policy=owner_only agent then fails
+    with "policy:owner_only — agent has no owner set", even though every
+    visibility event (kind:0/30177/10100) published fine. buzz-acp already
+    reads BUZZ_AUTH_TAG and attaches it to its own AUTH event on every
+    connect (confirmed in buzz's own source) — buzz-fleet just needed to
+    write it into the env file.
+    """
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    agent = _agent()
+    auth_tag = '["auth","' + "b" * 64 + '","","' + "c" * 128 + '"]'
+
+    write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None, auth_tag=auth_tag)
+
+    env_content = agent_env_path(agent.id).read_text()
+    assert f"BUZZ_AUTH_TAG={auth_tag}" in env_content
 
 
 def test_write_agent_files_emits_parallelism_idle_timeout_max_turn_duration(

@@ -5,7 +5,7 @@
 `ensure_runtime_ready()` is the single entry point for "make sure a
 `buzz-agent@*` unit can actually run" — called from `create_agent`,
 `update_agent`, the dashboard's every refresh, and `agent list`. It exists
-because four real, previously-undiscovered incidents were found by
+because five real, previously-undiscovered incidents were found by
 actually running a live agent end-to-end, not by code review:
 
 1. **`buzz-acp` itself was never installed anywhere.** buzz-fleet's own
@@ -47,8 +47,26 @@ actually running a live agent end-to-end, not by code review:
    created before this feature shipped from ever being retroactively
    backfilled — `ensure_runtime_ready()` and `update_agent()` both check it
    before touching visibility state at all.
+5. **Publishing those visibility events still wasn't enough — third-party
+   channel adds failed with "policy:owner_only — agent has no owner set."**
+   The relay's own `agent_owner_pubkey` column (which the `owner_only`
+   channel-add-policy check reads) is populated ONLY at NIP-42 AUTH time,
+   from a verified NIP-OA `auth` tag attached to the agent's own AUTH event
+   — a completely separate mechanism from the `auth` tag on the agent's
+   kind:0 profile (concern 4), which is a client-side-only verification
+   path some clients use for their own UI and never reaches the relay's
+   ownership record on its own. `buzz-acp` already reads a `BUZZ_AUTH_TAG`
+   env var and attaches it to its own AUTH event on every connect — fixed
+   by `AgentManager._compute_agent_auth_tag()` writing it into the agent's
+   env file (`systemd.write_agent_files`'s new `auth_tag` parameter),
+   computed fresh each call since it's a pure local signature with no
+   relay round trip. `ensure_runtime_ready()` retroactively adds it (and
+   restarts the unit once) for any managed agent whose env file predates
+   this fix — the relay's own ownership record is first-write-wins and
+   permanent per community, so one successful reconnect with the tag is
+   enough, forever.
 
-All four heal automatically — no CLI flag, no doc a user has to know to
+All five heal automatically — no CLI flag, no doc a user has to know to
 run. `ensure_runtime_ready()` only rewrites/restarts an agent when
 something it actually needs changed (a resolved command differs from
 what's on disk, or the owner pubkey was just backfilled) — never on an

@@ -23,6 +23,17 @@ from buzz_fleet.slug import agent_slug
 _ENV_KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 
 
+def _agent_env_has_auth_tag(agent_id: str) -> bool:
+    """Whether `agent_id`'s env file already carries `BUZZ_AUTH_TAG` — the
+    single flag `ensure_runtime_ready` uses to retroactively fix an agent
+    created before this env var existed (see `AgentManager._compute_agent_auth_tag`).
+    """
+    path = systemd.agent_env_path(agent_id)
+    if not path.exists():
+        return False
+    return any(line.startswith("BUZZ_AUTH_TAG=") for line in path.read_text().splitlines())
+
+
 def _read_agent_command(agent_id: str) -> str | None:
     """The `BUZZ_ACP_AGENT_COMMAND` value currently written for `agent_id`,
 
@@ -80,6 +91,26 @@ class AgentManager:
         self._community = self._community.model_copy(update={"owner_pubkey": owner_pubkey})
         state.save_community(self._community)
 
+    def _compute_agent_auth_tag(self, agent: Agent) -> str | None:
+        """The NIP-OA auth tag to write into `agent`'s env file as
+        `BUZZ_AUTH_TAG`, or `None` for an unmanaged (`visibility_managed=
+        False`) agent, which this feature must never touch. `buzz-acp`
+        reads this env var and attaches it to its own NIP-42 AUTH event on
+        every relay connect — the only way the relay's own
+        `agent_owner_pubkey` column (which backs third-party kind:9000
+        channel-add policy checks) ever gets populated. This is a pure,
+        local, deterministic computation (no relay round trip) — safe to
+        recompute on every call rather than tracking published/error state
+        the way the actual relay-facing `_sync_visibility` steps do.
+        """
+        if not agent.visibility_managed:
+            return None
+        owner_nsec = self._community.relay_admin_nsec.get_secret_value()
+        try:
+            return signer_client.compute_auth_tag(self._runner, owner_nsec, agent.public_key)
+        except (RuntimeError, json.JSONDecodeError, KeyError):
+            return None
+
     def ensure_runtime_ready(self) -> None:
         """Make sure everything a `buzz-agent@*` unit needs actually exists,
         automatically healing agents that were already broken by it rather
@@ -88,7 +119,7 @@ class AgentManager:
         and an agent is only rewritten/restarted when something it actually
         needs changed, never on an already-healthy call.
 
-        Heals three distinct, real incidents this way:
+        Heals five distinct, real incidents this way:
 
         1. buzz-fleet never installed buzz-acp (the binary every unit
            execs) at all — a machine that never separately installed it
@@ -102,6 +133,20 @@ class AgentManager:
            "successfully" while silently dropping 100% of events forever,
            since buzz-acp's own default (`respond_to=owner-only`) has
            nothing to match against with no owner configured.
+        4. `create_agent` originally only published a bare relay-membership
+           event, invisible to Buzz Desktop's/mobile's actual Agents-view
+           pipeline (kind:0/9000/10100/30177) — fixed by `_sync_visibility`
+           publishing all of those, retried here on every call for whatever
+           hasn't succeeded yet (see `visibility.py`).
+        5. A managed agent's env file has no `BUZZ_AUTH_TAG` — buzz-acp
+           never attached a NIP-OA auth tag to its own NIP-42 AUTH event,
+           so the relay's `agent_owner_pubkey` column was never populated:
+           a human adding the agent to a channel from Desktop/mobile failed
+           with "policy:owner_only — agent has no owner set", even though
+           every visibility event (kind:0/30177/10100) from concern 4
+           published fine — publishing the tag on the agent's kind:0
+           profile is a separate, client-side-only verification path that
+           never reaches the relay's own ownership record on its own.
 
         No step here should ever need a human to run something by hand.
         """
@@ -121,7 +166,12 @@ class AgentManager:
             agent = synced
 
             resolved_command = harnesses.resolve_adapter_command(agent.harness)
-            if not needs_full_refresh and _read_agent_command(agent.id) == resolved_command:
+            needs_auth_tag = agent.visibility_managed and not _agent_env_has_auth_tag(agent.id)
+            if (
+                not needs_full_refresh
+                and not needs_auth_tag
+                and _read_agent_command(agent.id) == resolved_command
+            ):
                 continue
             existing_keys = _read_existing_env_keys(agent.id)
             systemd.write_agent_files(
@@ -129,6 +179,7 @@ class AgentManager:
                 self._community,
                 anthropic_api_key=existing_keys.get("ANTHROPIC_API_KEY"),
                 openai_api_key=existing_keys.get("OPENAI_API_KEY"),
+                auth_tag=self._compute_agent_auth_tag(agent),
             )
             try:
                 systemctl_client.restart(self._runner, agent.id)
@@ -267,7 +318,9 @@ class AgentManager:
             public_key,
             role=role,
         )
-        systemd.write_agent_files(agent, self._community, anthropic_api_key, openai_api_key)
+        systemd.write_agent_files(
+            agent, self._community, anthropic_api_key, openai_api_key, self._compute_agent_auth_tag(agent)
+        )
         # Persist the local record BEFORE enabling the unit. enable_now can
         # raise (e.g. no `loginctl enable-linger` yet on a fresh host — the
         # literal first-run condition), and if it did before this save, the
@@ -343,6 +396,7 @@ class AgentManager:
             self._community,
             anthropic_api_key=existing_keys.get("ANTHROPIC_API_KEY"),
             openai_api_key=existing_keys.get("OPENAI_API_KEY"),
+            auth_tag=self._compute_agent_auth_tag(updated),
         )
         systemctl_client.restart(self._runner, agent_id)
         state.save_agent(updated)

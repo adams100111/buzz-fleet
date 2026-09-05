@@ -136,6 +136,7 @@ def write_agent_files(
     community: Community,
     anthropic_api_key: str | None,
     openai_api_key: str | None,
+    auth_tag: str | None = None,
 ) -> None:
     prompt_path = agent_prompt_path(agent.id)
     _write_secure(prompt_path, resolve_prompt_text(agent))
@@ -146,6 +147,15 @@ def write_agent_files(
         f"BUZZ_ACP_AGENT_COMMAND={resolve_adapter_command(agent.harness)}",
         f"BUZZ_ACP_SYSTEM_PROMPT_FILE={prompt_path}",
     ]
+    if auth_tag:
+        # buzz-acp reads this and attaches it to its own NIP-42 AUTH event on
+        # every relay connect — the ONLY way the relay's own agent_owner_pubkey
+        # column (which backs third-party kind:9000 channel-add policy checks)
+        # ever gets populated. Publishing this same tag on the agent's kind:0
+        # profile (see visibility.py) is a *separate*, client-side-only
+        # verification path some clients use for their own UI — it never
+        # reaches the relay's own ownership record on its own.
+        lines.append(f"BUZZ_AUTH_TAG={auth_tag}")
     if community.owner_pubkey:
         # buzz-acp's own default is respond_to=owner-only — with no owner
         # configured at all, every event is silently dropped forever (a
