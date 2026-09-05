@@ -13,9 +13,21 @@ from buzz_fleet import harnesses, personas
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Agent, SystemPromptSource
 from buzz_fleet.proc import RealCommandRunner
+from buzz_fleet.tui.theme import SECTION_CSS
+from buzz_fleet.tui.theme import section as _section
 
 
 class AgentFormScreen(Screen):
+    DEFAULT_CSS = f"""
+    AgentFormScreen {{
+        {SECTION_CSS}
+
+        #no-templates-message {{
+            margin-bottom: 1;
+        }}
+    }}
+    """
+
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", "Cancel"),
     ]
@@ -44,76 +56,89 @@ class AgentFormScreen(Screen):
         # destroy its persona file. See on_button_pressed.
         self._original_prompt_text = prompt_text
 
-        if self._agent is None:
-            self._templates, skipped = personas.discover_personas(personas.DEFAULT_PERSONAS_DIR)
-            if self._templates or skipped:
-                options = [
-                    (f"{t.display_name} ({t.source_path.name})", i)
-                    for i, t in enumerate(self._templates)
-                ]
-                prompt = (
-                    "Start from a template…"
-                    if not skipped
-                    else f"Start from a template… ({skipped} unsupported file(s) found)"
-                )
-                yield Static("Template:")
-                yield Select(options, prompt=prompt, id="template-select")
-            else:
-                yield Static(
-                    f"No templates found in {personas.DEFAULT_PERSONAS_DIR}",
-                    id="no-templates-message",
-                )
-
-        yield Input(value=display_name, placeholder="Display name", id="display-name-input")
-        yield Static("Harness:")
         self._harness_availability = harnesses.detect_harness_availability()
-        yield Select(
-            harnesses.harness_select_options(), value=harness, allow_blank=False, id="harness-select"
+        install_button = Button(
+            f"Install {harness} adapter", id="install-adapter-button", variant="warning"
         )
-        install_button = Button(f"Install {harness} adapter", id="install-adapter-button")
         install_button.display = self._harness_availability[harness] != "available"
-        yield install_button
-        yield Input(value=prompt_text, placeholder="System prompt", id="prompt-input")
-        yield Input(
-            value=self._agent.model if self._agent and self._agent.model else "",
-            placeholder="Model (optional)",
-            id="model-input",
-        )
-        yield Input(
-            value=str(self._agent.parallelism)
-            if self._agent and self._agent.parallelism is not None
-            else "",
-            placeholder="Parallelism (optional)",
-            id="parallelism-input",
-        )
-        yield Input(
-            value=(
-                str(self._agent.idle_timeout_seconds)
-                if self._agent and self._agent.idle_timeout_seconds is not None
-                else ""
-            ),
-            placeholder="Idle timeout seconds (optional)",
-            id="idle-timeout-input",
-        )
-        yield Input(
-            value=(
-                str(self._agent.max_turn_duration_seconds)
-                if self._agent and self._agent.max_turn_duration_seconds is not None
-                else ""
-            ),
-            placeholder="Max turn duration seconds (optional)",
-            id="max-turn-duration-input",
-        )
-        yield Input(
-            value=(
-                ", ".join(self._agent.respond_to_allowlist)
-                if self._agent and self._agent.respond_to_allowlist
-                else ""
-            ),
-            placeholder="Respond-to allowlist pubkeys, comma-separated (optional)",
-            id="respond-to-allowlist-input",
-        )
-        yield Button("Update" if self._agent else "Create", id="submit-button")
+
+        with _section("Identity"):
+            yield Input(value=display_name, placeholder="Display name", id="display-name-input")
+            yield Static("Harness:")
+            yield Select(
+                harnesses.harness_select_options(),
+                value=harness,
+                allow_blank=False,
+                id="harness-select",
+            )
+            yield install_button
+
+        with _section("Behavior"):
+            if self._agent is None:
+                self._templates, skipped = personas.discover_personas(personas.DEFAULT_PERSONAS_DIR)
+                if self._templates or skipped:
+                    options = [
+                        (f"{t.display_name} ({t.source_path.name})", i)
+                        for i, t in enumerate(self._templates)
+                    ]
+                    prompt = (
+                        "Start from a template…"
+                        if not skipped
+                        else f"Start from a template… ({skipped} unsupported file(s) found)"
+                    )
+                    yield Static("Template:")
+                    yield Select(options, prompt=prompt, id="template-select")
+                else:
+                    yield Static(
+                        f"No templates found in {personas.DEFAULT_PERSONAS_DIR}",
+                        id="no-templates-message",
+                    )
+            yield Input(value=prompt_text, placeholder="System prompt", id="prompt-input")
+            yield Input(
+                value=self._agent.model if self._agent and self._agent.model else "",
+                placeholder="Model (optional)",
+                id="model-input",
+            )
+
+        with _section("Limits"):
+            yield Input(
+                value=str(self._agent.parallelism)
+                if self._agent and self._agent.parallelism is not None
+                else "",
+                placeholder="Parallelism (optional)",
+                id="parallelism-input",
+            )
+            yield Input(
+                value=(
+                    str(self._agent.idle_timeout_seconds)
+                    if self._agent and self._agent.idle_timeout_seconds is not None
+                    else ""
+                ),
+                placeholder="Idle timeout seconds (optional)",
+                id="idle-timeout-input",
+            )
+            yield Input(
+                value=(
+                    str(self._agent.max_turn_duration_seconds)
+                    if self._agent and self._agent.max_turn_duration_seconds is not None
+                    else ""
+                ),
+                placeholder="Max turn duration seconds (optional)",
+                id="max-turn-duration-input",
+            )
+
+        with _section("Access"):
+            yield Input(
+                value=(
+                    ", ".join(self._agent.respond_to_allowlist)
+                    if self._agent and self._agent.respond_to_allowlist
+                    else ""
+                ),
+                placeholder="Respond-to allowlist pubkeys, comma-separated (optional)",
+                id="respond-to-allowlist-input",
+            )
+
+        yield Button("Update" if self._agent else "Create", id="submit-button", variant="primary")
         yield Footer()
 
     def on_select_changed(self, event: Select.Changed) -> None:

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from buzz_fleet.models import Agent, SystemPromptSource
+from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.tui.app import BuzzFleetApp
 from buzz_fleet.tui.screens.dashboard import DashboardScreen
 
@@ -25,7 +26,7 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
     monkeypatch.setattr(
         "buzz_fleet.tui.screens.dashboard.agent_status",
-        lambda agent_id: "RUNNING",
+        lambda agent_id: AgentStatus.RUNNING,
     )
 
     app = BuzzFleetApp()
@@ -37,7 +38,9 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
         await app.push_screen(DashboardScreen())
         await pilot.pause()
         table = app.screen.query_one("#agent-table")
-        assert ("laravel-dev", "Laravel-Dev", "claude", "RUNNING") in [
+        # Displayed status text borrows systemd's own vocabulary ("active"),
+        # not the internal AgentStatus.RUNNING enum name.
+        assert ("laravel-dev", "Laravel-Dev", "claude", "active") in [
             tuple(str(v) for v in table.get_row_at(i)) for i in range(table.row_count)
         ]
 
@@ -80,7 +83,7 @@ async def test_dashboard_refreshes_when_a_pushed_screen_is_popped(monkeypatch) -
 
     agents: list[Agent] = []
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: list(agents))
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: "RUNNING")
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:

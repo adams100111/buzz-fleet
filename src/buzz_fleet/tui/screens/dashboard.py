@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -13,11 +14,27 @@ from textual.widgets import DataTable, Footer, Header
 from buzz_fleet import state
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.proc import RealCommandRunner
+from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.systemctl_client import status as systemctl_status
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
 from buzz_fleet.tui.screens.logs import LogsScreen
+from buzz_fleet.tui.theme import PANEL_BORDER, STATUS_INACTIVE
 
 CURRENT_COMMUNITY_ID = "eltahir"
+
+# Displayed status text borrows systemd's own vocabulary (active/inactive/
+# failed) rather than inventing new words for states the underlying system
+# already names — paired with a theme color so state is legible at a glance.
+# Status color is reserved for this alone; it never doubles as decoration
+# elsewhere in the app. Literal hex here, not a Textual theme variable:
+# these colors render inside Rich `Text` objects (DataTable cells), which
+# Rich styles directly — Textual's `$variable` CSS syntax doesn't apply.
+_STATUS_DISPLAY: dict[AgentStatus, tuple[str, str]] = {
+    AgentStatus.RUNNING: ("active", "#7FB069"),
+    AgentStatus.STOPPED: ("inactive", STATUS_INACTIVE),
+    AgentStatus.FAILED: ("failed", "#C1553A"),
+    AgentStatus.UNKNOWN: ("unknown", STATUS_INACTIVE),
+}
 
 
 def list_agents() -> list:
@@ -25,11 +42,20 @@ def list_agents() -> list:
     return state.load_agents(community.id) if community else []
 
 
-def agent_status(agent_id: str) -> str:
-    return systemctl_status(RealCommandRunner(), agent_id).name
+def agent_status(agent_id: str) -> AgentStatus:
+    return systemctl_status(RealCommandRunner(), agent_id)
 
 
 class DashboardScreen(Screen):
+    DEFAULT_CSS = f"""
+    DashboardScreen {{
+        #agent-table {{
+            border: round {PANEL_BORDER};
+            margin: 1 2;
+        }}
+    }}
+    """
+
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("c", "create_agent", "Create agent"),
         Binding("u", "edit_agent", "Edit agent"),
@@ -40,7 +66,8 @@ class DashboardScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
         table = DataTable(id="agent-table")
-        table.add_columns("id", "display_name", "harness", "status")
+        table.border_title = "Agents"
+        table.add_columns("id", "display name", "harness", "status")
         yield table
         yield Footer()
 
@@ -61,7 +88,8 @@ class DashboardScreen(Screen):
         table = self.query_one("#agent-table", DataTable)
         table.clear()
         for agent in list_agents():
-            table.add_row(agent.id, agent.display_name, agent.harness, agent_status(agent.id))
+            text, color = _STATUS_DISPLAY[agent_status(agent.id)]
+            table.add_row(agent.id, agent.display_name, agent.harness, Text(text, style=f"bold {color}"))
 
     def _selected_agent_id(self) -> str | None:
         table = self.query_one("#agent-table", DataTable)

@@ -3,20 +3,42 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.containers import Container
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input
+from textual.widgets import Button, Footer, Header, Input, Static
 
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.tui.screens.dashboard import CURRENT_COMMUNITY_ID
+from buzz_fleet.tui.theme import SECTION_CSS
+from buzz_fleet.tui.theme import section as _section
 
 
 class ConnectScreen(Screen):
+    DEFAULT_CSS = f"""
+    ConnectScreen {{
+        {SECTION_CSS}
+
+        #connect-center {{
+            align: center middle;
+            height: 1fr;
+        }}
+
+        .form-section {{
+            width: 60;
+            height: auto;
+            margin: 0;
+        }}
+    }}
+    """
+
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="Relay URL, e.g. wss://buzz.eltahir.me", id="relay-input")
-        yield Input(placeholder="Owner/admin nsec", password=True, id="nsec-input")
-        yield Button("Connect", id="connect-button")
+        with Container(id="connect-center"), _section("Connect a community"):
+            yield Static("The relay and owner/admin key you'd use to log into Buzz Desktop.")
+            yield Input(placeholder="Relay URL, e.g. wss://buzz.eltahir.me", id="relay-input")
+            yield Input(placeholder="Owner/admin nsec", password=True, id="nsec-input")
+            yield Button("Connect", id="connect-button", variant="primary")
         yield Footer()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
