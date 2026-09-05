@@ -4,8 +4,7 @@
 //! copied from, so a future schema drift is at least detectable by diffing
 //! against a named source. See the design spec's "Architecture" section.
 
-use nostr::{Event, EventBuilder, Kind, Tag};
-use serde::{Deserialize, Serialize};
+use nostr::{EventBuilder, Kind, Tag};
 
 /// Mirrors `desktop/src-tauri/src/events.rs:428-453`'s `build_profile` —
 /// snake_case NIP-01 content. `buzz-fleet` only ever sets `display_name`;
