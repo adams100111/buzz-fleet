@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import ClassVar
 
 from textual.app import ComposeResult
@@ -146,6 +147,22 @@ class AgentFormScreen(Screen):
                 placeholder="Respond-to allowlist pubkeys, comma-separated (optional)",
                 id="respond-to-allowlist-input",
             )
+            yield Input(
+                value=(", ".join(self._agent.channel_ids) if self._agent and self._agent.channel_ids else ""),
+                placeholder="Channel IDs, comma-separated (optional)",
+                id="channel-ids-input",
+            )
+            yield Static("Channel add policy:")
+            yield Select(
+                [("anyone", "anyone"), ("owner_only", "owner_only"), ("nobody", "nobody")],
+                value=(
+                    self._agent.channel_add_policy
+                    if self._agent and self._agent.channel_add_policy
+                    else "owner_only"
+                ),
+                allow_blank=False,
+                id="channel-add-policy-select",
+            )
 
         yield Button("Update" if self._agent else "Create", id="submit-button", variant="primary")
         yield Footer()
@@ -204,12 +221,16 @@ class AgentFormScreen(Screen):
             parallelism = self._parse_optional_int("#parallelism-input")
             idle_timeout_seconds = self._parse_optional_int("#idle-timeout-input")
             max_turn_duration_seconds = self._parse_optional_int("#max-turn-duration-input")
+            channel_ids = self._parse_optional_uuid_list("#channel-ids-input")
         except ValueError:
             self.notify(
-                "Parallelism, idle timeout, and max turn duration must be whole numbers.",
+                "Parallelism, idle timeout, max turn duration must be whole numbers, "
+                "and channel IDs must be valid UUIDs.",
                 severity="error",
             )
             return
+
+        channel_add_policy = self.query_one("#channel-add-policy-select", Select).value
 
         try:
             if self._agent is not None:
@@ -222,6 +243,8 @@ class AgentFormScreen(Screen):
                     "idle_timeout_seconds": idle_timeout_seconds,
                     "max_turn_duration_seconds": max_turn_duration_seconds,
                     "respond_to_allowlist": respond_to_allowlist,
+                    "channel_ids": channel_ids,
+                    "channel_add_policy": channel_add_policy,
                 }
                 # Only touch system_prompt_source if the user actually edited the
                 # prompt field. This is the fix for the v1 bug where editing only
@@ -246,6 +269,8 @@ class AgentFormScreen(Screen):
                     idle_timeout_seconds=idle_timeout_seconds,
                     max_turn_duration_seconds=max_turn_duration_seconds,
                     respond_to_allowlist=respond_to_allowlist,
+                    channel_ids=channel_ids,
+                    channel_add_policy=channel_add_policy,
                 )
         except ValueError as e:
             # e.g. a blank/punctuation-only display name (agent_slug raises)
@@ -260,6 +285,15 @@ class AgentFormScreen(Screen):
     def _parse_optional_int(self, input_id: str) -> int | None:
         raw = self.query_one(input_id, Input).value.strip()
         return int(raw) if raw else None
+
+    def _parse_optional_uuid_list(self, input_id: str) -> list[str] | None:
+        raw = self.query_one(input_id, Input).value.strip()
+        if not raw:
+            return None
+        ids = [entry.strip() for entry in raw.split(",") if entry.strip()]
+        for entry in ids:
+            uuid.UUID(entry)  # raises ValueError on malformed input
+        return ids or None
 
     def _install_selected_harness_adapter(self) -> None:
         harness = self.query_one("#harness-select", Select).value
