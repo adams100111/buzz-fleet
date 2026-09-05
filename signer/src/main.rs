@@ -106,6 +106,15 @@ enum Command {
         #[arg(long)]
         agent_pubkey: String,
     },
+    /// Publish (agent-signed) the kind:10100 add-policy record.
+    PublishAgentAddPolicy {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        agent_nsec: String,
+        #[arg(long)]
+        policy: String,
+    },
 }
 
 #[tokio::main]
@@ -223,6 +232,13 @@ async fn main() {
                     .map_err(|e| anyhow::anyhow!(e))
                 });
             match run_publish(&relay, &owner_nsec, builder).await {
+                Ok(()) => { println!("{}", json!({"ok": true})); 0 }
+                Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
+            }
+        }
+        Command::PublishAgentAddPolicy { relay, agent_nsec, policy } => {
+            let builder = agent_events::build_agent_add_policy(&policy);
+            match run_publish(&relay, &agent_nsec, builder).await {
                 Ok(()) => { println!("{}", json!({"ok": true})); 0 }
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }

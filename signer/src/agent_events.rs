@@ -55,6 +55,20 @@ pub fn build_managed_agent(agent_pubkey_hex: &str, content_json: &str) -> anyhow
     Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT), content_json).tags(tags))
 }
 
+pub const KIND_AGENT_PROFILE: u16 = 10100;
+
+/// Mirrors the one field the relay actually reads from kind:10100
+/// (`crates/buzz-relay/src/handlers/side_effects.rs:1246-1278`) — no legacy
+/// directory fields (`status`/`capabilities`/`channels`); buzz-fleet has no
+/// concept of any of those to publish.
+pub fn build_agent_add_policy(policy: &str) -> anyhow::Result<EventBuilder> {
+    if !matches!(policy, "anyone" | "owner_only" | "nobody") {
+        anyhow::bail!("invalid channel_add_policy {policy:?} (must be anyone, owner_only, or nobody)");
+    }
+    let content = serde_json::json!({"channel_add_policy": policy}).to_string();
+    Ok(EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE), content))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +129,18 @@ mod tests {
         // must fail loudly here, not publish a malformed event.
         let bad_content = serde_json::json!({"name": "X"}).to_string();
         assert!(build_managed_agent(&"c".repeat(64), &bad_content).is_err());
+    }
+
+    #[test]
+    fn build_agent_add_policy_sets_content() {
+        let keys = Keys::generate();
+        let event = build_agent_add_policy("owner_only").unwrap().sign_with_keys(&keys).unwrap();
+        assert_eq!(event.kind, Kind::Custom(10100));
+        assert_eq!(event.content, r#"{"channel_add_policy":"owner_only"}"#);
+    }
+
+    #[test]
+    fn build_agent_add_policy_rejects_unknown_value() {
+        assert!(build_agent_add_policy("sometimes").is_err());
     }
 }
