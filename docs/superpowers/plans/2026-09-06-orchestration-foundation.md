@@ -4,7 +4,7 @@
 
 **Goal:** Make fleet agents able to reply, delegate work to each other with an exact code revision, ack and report reliably, and let any machine reconstruct the complete state of every delegation from the relay.
 
-**Architecture:** Spec layers 0 and 1. Agents publish kind 9 channel messages carrying fleet tags through `buzz-fleet task` commands; every fleet event mentions a retrieval key so one indexed relay filter plus `until` paging reads the complete history; a pure reducer turns events into task state for the views. The Rust signer gains I/O-only subcommands. A fleet channel and an owner-signed fleet record are created once and discovered by every machine. Plan 2 is the conductor (outbox, timers, failover, notifier, metrics, recycling); plan 3 is pipelines (runs, groups, human steps, purge, TUI screen, self-update).
+**Architecture:** Spec layers 0 and 1. Agents publish kind 9 channel messages carrying fleet tags through `buzz-fleet task` commands; every fleet event mentions a retrieval key so one indexed relay filter plus `until` paging reads the complete history; a pure reducer turns events into task state for the views. The Rust signer gains I/O-only subcommands. A fleet channel and an owner-signed fleet record are created once and discovered by every machine. Plan 2 is the conductor (outbox, timers, failover, notifier, metrics, recycling); plan 3 is pipelines (runs, groups, human steps, proposals and the `Fleet PM` planner, workspace files, purge, TUI screen, self-update). The agent directory (spec 5.10) is in this plan: Tasks 17 and 18.
 
 **Tech Stack:** Python 3.12+ (Typer, Pydantic, Rich, pytest), Rust (clap, nostr 0.44, buzz-sdk, buzz-ws-client, tokio), systemd `--user` units.
 
@@ -3604,6 +3604,193 @@ Follow the project's release workflow exactly (memory `feedback_buzz-fleet-relea
 
 ---
 
+
+---
+
+### Task 17: Agent directory fields in the model and the managed-agent record
+
+**Files:**
+- Modify: `src/buzz_fleet/models.py`, `src/buzz_fleet/visibility.py`, `src/buzz_fleet/personas.py`, `src/buzz_fleet/manager.py`, `src/buzz_fleet/cli/app.py`, `src/buzz_fleet/tui/screens/agent_form.py`
+- Test: `tests/test_models.py`, `tests/test_visibility.py`, `tests/test_personas.py`, `tests/test_cli.py`
+
+**Interfaces:**
+- `Agent.role: str | None`, `Agent.capabilities: list[str] | None`, `Agent.description: str | None`.
+- `visibility.managed_agent_content(agent)` adds `"role"`, `"capabilities"`, `"description"` (null/empty when unset) next to `"host"`.
+- Persona import (`personas.py`) maps the persona's `description` to `Agent.description`; `agent create/update` gain `--role`, `--capability` (repeatable), `--description`; the TUI form gains the three inputs.
+- A change to any of the three republishes the managed-agent record (`update_agent` already republishes on content-field changes; add these to `content_fields`).
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_models.py
+def test_directory_fields_round_trip() -> None:
+    agent = Agent(**_base_kwargs(), role="reviewer", capabilities=["laravel", "security-review"], description="Reviews PHP.")
+    again = Agent.model_validate_json(agent.model_dump_json())
+    assert (again.role, again.capabilities, again.description) == ("reviewer", ["laravel", "security-review"], "Reviews PHP.")
+
+
+# tests/test_visibility.py
+def test_managed_agent_content_includes_directory_fields() -> None:
+    agent = _agent().model_copy(update={"role": "reviewer", "capabilities": ["laravel"], "description": "Reviews."})
+    content = managed_agent_content(agent)
+    assert content["role"] == "reviewer" and content["capabilities"] == ["laravel"] and content["description"] == "Reviews."
+    empty = managed_agent_content(_agent())
+    assert empty["role"] is None and empty["capabilities"] == [] and empty["description"] is None
+
+
+# tests/test_personas.py  (model on the existing template-import test in that file)
+def test_persona_description_is_imported() -> None:
+    template = load_persona_template(PERSONA_WITH_DESCRIPTION_PATH)
+    assert template.description == "Laravel/PHP backend specialist."
+
+
+# tests/test_cli.py
+def test_agent_create_passes_directory_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--role", "reviewer", "--capability", "laravel",
+                                     "--capability", "docker-build", "--description", "Reviews."])
+    assert result.exit_code == 0, result.output
+    assert (captured["role"], captured["capabilities"], captured["description"]) == ("reviewer", ["laravel", "docker-build"], "Reviews.")
+```
+
+Read `tests/test_personas.py` first for the template fixture name and the loader function's real name, and use those.
+
+- [ ] **Step 2: Run to verify failure**
+
+`uv run pytest tests/test_models.py tests/test_visibility.py tests/test_personas.py tests/test_cli.py -q`
+
+- [ ] **Step 3: Implement**
+
+`models.py` `Agent` (after `heartbeat_interval_seconds`):
+
+```python
+    # Agent directory (spec 5.10): published in the managed-agent record so
+    # every machine and every agent can choose agents by role and capability.
+    role: str | None = None
+    capabilities: list[str] | None = None
+    description: str | None = None
+```
+
+`visibility.py` `managed_agent_content`: add `"role": agent.role, "capabilities": list(agent.capabilities or []), "description": agent.description`. `personas.py`: carry the persona `description` field through the template model and into `create_agent(description=...)` where templates are applied. `manager.py` `create_agent`: add `role`, `capabilities`, `description` params → `Agent(...)`; in `update_agent` add the three names to `content_fields`. `cli/app.py`: `--role`, `--capability` (`list[str] | None`), `--description` on create and update. TUI: three inputs in the Identity section (`#role-input`, `#capabilities-input` comma-separated, `#description-input`), parsed in the save handler.
+
+- [ ] **Step 4: Run tests and commit**
+
+```bash
+uv run pytest -q && uv run ruff check . && uv run mypy
+git add src/buzz_fleet tests && git commit -m "Add role, capabilities, and description to agents and the managed-agent record"
+```
+
+---
+
+### Task 18: `buzz-fleet fleet agents`
+
+**Files:**
+- Modify: `signer/src/fleet.rs`, `signer/src/main.rs` (`read-managed-agents`, `read-presence`)
+- Modify: `src/buzz_fleet/signer_client.py`, `src/buzz_fleet/orchestration/relay.py`, `src/buzz_fleet/cli/fleet_commands.py`
+- Test: `tests/test_signer_client.py`, `tests/test_orch_relay.py`, `tests/test_task_cli.py`
+
+**Interfaces:**
+- Signer `read-managed-agents --relay --nsec [--auth-tag] --owner <hex>` → `{"ok":true,"agents":[{"pubkey","content":{...}}]}` from kind 30177 events authored by the owner (`authors` pushed, `#d` = agent pubkey inside content per `visibility.py`); `read-presence --relay --nsec [--auth-tag] --pubkey <hex>...` → `{"ok":true,"presence":[{"pubkey","status","updated_at"}]}` from kind 40902 snapshots (read `crates/buzz-core/src/kind.rs` around `KIND_PRESENCE_SNAPSHOT` for the exact shape before writing the parser).
+- Python: `signer_client.read_managed_agents(runner, relay_url, nsec, *, owner, auth_tag) -> list[dict]`, `signer_client.read_presence(runner, relay_url, nsec, *, pubkeys, auth_tag) -> list[dict]`; `relay.directory(runner, ident, *, channel_id) -> list[DirectoryEntry]` with `DirectoryEntry(pubkey, display_name, role, capabilities, description, harness, host, online: bool | None, last_seen: int | None, live_tasks: int, version: str | None)` joining channel members, managed-agent records, presence, and `load_state`; CLI `buzz-fleet fleet agents [--json] [--community]` rendering a table sorted by display name.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_orch_relay.py
+def test_directory_joins_members_records_presence_and_load() -> None:
+    members = json.dumps({"ok": True, "members": [{"pubkey": B, "display_name": "Reviewer"}]})
+    records = json.dumps({"ok": True, "agents": [{"pubkey": B, "content": {"role": "reviewer", "capabilities": ["laravel"],
+                                                                            "description": "Reviews.", "harness": "claude", "host": "vps", "version": "0.8.0"}}]})
+    presence = json.dumps({"ok": True, "presence": [{"pubkey": B, "status": "online", "updated_at": 1700}]})
+    runner = PagingRunner([_event(1, 1000) | {"tags": [["p", RK], ["fleet", json.dumps({"v": 1, "type": "delegate", "task": "t", "attempt": "a", "from": "a" * 64, "to": B, "deadline": 9, "required": True, "acceptance": []})], ["t", "fleet:task:t"]]}],
+                          {"channel-members": members, "read-managed-agents": records, "read-presence": presence})
+    ident = Identity(**{**IDENT.__dict__, "owner_pubkey": OWNER})
+    [entry] = relay.directory(runner, ident, channel_id=CH)
+    assert (entry.display_name, entry.role, entry.capabilities, entry.host, entry.online, entry.live_tasks) == ("Reviewer", "reviewer", ["laravel"], "vps", True, 1)
+
+
+# tests/test_task_cli.py
+def test_cli_fleet_agents_json(monkeypatch) -> None:
+    from buzz_fleet.orchestration.relay import DirectoryEntry
+
+    monkeypatch.setattr(fc, "_load_manager", lambda community: type("M", (), {"ensure_fleet_record": lambda self: None, "_community": None})())
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    monkeypatch.setattr(fc.relay, "directory", lambda runner, ident, channel_id: [DirectoryEntry(
+        pubkey=B, display_name="Reviewer", role="reviewer", capabilities=["laravel"], description=None, harness="claude",
+        host="vps", online=True, last_seen=1, live_tasks=0, version="0.8.0")])
+    result = cli.invoke(app, ["fleet", "agents", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)[0]["role"] == "reviewer"
+```
+
+Add `read_managed_agents`/`read_presence` argv tests to `tests/test_signer_client.py` in the style of Task 7.
+
+- [ ] **Step 2: Run to verify failure**
+
+`uv run pytest tests/test_orch_relay.py tests/test_task_cli.py tests/test_signer_client.py -q`
+
+- [ ] **Step 3: Implement**
+
+Signer: two subcommands following Task 6's pattern, using `collect_events` with `Filter::new().kind(Kind::Custom(30177)).authors([owner])` and `Filter::new().kind(Kind::Custom(40902)).authors(pubkeys)`; print content parsed as JSON. Python wrappers in the Task 7 style. In `relay.py`:
+
+```python
+@dataclass(frozen=True)
+class DirectoryEntry:
+    pubkey: str
+    display_name: str | None
+    role: str | None
+    capabilities: list[str]
+    description: str | None
+    harness: str | None
+    host: str | None
+    online: bool | None
+    last_seen: int | None
+    live_tasks: int
+    version: str | None
+
+
+def directory(runner: CommandRunner, ident: Identity, *, channel_id: str | None) -> list[DirectoryEntry]:
+    default_channel, _ = _require(ident)
+    channel = channel_id or default_channel
+    members = signer_client.channel_members(runner, ident.relay_url, ident.nsec, channel, auth_tag=ident.auth_tag)
+    records = {r["pubkey"]: r["content"] for r in signer_client.read_managed_agents(
+        runner, ident.relay_url, ident.nsec, owner=ident.owner_pubkey or "", auth_tag=ident.auth_tag)} if ident.owner_pubkey else {}
+    presence = {p["pubkey"]: p for p in signer_client.read_presence(
+        runner, ident.relay_url, ident.nsec, pubkeys=[pk for pk, _ in members], auth_tag=ident.auth_tag)}
+    state = load_state(runner, ident, channel_id=channel)
+    load = {t.assignee: 0 for t in state.open_tasks()}
+    for t in state.open_tasks():
+        load[t.assignee] += 1
+    out = []
+    for pubkey, name in members:
+        rec, pres = records.get(pubkey, {}), presence.get(pubkey)
+        out.append(DirectoryEntry(pubkey=pubkey, display_name=name, role=rec.get("role"), capabilities=list(rec.get("capabilities") or []),
+                                  description=rec.get("description"), harness=rec.get("harness"), host=rec.get("host"),
+                                  online=(pres["status"] == "online") if pres else None, last_seen=pres["updated_at"] if pres else None,
+                                  live_tasks=load.get(pubkey, 0), version=rec.get("version")))
+    return sorted(out, key=lambda e: (e.display_name or "").lower())
+```
+
+Exclude the retrieval key and conductor keys from the listing when `ident.record` is present. CLI `fleet agents`: resolve identity, call `relay.directory`, print JSON (`asdict`) or a Rich table with columns Name, Role, Capabilities, Harness, Host, Online, Live tasks, Version.
+
+- [ ] **Step 4: Run tests, verify live, commit**
+
+```bash
+uv run pytest -q && uv run ruff check . && uv run mypy && (cd signer && cargo test)
+uv run buzz-fleet fleet agents --community <id>
+git add signer/src src/buzz_fleet tests && git commit -m "Add buzz-fleet fleet agents: the agent directory"
+```
+
+
 ## Self-review
 
 **Spec coverage, layers 0–1.**
@@ -3617,3 +3804,5 @@ Follow the project's release workflow exactly (memory `feedback_buzz-fleet-relea
 **Type consistency.** `Identity` fields, `OutgoingMessage`, `FleetEvent`, `Task`/`Attempt`/`State`, `signer_client` keyword-only wrappers, `fleet_filter`, and `FleetRecord` are used with the same names and shapes across T7–T15.
 
 **Placeholders.** None: every step carries its code or the exact command.
+
+**Addendum coverage.** Spec 5.10 (directory) → Tasks 17–18. Spec 5.11 (planner, proposals, `auto_start`) and 5.12 (workspace files) → plan 3; they need the conductor (approval handling) and the persona pack changes, and nothing in this plan blocks them.

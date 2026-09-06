@@ -4,7 +4,8 @@ Status: revision 3, approved design, not yet built. Revision 2 adopted an
 independent review (`2026-09-06-multi-agent-orchestration-review.md`,
 `2026-09-06-multi-agent-orchestration-alternatives.md`). Revision 3 closes
 every deferral after a grilling session with the owner: this is the complete
-feature set, not a minimum. Section 13 lists the decisions from that session.
+feature set, not a minimum. Revision 3.1 adds the agent directory, the
+planner with run proposals, and workspace files (5.10–5.12). Section 13 lists the decisions from that session.
 Vocabulary: `CONTEXT.md` at the repo root. Decision records: `docs/adr/`.
 Date: 2026-09-06
 Scope: buzz-fleet (this repo), its Rust signer, and one Compose addition in
@@ -233,6 +234,11 @@ strings; views show 8-character prefixes; lookups accept a unique prefix.
   (fact 11). Hard stop remains the owner's `!cancel @Agent`.
 - `run` — author: owner or any fleet member. `{run, pipeline, brief, steps:
   [...], limits, retention?, budget?, notify_on_done}`; self-contained.
+- `run-proposal` — author: any fleet member. A self-contained run record
+  (same shape as `run`, agents resolved to pubkeys) plus `rationale` and
+  `status: proposed`. The proposal is a thread; the owner approves, edits, or
+  rejects in it. On approval the conductor publishes the `run` in the same
+  thread, so the proposal thread becomes the run thread.
 - `owner-command` — author: owner, produced by the conductor from a chat
   line in a run thread that starts with `!fleet` (5.3). The original chat line
   is not state; the echoed event is.
@@ -297,14 +303,16 @@ buzz-fleet task cancel <id> --reason <text>
 buzz-fleet task show <id> | buzz-fleet tasks [--open|--stuck|--mine|--unacked]
 buzz-fleet runs [--open] [--metrics] | buzz-fleet run <pipeline> --brief <text|-> [--channel]
 buzz-fleet run cancel <id> | run resume <id> | run purge <id>
-buzz-fleet fleet init [--channel <uuid>] | fleet status | self-update
+buzz-fleet fleet init [--channel <uuid>] | fleet status | fleet agents [--json] | self-update
+buzz-fleet run propose --brief <text|-> --steps <yaml|-> [--rationale <text|->]   (any fleet member)
+buzz-fleet run approve <id> [--edit <yaml>] | run reject <id> --reason <text>      (owner)
 buzz-fleet conductor install [--standby] | conductor move
 ```
 
-**Owner commands from a phone**, typed in the run thread by the owner:
-`!fleet resume`, `!fleet cancel [reason]`, `!fleet fallback <Name>`,
+**Owner commands from a phone**, typed in the run or proposal thread by the
+owner: `!fleet resume`, `!fleet cancel [reason]`, `!fleet fallback <Name>`,
 `!fleet ack`, `!fleet done <summary>`, `!fleet failed <summary>`,
-`!fleet blocked <question>`. The prefix avoids buzz-acp's reserved `!cancel`,
+`!fleet blocked <question>`, `!fleet approve`, `!fleet reject <reason>`. The prefix avoids buzz-acp's reserved `!cancel`,
 `!shutdown`, `!rotate`. The conductor validates the author, echoes an
 `owner-command` event, and applies it; unknown commands get a one-line
 reply. `!fleet ack/done/failed/blocked` act on the task assigned to the owner
@@ -392,7 +400,9 @@ tasks by refusing new delegations from the CLI.
 | budget exceeded | `budget-paused` |
 | `cancel-task` / `cancel-run` | mark cancelled, post `cancel-notice` to live assignees |
 | retention elapsed for a closed run | `purge` (owner-key delete events, ADR 0002 scope) |
-| owner `!fleet ...` chat line in a run thread | validate, echo `owner-command`, apply |
+| owner `!fleet ...` chat line in a run or proposal thread | validate, echo `owner-command`, apply |
+| `run-proposal` from a pubkey in the record's `auto_start` list | start the run immediately (`run` event with the proposal's steps) |
+| `run-proposal` from anyone else | wait; on `!fleet approve` or `run approve` start it, on `!fleet reject` mark it rejected and mention the proposer with the reason; after 24 h unanswered, one reminder through the notifier |
 
 Ad-hoc tasks get delivery recovery, lateness, escalation, cancel notices, and
 the daily budget.
@@ -477,7 +487,7 @@ checkout. Conditional branches are out of scope; agents deviate instead.
   record into its owner-signed metadata `about`: a readable first line, then
   JSON `{"buzz-fleet": 1, "retrieval_key", "conductors": {"primary": {pubkey,
   host}, "standby": {pubkey, host}?}, "limits": {...}, "budget": {...},
-  "retention", "versions", "created_at"}`. Discovery is by that marker.
+  "retention", "auto_start": [], "versions", "created_at"}`. Discovery is by that marker.
 - Every machine discovers and caches it in `ensure_runtime_ready`.
 - Every managed agent auto-joins the fleet channel; the retrieval key and
   both conductor keys are members; no restarts needed (fact 9).
@@ -486,7 +496,71 @@ checkout. Conditional branches are out of scope; agents deviate instead.
   the retrieval key, and both conductors; the conductor subscribes per
   channel with explicit `#h`.
 
+### 5.10 Agent directory
+
+Agents and the owner need to know who is in the fleet and what each agent
+is for. `Agent` gains `role` (short label, e.g. `reviewer`), `capabilities`
+(list of strings, e.g. `laravel`, `docker-build`, `security-review`), and
+`description` (imported from a persona's `description` when created from a
+template; revision 1 of the persona-picker dropped it for lack of a home).
+All three, plus `host`, go into the owner-signed managed-agent record
+buzz-fleet already publishes (kind 30177), so every machine and every agent
+can read them from the relay.
+
+`buzz-fleet fleet agents [--json]` lists, for every member of the fleet
+channel: display name, role, capabilities, description, harness, host,
+online (from the relay's presence snapshot, kind 40902, and the live
+ephemeral presence updates), live tasks assigned (from the reducer), and
+version. Agents call the same command; it is how a planning agent knows
+whom to propose. Names remain the addressing key; role and capabilities are
+for selection and display.
+
+### 5.11 Planning agent and run proposals
+
+A **planner** is an ordinary agent whose persona is built for planning work
+rather than doing it. buzz-fleet ships one in the bundled pack, `Fleet PM`:
+its prompt tells it to gather the requirement from the owner in chat, read
+the codebase it is pointed at (it has a workspace like any agent), run
+`buzz-fleet fleet agents`, choose agents by role and capability, and publish
+a proposal with `buzz-fleet run propose`. It stays in the proposal thread
+to answer questions and revise until the owner approves or rejects.
+
+Proposals are the human-in-the-loop planning step: the owner sees the
+proposed steps, agents, timeouts, budget, and rationale in the thread, edits
+them if needed (`run approve --edit` with a YAML file, or a chat reply the
+planner turns into a revised proposal), and approves from any device with
+`!fleet approve`. Proposals do not need a pipeline file on any machine; the
+run record is self-contained. Pipeline files (5.5) remain for repeatable
+work; a proposal can also name a pipeline file by name to reuse it.
+
+The fleet record carries `auto_start: [pubkey...]`, empty by default. A
+proposer on that list starts runs without approval. This is how the owner
+turns a trusted planner into a fully agentic one later, per planner, with
+one record edit.
+
+### 5.12 Workspace files (skills and rules per persona)
+
+A persona may declare `workspace_files`: relative paths and contents, or
+paths into the persona pack, that buzz-fleet writes into the agent's
+working directory at create and update time. This is how a persona ships
+harness-native skills and rules without buzz-fleet knowing the harness's
+format: `.claude/skills/<name>/SKILL.md` and `CLAUDE.md` for Claude Code,
+`AGENTS.md` for Codex, `.goosehints` for goose, and whatever Pi reads from
+its working directory (verified in section 11). The `Fleet PM` persona
+ships a planning skill this way. Files are written only when missing or
+when the persona's copy changed (hash marker), never over an operator's
+edits without `--force`.
+
 ## 6. Walkthroughs
+
+**Planned by the Fleet PM.** The owner writes in the fleet channel: "@Fleet
+PM we need CSV export in the reports module of repo X". The planner reads
+the repo, runs `fleet agents`, and proposes: Laravel Backend Developer
+implements (90 min), Reviewer and SecReviewer review in parallel, owner
+gate, Builder builds; budget 15 USD; rationale in the thread. The owner
+replies "skip the security review" from the phone; the planner posts a
+revised proposal; the owner types `!fleet approve`. The conductor starts the
+run in that thread.
 
 **Pipeline with review, owner gate, and build.** Owner starts the run from a
 pushed commit. Implementer acks, works in a worktree, pushes, reports `done`
@@ -599,6 +673,11 @@ groups; TUI screen; self-update; language validated (section 12).
    and carry `costUsd` for the providers in use.
 9. A steering message reaches a running turn on each harness.
 10. Per-machine SSH access to every repository named in a run.
+11. Each harness loads its workspace files from the unit's working
+    directory: `.claude/skills` and `CLAUDE.md` (Claude Code), `AGENTS.md`
+    (Codex), `.goosehints` (goose), and Pi's equivalent.
+12. The presence snapshot (kind 40902) is readable by the owner and reflects
+    a stopped agent within a few minutes.
 
 ## 12. Implementation notes (language and seams)
 
@@ -640,3 +719,6 @@ faked by a list of connections. Signer subcommands are I/O only:
 | 20 | Budgets in USD with turn fallback |
 | 21 | Runs screen in the TUI |
 | 22 | `self-update`, opt-in |
+| 23 | Agent directory: role, capabilities, description in the managed-agent record; `fleet agents` |
+| 24 | Planner persona (`Fleet PM`) and run proposals with owner approval; `auto_start` list for trusted planners |
+| 25 | Workspace files per persona (skills and rules) written into the agent's working directory |

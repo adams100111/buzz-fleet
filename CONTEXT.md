@@ -42,6 +42,18 @@ _Avoid_: index key, conductor key
 The conductor's outbound channel to the owner outside Buzz: ntfy, Telegram, email, or a webhook.
 _Avoid_: alerting, push
 
+**Planner**:
+An agent whose persona plans work instead of doing it: it reads the requirement and the code, consults the directory, and publishes a proposal.
+_Avoid_: PM bot, orchestrator agent
+
+**Directory**:
+The list of fleet agents with their role, capabilities, description, host, and online state, read from the relay.
+_Avoid_: roster, registry
+
+**Capability**:
+A short label on an agent saying what it can do, used to choose agents for steps.
+_Avoid_: skill (a skill is a file a harness loads), tag
+
 **Owner command**:
 A chat line by the owner in a run thread starting with `!fleet`, which the conductor turns into a fleet event and applies.
 _Avoid_: chat command, bang command
@@ -113,6 +125,14 @@ _Avoid_: fan-out, parallel stage
 **Human step**:
 A step whose agent is the owner, completed with owner commands from any device.
 _Avoid_: approval gate, manual step
+
+**Proposal**:
+A planner's suggested run, with steps, agents, timeouts, budget, and rationale, waiting in its thread for the owner to approve, edit, or reject.
+_Avoid_: plan, draft run
+
+**Workspace files**:
+Skills and rules a persona ships into an agent's working directory so the harness loads them.
+_Avoid_: dotfiles, config
 
 **Deviation**:
 An agent choosing a different next assignee than the pipeline's default, recorded as part of the run.
