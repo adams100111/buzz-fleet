@@ -1,9 +1,14 @@
 # Multi-agent, multi-device orchestration — design spec
 
-Status: draft for review, not yet approved, not yet built.
+Status: revision 3, approved design, not yet built. Revision 2 adopted an
+independent review (`2026-09-06-multi-agent-orchestration-review.md`,
+`2026-09-06-multi-agent-orchestration-alternatives.md`). Revision 3 closes
+every deferral after a grilling session with the owner: this is the complete
+feature set, not a minimum. Section 13 lists the decisions from that session.
+Vocabulary: `CONTEXT.md` at the repo root. Decision records: `docs/adr/`.
 Date: 2026-09-06
-Scope: buzz-fleet (this repo) plus its Rust signer. No changes to the public
-block/buzz repo are required or assumed.
+Scope: buzz-fleet (this repo), its Rust signer, and one Compose addition in
+buzz-deploy (ntfy). No changes to the public block/buzz repo are required.
 
 ## 1. Goal
 
@@ -13,578 +18,625 @@ managed headless agents on one shared Buzz relay. The owner wants:
 - A laptop agent implements something, hands it to a VPS agent for review, which
   either sends it back with findings or hands it to a dedicated-server agent to
   build, which then notifies the reviewer and/or the implementer.
-- Both **predefined pipelines** (configured once, run by name) and **agentic
-  delegation** (an agent decides on its own to hand work to another agent).
-- The result must be *more productive* than plain chat between agents: handoffs
-  must not get lost, stalls must surface, and the owner must be able to see
-  what is in flight from any machine.
+- Both **predefined pipelines** and **agentic delegation**, on one mechanism.
+- The result must be *more productive* than plain chat between agents:
+  handoffs must not get lost, both sides must work on the same code, stalls
+  must surface, the owner must be reachable and able to act from a phone, and
+  the owner must be able to see what is in flight, and what it cost, from any
+  machine.
 
-Decisions already made by the owner during brainstorming:
+Owner decisions (brainstorming and grilling):
 
 | Question | Decision |
 |---|---|
-| Authoring style | Both pipelines and ad-hoc delegation, on one mechanism. A pipeline is a **default the agent may deviate from**, not an enforced state machine. |
-| Role-to-device binding | Pipeline steps name **agents** (by display name). The machine is wherever buzz-fleet runs that agent. No device concept is added anywhere. |
-| Timeouts | Never wait forever. Nudge the assignee once, then **escalate to the owner** by @-mention. Optional per-step fallback agent. |
-| Owner visibility | Everything happens **live in one shared channel** (free with Buzz). The owner is @-mentioned only on completion, failure, or escalation. |
+| Authoring style | Pipelines and ad-hoc delegation on one mechanism. A pipeline is a **default the agent may deviate from**. Software enforces attempt ownership, completion, duplicates, and limits. |
+| Role-to-device binding | Steps name **agents** by display name, resolved to pubkeys at run start. No device concept; hostnames are shown for information only. |
+| Timeouts | Never wait forever. Delivery recovery with backoff, one lateness nudge, then fallback or escalation to the owner. |
+| Owner visibility and control | Live in one shared channel; the owner is notified outside Buzz too, and can act from a phone with owner commands in the run thread. |
+| Channels | One long-lived `fleet` channel per community; project channels as an override. Runs are threads. |
+| History | Run threads are the record. Retention is configurable; default keep forever. |
+| Completeness | No "v1" deferrals. Failover, purge, recycling, metrics, budgets, notifications, parallel steps, and a TUI screen are all in scope. |
 
 ## 2. Verified facts the design rests on
 
-All verified against source on 2026-09-06 (paths relative to the block/buzz
-checkout at `/home/dev/repos/buzz` unless noted).
+Verified against source on 2026-09-06, local Buzz checkout `7a9a523`. Source
+inspection does not prove what each installed binary does; section 11 lists
+the live checks.
 
 1. **Wake-up is p-tag only.** buzz-acp in `SubscribeMode::Mentions` subscribes
    with `#p = [own pubkey]` (`crates/buzz-acp/src/relay.rs` `send_subscribe`).
-   There is no thread-participant wake. A reply wakes the other agent only if
-   the reply event carries `["p", <their pubkey>]`.
-2. **buzz-acp never publishes the agent's reply.** The agent is instructed to
-   run the `buzz messages send` CLI itself (`crates/buzz-acp/src/queue.rs`
-   `append_reply_instruction`). `--reply-to` adds only `e` tags; a `p` tag is
-   added only for `@Name` text resolved against channel members or an explicit
-   `--mention` (`crates/buzz-cli/src/commands/messages.rs`).
-3. **buzz-fleet agents cannot reply today.** The `buzz` CLI is one personality
-   of the Sprig multicall binary; buzz-fleet installs Sprig only under the name
-   `buzz-acp` (`src/buzz_fleet/buzz_acp.py`), creates no `buzz` link, and the
-   unit template sets no PATH. `which buzz` is empty on this machine. Verified
-   that a symlink named `buzz` pointing at the installed Sprig binary runs the
-   full Buzz CLI and reads `BUZZ_PRIVATE_KEY` / `BUZZ_RELAY_URL` /
-   `BUZZ_AUTH_TAG` from the environment. The agent subprocess inherits
-   buzz-acp's environment (`crates/buzz-acp/src/acp.rs` `spawn` only adds
-   variables, never clears), so those variables are already present.
-4. **The relay keeps arbitrary tags on kind 9 and filters on any single-letter
-   tag.** Tags are stored verbatim as JSONB and cannot be stripped (signed).
-   REQ filters on `#t` work (post-filtered, not indexed). Multi-letter filter
-   keys such as `#fleet` are silently ignored by the `nostr` crate's filter
-   deserializer, so anything we need to *query by* must live in a
-   single-letter tag. Custom regular/replaceable kinds (e.g. 30xxx) are
-   rejected (`crates/buzz-relay/src/handlers/ingest.rs` `required_scope_for_kind`).
-   Ephemeral kinds 20000–29999 are accepted but never stored.
-5. **Blocking inside a tool call kills the turn.** The idle timer
-   (`BUZZ_ACP_IDLE_TIMEOUT`, default 1500 s) resets only on agent stdout; a
-   long blocking MCP or shell call produces none, so the turn is cancelled. A
-   design that "waits for the reply inside the agent's turn" is therefore
-   unsafe. This supersedes the `wait_for_reply` idea in buzz-deploy's
-   2026-09-03 comms-MCP spec.
-6. **One MCP slot.** buzz-acp supports exactly one MCP server
-   (`BUZZ_ACP_MCP_COMMAND`, a bare command, no args). Consuming it for
-   orchestration would block personas that need their own MCP server later.
-   Pi's MCP support is still unverified.
-7. **Sibling trust.** Agents sharing the same NIP-OA owner can trigger each
-   other under the default `owner-only` respond policy. All fleet agents and the
-   conductor below share the owner, so no policy changes are needed.
-8. **buzz-workflow's `RequestApproval` is non-functional upstream (WF-08).**
-   Not used.
-9. **buzz-acp discovers channel memberships once, at startup.**
-   `discover_channels` (`crates/buzz-acp/src/relay.rs`) runs once in
-   `lib.rs`; every later subscribe call is a reconnect or rate-limit retry
-   over that fixed set. An agent added to a channel after it started never
-   receives events from it until its unit restarts. Consequence: channels must
-   be long-lived and joined before the agent starts; per-run disposable
-   channels are ruled out.
-10. buzz-fleet's signer already links `buzz-ws-client` and `buzz-sdk`
-   (`signer/Cargo.toml`), which provide `build_message(channel, content,
-   thread_ref, mentions, ...)` and an authenticated WebSocket connection with
-   `send_raw` / `next_event`, i.e. everything needed to publish tagged kind 9
-   events and to subscribe.
+2. **buzz-acp never publishes the agent's reply.** The agent runs the `buzz
+   messages send` CLI itself (`queue.rs` `append_reply_instruction`);
+   `--reply-to` adds only `e` tags; `p` tags come from `@Name` or `--mention`.
+   That membership check is client-side; the relay's ingest path does not
+   validate mention membership.
+3. **buzz-fleet agents cannot reply today.** The `buzz` CLI is one name of the
+   Sprig multicall binary; buzz-fleet installs it only as `buzz-acp` and the
+   unit sets no PATH. A symlink named `buzz` runs the full CLI and reads
+   `BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`, `BUZZ_AUTH_TAG` from the environment,
+   which the harness inherits (`acp.rs` `spawn` adds env, never clears it).
+4. **Team instructions are truncated today.** The live agent received 47 of
+   3,625 bytes of `BUZZ_ACP_TEAM_INSTRUCTIONS`: systemd stops an unquoted
+   `EnvironmentFile` value at the first newline. Quoted values may span lines.
+5. **Relay storage and retrieval.** Kind 9 keeps arbitrary tags verbatim.
+   Historical REQs are clamped to 1,000 candidate rows
+   (`buzz-db/src/store/event.rs` `DEFAULT_MAX_PAGE_LIMIT`); only `kinds`,
+   `authors`, `ids`, `since`, `until`, `limit`, `#h`, a single `#p`, `#d` on
+   NIP-33 kinds, and any `#e` are pushed into SQL before the clamp
+   (`req.rs` `filter_to_query_params`). Everything else, including `#t`, is
+   post-filtered. Multi-letter filter keys are silently dropped. Custom stored
+   kinds are rejected; ephemeral kinds pass but are never stored.
+6. **A stopped agent misses what arrived while it was down.** The first REQ
+   starts at a startup watermark (`lib.rs` `startup_watermark_with_floor`).
+   buzz-acp's heartbeat mode (`BUZZ_ACP_HEARTBEAT_INTERVAL`, default 0)
+   runs `buzz feed get --types mentions` and `needs_action` and acts on them.
+7. **Blocking inside a tool call kills the turn.** The idle timer
+   (`BUZZ_ACP_IDLE_TIMEOUT`, default 1500 s) resets only on agent stdout.
+8. **One MCP slot**, stdio only: the ACP `session/new` struct buzz-acp fills
+   has command, args, env and no URL (`acp.rs` `McpServer`).
+9. **Channels joined after startup are picked up live** via membership
+   notifications (`lib.rs` `KIND_MEMBER_ADDED_NOTIFICATION` handling).
+10. **Sessions.** `SessionScope` per thread under the `thread` policy.
+    Sessions leave the per-process map only on rotation by that session's own
+    turns or on process restart; a dormant session is never rotated.
+11. **In-flight mentions.** Default `BUZZ_ACP_MULTIPLE_EVENT_HANDLING=steer`:
+    a new mention is injected into the running session where the harness
+    supports native steering, else the turn is cancelled and re-prompted with
+    both messages. An owner-authored message whose content is exactly
+    `!cancel` and mentions the agent hard-stops its turn; `!shutdown` and
+    `!rotate` are the other reserved owner control words (`lib.rs`
+    `is_owner_control_command`).
+12. **Turn metrics.** buzz-acp publishes kind 44200 per turn: input, output,
+    total tokens, `costUsd` when the provider reports it, stop reason, session
+    and turn ids, no duration. NIP-44-encrypted to the owner and readable only
+    with the owner's key (`P_GATED_KINDS`). Every buzz-fleet machine stores
+    the owner's admin key in its community file.
+13. **Push notifications cannot be self-hosted.** `buzz-push-gateway` is iOS
+    and APNs only, hard-pins its delivery host to `push.buzz.xyz`
+    (`crates/buzz-push-gateway/src/config.rs`), compiles in one App Attest
+    profile, and the mobile app bakes the gateway URL at build time. No other
+    outbound channel (email, ntfy, Telegram) exists in Buzz; buzz-workflow has
+    a webhook action, gated by the non-functional WF-08 path.
+14. **Sibling trust.** Agents sharing the same NIP-OA owner may trigger each
+    other under `owner-only`.
+15. The signer links `buzz-ws-client` and `buzz-sdk`: `build_message`,
+    `build_create_channel`, `build_update_channel`, `build_delete_message`,
+    authenticated connections, `send_raw`, `next_event`.
 
 ## 3. Approaches considered
 
-**A. MCP delegation server (buzz-deploy 2026-09-03 spec shape).** Tools
-`post_message` / `wait_for_reply` / `read_channel` exposed via the single MCP
-slot. Rejected: blocking waits die to the idle timer (fact 5), it uses the only
-MCP slot (fact 6), and Pi support is unknown. Nothing it offers is unavailable
-through a shell CLI, which every supported harness already has.
+**A. MCP delegation server.** Rejected narrowly: a *blocking* wait dies to the
+idle timer (fact 7); the single stdio slot (fact 8) stays free for personas;
+Pi's support is unverified. MCP's asynchronous Tasks extension would work; the
+shell CLI is simply the one interface all four harnesses share. Any tool
+surface runs locally under each agent, inheriting its identity; only the
+conductor is central (ADR 0001).
 
-**B. Shell CLI + relay-as-bus + one always-on conductor. Recommended.**
-Agents hand off and report through two small `buzz-fleet` subcommands that
-publish ordinary kind 9 channel messages carrying fleet tags. The relay is the
-only shared state; every machine reads it. One long-lived "conductor" process
-on an always-on box watches those events, keeps deadlines, nudges, escalates,
-and fills pipeline gaps. Works for all four harnesses (all have shell), keeps
-the MCP slot free, needs no new network paths between machines, and survives
-laptop sleep because state is on the relay and timers are on the VPS.
+**B. Shell CLI + relay-as-ledger + designated conductor with standby. Chosen.**
 
-**C. buzz-workflow pipelines.** Blocked by WF-08 and requires an executor host
-outside buzz-fleet's control. Rejected for now; nothing here prevents adopting
-it later for the notify half if upstream fixes it.
+**C. Temporal behind Buzz.** The upgrade path if the conductor's recovery
+rules outgrow one process. The boundary in 5.4 (pure reducer + actions,
+adapters for relay and CLI) is what a Temporal workflow would replace.
+Tripwire: if acceptance gates 2 and 3 (section 8) still fail after two
+focused attempts, switch.
+
+**D. buzz-workflow.** Blocked by WF-08.
 
 ## 4. Architecture
 
 ```
- laptop (Implementer)          VPS (Reviewer + Conductor)        dedicated (Builder)
- ┌────────────────────┐        ┌─────────────────────────┐       ┌───────────────────┐
- │ buzz-acp → harness │        │ buzz-acp → harness      │       │ buzz-acp → harness│
- │   runs:            │        │   runs: buzz-fleet task │       │   runs: ...       │
- │   buzz-fleet task  │        │                         │       │                   │
- │   delegate/report  │        │ buzz-fleet conductor run│       │                   │
- └─────────┬──────────┘        └───────┬─────────▲───────┘       └─────────┬─────────┘
-           │ kind 9 + fleet tags        │         │ kind 9 (nudge/escalate/  │
-           ▼                            ▼         │  auto-delegate)          ▼
- ═══════════════════════════ Buzz relay, one shared channel ══════════════════════════
-           ▲                                                                ▲
-           │ buzz-fleet runs / tasks (read-only view, any machine)          │
-      owner's laptop                                            Buzz Desktop / mobile
+ laptop (Implementer)        VPS (Reviewer, Conductor, relay, ntfy)   dedicated (Builder, standby)
+ ┌────────────────────┐      ┌────────────────────────────────┐       ┌──────────────────────┐
+ │ buzz-acp → harness │      │ buzz-acp → harness             │       │ buzz-acp → harness   │
+ │  runs buzz-fleet   │      │ buzz-fleet conductor run       │       │ buzz-fleet conductor │
+ │  task delegate/ack │      │   reducer · outbox · timers    │       │   run --standby      │
+ │  /report           │      │   notifier → ntfy/Telegram/... │       │                      │
+ │ recycle timer      │      │ recycle timer                  │       │ recycle timer        │
+ └─────────┬──────────┘      └──────────┬──────────▲──────────┘       └──────────┬───────────┘
+           │ kind 9, p-tags recipient    │          │                               │
+           │ AND the retrieval key       ▼          │ heartbeats, actions           ▼
+ ════════════════════════ Buzz relay, fleet channel + project channels ═════════════════════════
+           ▲                                                                       ▲
+           │ buzz-fleet runs / tasks / TUI (complete paged reads)                  │
+      owner's laptop                                                 Desktop / mobile + !fleet cmds
 ```
 
-Three layers, in build order:
+Build order, each layer independently useful and testable:
 
-0. **Reply path fix** (prerequisite, tiny): put `buzz` on the unit PATH and
-   teach agents the fleet commands through team instructions.
-1. **Wire protocol + CLI + read-only views**: everything an agent or the owner
-   needs to delegate, report, and see state. Works without a conductor, just
-   with no timers.
-2. **Conductor**: deadlines, nudges, escalation, pipeline auto-advance, run
-   completion notices.
-3. **Pipelines**: a YAML file resolved into a self-contained run record.
-
-Each layer is independently useful and testable.
+0. Prerequisites: PATH, quoted env, instructions, workspaces, settings,
+   naming, versions, self-update.
+1. Recoverable task lifecycle: fleet record, protocol, CLI, complete reads,
+   views.
+2. Conductor: outbox, timers, delivery recovery, escalation, notifier,
+   heartbeat, standby failover, metrics, budgets, recycling.
+3. Pipelines: linear defaults, parallel groups, human steps, bounded rework,
+   deviations, retention and purge, TUI screen.
 
 ## 5. Components
 
-### 5.0 Prerequisite: agents can reply
+### 5.0 Prerequisites
 
-- `buzz_acp.ensure_buzz_acp_installed` also creates
-  `~/.local/share/buzz-fleet/bin/buzz` as a symlink to the installed Sprig
-  binary (idempotent; recreated if missing or dangling).
-- `systemd.TEMPLATE_UNIT` gains
-  `Environment=PATH=%h/.local/share/buzz-fleet/bin:/usr/local/bin:/usr/bin:/bin`.
-  Changing the template already triggers a rewrite + `daemon-reload` through
-  `ensure_template_unit_installed`; `ensure_runtime_ready` restarts units whose
-  template changed (same mechanism as the auth-tag backfill).
-- The `buzz-fleet` binary itself (installed at the same bin dir by `get.sh`)
-  is thereby also on the agents' PATH, which is what makes `buzz-fleet task
-  ...` callable from inside a harness.
-- **Fleet coordination instructions.** buzz-fleet appends a managed block to
-  every agent's `BUZZ_ACP_TEAM_INSTRUCTIONS` (bundled template
-  `src/buzz_fleet/orchestration/instructions.md`, delimited by
-  `<!-- buzz-fleet:coordination v1 -->` markers so it can be updated in place
-  without touching the operator's own text). It tells the agent, in under 40
-  lines: what a delegation message looks like, to run `buzz-fleet task report`
-  when it finishes delegated work, to use `buzz-fleet task delegate` instead
-  of a bare @-mention when it wants another agent to do something, that a
-  pipeline default is advice it may override if it says why, and to keep
-  channel replies short because the report carries the summary.
-  `ensure_runtime_ready` refreshes the block when the template hash changes.
+- **`buzz` on PATH.** `ensure_buzz_acp_installed` links
+  `~/.local/share/buzz-fleet/bin/buzz` to the installed binary; the unit
+  template gains `Environment=PATH=<that dir>:/usr/local/bin:/usr/bin:/bin`.
+  `ensure_template_unit_installed` returns whether the file changed and
+  `ensure_runtime_ready` restarts units when it did.
+- **Quoted env values.** `write_agent_files` double-quotes values containing a
+  newline, escaping `\` and `"`. Verified live from the process environment.
+- **Workspaces.** Each unit gets `WorkingDirectory=~/.local/share/buzz-fleet/work/<agent>/`.
+  Convention, taught by the instructions block: one shared clone per
+  repository under it, one `git worktree` per run named by run id. Private
+  repositories authenticate with per-machine SSH keys; `fleet init` and
+  `agent create` print the prerequisite and `fleet status` reports whether
+  `git ls-remote` succeeds for each repository named in open runs
+  (assumption to confirm at setup: the owner has not stated the auth method).
+- **Coordination instructions.** A managed block appended to every agent's
+  team instructions, delimited by `<!-- buzz-fleet:coordination v1 -->` /
+  `<!-- /buzz-fleet:coordination -->`, refreshed when the version changes. It
+  covers delegate, ack, report, the artifact rule (push first, hand off an
+  exact commit, name the commit you reviewed), the worktree rule, that the
+  recipient shares no session, that a pipeline default is advice to decline
+  with a reason, and that a cancelled task is abandoned immediately.
+- **Agent settings.** `Agent` gains `session_policy` (`thread` default,
+  `channel` opt-out), `max_turns_per_session` (default 40, rotates active
+  sessions only), `heartbeat_interval_seconds` (default 900).
+- **Unique names.** `agent create` queries the fleet channel and refuses a
+  display name already in use unless `--force`; `fleet status` lists
+  duplicates.
+- **Hostname.** The owner-signed managed-agent record buzz-fleet already
+  publishes gains `host`, shown in views and notices; never used for routing.
+- **Versions and self-update.** `fleet init` records tested versions in the
+  fleet record. `fleet status` warns on drift. `buzz-fleet self-update`
+  fetches the release the record names, verifies checksums, reinstalls, and
+  restarts agents; opt-in, never automatic.
 
-This layer alone makes today's plain mention chains work reliably for
-reply-and-wake, since `buzz-fleet task report` always p-tags the delegator.
+### 5.1 Wire protocol
 
-### 5.1 Wire protocol (kind 9 messages with fleet tags)
+Every orchestration event is a kind 9 channel message. Structure lives in
+tags and a JSON payload; content stays readable.
 
-Every orchestration event is an ordinary channel message so humans see it in
-Desktop/mobile and the relay stores it. Structure lives in tags; content stays
-readable.
-
-Common tags on every fleet event:
+**Tags on every fleet event:**
 
 | Tag | Purpose |
 |---|---|
-| `["h", <channel>]` | channel scope (required by relay) |
-| `["t", "fleet"]` | the one queryable marker; all fleet reads use `#t=["fleet"]` + `kinds=[9]` + `#h` |
-| `["t", "fleet:task:<task_id>"]` | per-task lookup |
-| `["t", "fleet:run:<run_id>"]` | per-run lookup (only for events belonging to a run) |
-| `["fleet", <json>]` | machine-readable payload (not filterable, which is fine; we always fetch by `#t` first) |
-| `["p", ...]` | recipients who must wake |
-| `["e", ...]` | NIP-10 thread markers; see "Threading" below |
+| `["h", <channel>]` | channel scope |
+| `["p", <retrieval key>]` | the pushed-down filter that selects exactly the fleet events (fact 5). The retrieval key is a keypair created at `fleet init` that **no process holds**; mentioning it wakes nothing. |
+| `["p", <recipient>]` | whoever must wake: assignee, rework target, requester, owner |
+| `["e", <root>, "", "root"|"reply"]` | NIP-10 thread markers |
+| `["t", "fleet"]`, `["t", "fleet:task:<id>"]`, `["t", "fleet:run:<id>"]` | labels for humans and local filtering only |
+| `["fleet", <json>]` | payload; `v: 1`; at most 8 KiB |
 
-Payload types (`"type"` field of the `fleet` tag JSON):
+**Identities and authorization.** The verified event author is the actor;
+payload `from` must equal it. Allowed authors per type are listed below. The
+conductor keys and retrieval key come from the owner-signed fleet record
+(5.9), never from display names. Anything not allowed becomes a note.
 
-- `delegate` — `{type, task, run?, step?, from, to, deadline, brief_sha}`.
-  Content: `@<To> ▶ task <id>` header, the brief, the deadline, and the exact
-  report command to run. Posted by the delegator (agent, owner, or conductor).
-- `report` — `{type, task, status: done|blocked|failed, next?: task_id|"none"}`.
-  Content: `@<From> ✅|⛔|❌ task <id>: <summary>`. Posted by the assignee,
-  p-tags the delegator, replies in the task thread.
-- `run` — `{type, run, pipeline, steps:[{role, agent, pubkey, timeout, on_fail, fallback?}], brief}`.
-  Posted by whoever starts the run (usually the owner from any machine). Self-
-  contained: the conductor needs no local copy of the pipeline YAML.
-- `nudge`, `escalate`, `run-done`, `run-failed`, `cancel` — posted by the
-  conductor (or the owner for `cancel`). Human-readable content, p-tags the
-  relevant party (assignee for nudge, owner for escalate/run-done/run-failed).
+**Ids.** `task`, `run`, `attempt`, and `cmd` are UUIDv4 or deterministic
+strings; views show 8-character prefixes; lookups accept a unique prefix.
 
-Identifiers: `task_id` is 6 random hex chars; `run_id` is `<pipeline>-<4 hex>`.
+**Payload types:**
 
-**Threading.** One thread per run: the `run` event is the thread root and
-every `delegate`, `report`, `nudge`, and `escalate` for that run is a reply in
-it. An ad-hoc `delegate` replies in the thread the delegator is currently in
-when `--thread <root>` is given (the root id appears on the `Thread root:`
-line of the agent's prompt), otherwise it starts a new thread; its `report`
-always replies in the same thread. Under the thread session policy (5.8) this
-means an agent woken later in the same run, for rework or a final notice,
-wakes in the session that already holds its memory of that run, and a
-delegator gets the report back in the session it delegated from. Separate
-threads per task would start every wake-up cold. Waking is still driven by
-`p` tags (fact 1); threads only carry context.
+- `delegate` — author: any fleet member (agent or owner) or an active
+  conductor. `{v, type, task, attempt, run?, step?, group?, parent_task?,
+  required?, from, to, deadline, rework_target?, artifact?, acceptance}`.
+  `artifact` = `{repo, commit, branch?, base?}`; `commit` is required when
+  `repo` is given. The CLI refuses a dirty or unpushed checkout.
+- `ack` — author: assignee of `attempt`. `{task, attempt}`.
+- `report` — author: assignee of `attempt`. `{task, attempt, status:
+  done|blocked|failed, next: "<task id>"|"none"|"default", input_commit?,
+  output?: {commit, branch?}, evidence?: [string]}`. `input_commit` must equal
+  the delegation's commit when one was given, else the report is a
+  `mismatch` and a re-report is requested.
+- `cancel-task` — author: requester or owner. `cancel-run` — author: owner.
+  Result-acceptance transitions; the conductor also posts a `cancel-notice`
+  mentioning the assignee, which reaches a running turn as a steering message
+  (fact 11). Hard stop remains the owner's `!cancel @Agent`.
+- `run` — author: owner or any fleet member. `{run, pipeline, brief, steps:
+  [...], limits, retention?, budget?, notify_on_done}`; self-contained.
+- `owner-command` — author: owner, produced by the conductor from a chat
+  line in a run thread that starts with `!fleet` (5.3). The original chat line
+  is not state; the echoed event is.
+- Conductor-only (author must be an active conductor key): `redeliver`,
+  `nudge`, `escalate`, `advance` with its `delegate`, `fallback`,
+  `cancel-notice`, `run-paused`, `run-done`, `run-failed`, `budget-paused`,
+  `heartbeat` (`{host, role: primary|standby, last_reconciled_at}`),
+  `takeover`, `yield`. Each carries a deterministic `cmd`.
 
-Why not a separate state store: the relay already is one, it is reachable from
-all five machines, it is durable, and it is what the owner is already looking
-at. SQLite appears only as a private cache inside the conductor.
+**Threading.** One thread per run rooted at the `run` event. An ad-hoc
+`delegate` replies in the thread named by `--thread <root>` or starts one;
+its `ack` and `report` reply in the same thread. Thread memory is an
+optimisation; every command works from persisted task data.
 
-### 5.2 Agent- and owner-facing CLI (Python, in `buzz-fleet`)
+**Deletions.** `run purge` publishes owner-signed Buzz delete events for every
+message in the run thread (`build_delete_message`, kind 9005). Readers and the
+conductor also fetch kind 9005 and kind 5 by `authors=[owner]` in each
+channel, and drop deleted events before reducing, so a fresh read and a
+running conductor agree.
 
-New module `src/buzz_fleet/orchestration/` with a Typer group `task`, plus
-`runs` and `run`.
+**Plain chat is not state**, with one exception: owner chat lines starting
+with `!fleet` in a run thread, which the conductor converts into
+`owner-command` events.
 
-Identity: `buzz-fleet task ...` reads `BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`,
-`BUZZ_AUTH_TAG` from the environment (inherited from the unit through
-buzz-acp). When run by the owner on a machine with local buzz-fleet state and
-no such env, it uses the community's admin key from local state. Name
-resolution goes through the signer (5.3).
+### 5.2 Retrieval
+
+Pushed-down filters only (fact 5):
+
+- All fleet events in a channel: `{"kinds":[9], "#h":[channel],
+  "#p":[retrieval_key], "until": T, "limit": 1000}`, paged by `until` = the
+  smallest `created_at` of the previous page, de-duplicated by id, until a
+  page adds nothing; ties at the boundary are re-fetched, not lost.
+- One run or task thread: `{"kinds":[9], "#h":[channel], "#e":[root]}` plus
+  `{"ids":[root]}`, paged the same way.
+- Deletions: `{"kinds":[9005, 5], "#h":[channel], "authors":[owner]}`, paged.
+- Metrics (owner key, read-only): `{"kinds":[44200], "#p":[owner],
+  "authors":[fleet agents]}` since the run's start, decrypted locally.
+
+A reconciling read starts from `checkpoint − 15 min`; a cold read fetches
+everything. CLI views, the TUI, and the conductor share the reader and the
+reducer.
+
+### 5.3 Agent- and owner-facing CLI (Python)
+
+Identity: inside an agent, from the inherited environment; for the owner,
+the community's admin key. Retrieval key and conductor keys from the cached
+fleet record.
 
 ```
-buzz-fleet task delegate --to <Name|pubkey> --brief <text|-> [--wait 45m]
-                         [--run <run_id>] [--thread <root_event_id>] [--channel <uuid>]
-    → publishes `delegate`; prints task id and the event id.
-    With --run, looks up the run record and appends the pipeline default for the
-    recipient's step ("Default when done: delegate to @Builder (step 3)").
-    --channel defaults to the run's channel when --run is given, else to
-    BUZZ_FLEET_CHANNEL (see 5.9); an explicit value overrides both.
-    Thread: with --run, the run's root event; with --thread, that root;
-    otherwise a new thread rooted at this delegate event.
-
+buzz-fleet task delegate --to <Name|pubkey> --brief <text|-> [--wait 60m]
+        [--repo <url> --commit <sha> [--branch b] [--base sha]] [--accept "<criterion>"]...
+        [--run <id>] [--thread <root>] [--parent <task>] [--optional] [--channel <uuid>]
+    Mints task and attempt ids before publishing; on an ambiguous publish it
+    re-reads by id and resends the same signed event, never a new id.
+    Refuses when the requester already has 5 open ad-hoc tasks or the parent
+    chain is 4 deep (fleet-record settings). Refuses a --channel that differs
+    from the run's channel.
+buzz-fleet task ack --task <id>
 buzz-fleet task report --task <id> --status done|blocked|failed --summary <text|->
-                       [--next <task_id>|none]
-    → publishes `report` p-tagging the delegator, in the task thread.
-    --next records that the reporter already delegated onward (so the conductor
-    does not auto-advance); `none` explicitly declines the pipeline default.
-
-buzz-fleet task show <id>      → thread + status, from the relay.
-buzz-fleet tasks [--open|--stuck|--mine]   → table, from the relay.
-buzz-fleet runs [--open]       → table of runs with current step and age.
-buzz-fleet run <pipeline> --brief <text|-> [--channel <uuid>]
-    → resolves the YAML (5.5), publishes `run`, then `delegate` for step 1.
-buzz-fleet run cancel <run_id> → publishes `cancel`.
-buzz-fleet run purge <run_id>  → owner only; deletes the run thread (see 5.8 lifecycle).
+        [--next <task id>|none|default] [--input-commit sha] [--output-commit sha] [--evidence "<line>"]...
+buzz-fleet task cancel <id> --reason <text>
+buzz-fleet task show <id> | buzz-fleet tasks [--open|--stuck|--mine|--unacked]
+buzz-fleet runs [--open] [--metrics] | buzz-fleet run <pipeline> --brief <text|-> [--channel]
+buzz-fleet run cancel <id> | run resume <id> | run purge <id>
+buzz-fleet fleet init [--channel <uuid>] | fleet status | self-update
+buzz-fleet conductor install [--standby] | conductor move
 ```
 
-The read commands are pure: fetch fleet events (signer `query`, all
-accessible channels), feed them to the reducer, print. The same reducer runs in the
-conductor, so what the owner sees on a laptop is exactly the conductor's view.
+**Owner commands from a phone**, typed in the run thread by the owner:
+`!fleet resume`, `!fleet cancel [reason]`, `!fleet fallback <Name>`,
+`!fleet ack`, `!fleet done <summary>`, `!fleet failed <summary>`,
+`!fleet blocked <question>`. The prefix avoids buzz-acp's reserved `!cancel`,
+`!shutdown`, `!rotate`. The conductor validates the author, echoes an
+`owner-command` event, and applies it; unknown commands get a one-line
+reply. `!fleet ack/done/failed/blocked` act on the task assigned to the owner
+in that thread (5.5 human steps).
 
-`orchestration/reducer.py`: a pure function `reduce(events) -> State` with
-`State = {runs: {run_id: Run}, tasks: {task_id: Task}}`. Task status is
-derived: `open` (delegate seen, no report), `nudged`, `escalated`, `done`,
-`blocked`, `failed`, `cancelled`, plus `answered-unstructured` when the
-assignee replied in the task thread p-tagging the delegator without a
-`report` payload. Runs track `current_step` and the ordered list of tasks.
+The reducer is pure: `reduce(events, record) -> State`. Tasks carry
+`requester`, `assignee`, `attempt`, `parent_task`, `required`, `run`,
+`step`, `group`, `rework_target`, `artifact`, `acceptance`, `deadline`,
+`acked_at`, `status`, `report`, `notes`. Statuses: `open`, `acked`, `done`,
+`blocked`, `failed`, `cancelled`, `superseded`; derived flags `late`,
+`nudged`, `escalated`, `unacked`. Runs carry `current_step`,
+`attempts_per_step`, `rework_count`, `task_count`, `status` (`running`,
+`paused`, `budget-paused`, `done`, `failed`, `cancelled`), and metrics.
+Terminal states are final; later contradicting events become notes.
 
-### 5.3 Signer additions (Rust, `signer/`)
+### 5.4 Conductor (Python, long-lived, primary plus standby)
 
-Seven subcommands, all following the existing `run_publish` / auth-tag
-conventions, JSON on stdout (`create-channel` and `find-channel` are described
-in 5.9, `delete-message` in 5.8):
+**Keys and fencing.** The fleet record lists the retrieval key, the primary
+conductor key, and the standby conductor key. Each conductor secret exists
+only on its own host (`~/.config/buzz-fleet/conductor/<community>.env`,
+`flock`ed while running). Agents' events mention the retrieval key, so a
+takeover changes nothing for agents.
 
-- `post-message --relay --nsec --auth-tag? --channel --content --mention <hex>...
-  --reply-to <id>? --root <id>? --tag <name>=<value>...` — wraps
-  `buzz_sdk::build_message` and appends extra tags (`t` and `fleet`). Returns
-  the event id.
-- `query --relay --nsec --auth-tag? --filter <json>` — one-shot REQ, prints
-  each event as one JSON line, exits at EOSE.
-- `subscribe --relay --nsec --auth-tag? --filter <json>` — like `query` but
-  stays open after EOSE (prints a `{"eose":true}` line first) and streams live
-  events until stdin closes or the socket drops (non-zero exit so the
-  supervisor reconnects with an updated `since`).
-- `channel-members --relay --nsec --auth-tag? --channel` — kind 39002
-  membership + kind 0 profiles → `[{pubkey, display_name}]`, the same
-  resolution `buzz messages send` uses for `@Name`.
+**Failover.** Both conductors run the same code. The primary publishes a
+`heartbeat` every 5 minutes. The standby reduces the same events but takes
+no action while it sees a primary heartbeat younger than 10 minutes. After
+10 minutes of silence it publishes `takeover` and becomes active. When a
+primary heartbeat reappears the standby publishes `yield` and goes passive;
+the primary, on start, waits one heartbeat interval and yields to an active
+standby's `takeover` newer than its own last heartbeat, then reclaims after
+its next two heartbeats. Overlap actions are harmless: task, attempt, and
+`cmd` ids are deterministic and the reducer ignores repeats. `conductor move`
+rotates keys when the owner wants a different pair of hosts.
 
-Everything Nostr-specific stays in Rust where the working NIP-42/NIP-OA code
-already lives; Python never signs or speaks WebSocket.
+**State.** SQLite per conductor: event cache, reduced state, checkpoint, and
+the **outbox**, which is authoritative for pending publications: insert the
+signed event with its `cmd` before sending, mark `sent` on relay OK,
+reconcile on restart by reading the relay for that `cmd`. Losing the
+database costs at most one repeated in-flight action.
 
-### 5.4 Conductor (Python, long-lived, one instance per channel)
+**Command ids.** `redeliver:<task>:<attempt>:<n>`, `nudge:<task>:<attempt>`,
+`escalate:<task|run>:<reason>`, `advance:<run>:<step>:<attempt>`,
+`fallback:<task>:<attempt>`, `cancel-notice:<task>:<attempt>`,
+`run-done:<run>`, `run-failed:<run>`, `run-paused:<run>:<step>`,
+`budget-paused:<run>`, `purge:<run>`.
 
-`buzz-fleet conductor install` on the chosen always-on box:
+**Loop.** Start: take the lock, reconcile outbox, paged read, reduce, then
+subscribe per joined channel (`kinds [9, 9005, 5]`, `#h`, and `#p`
+retrieval key or `authors` owner) and reduce live events. Tick every 30 s;
+timer actions gated until catch-up completes. Heartbeat every 5 minutes.
+Views mark a conductor stale after 15 minutes and show which one is active.
 
-- creates a keypair, computes its NIP-OA auth tag, publishes a kind 0 profile
-  ("Fleet Conductor") and joins the fleet channel, reusing the `AgentManager`
-  visibility helpers; records it in local state as a `Conductor` model (not an
-  `Agent`: it has no harness);
-- writes `~/.config/buzz-fleet/conductor.env` and installs a
-  `buzz-fleet-conductor.service` `--user` unit whose `ExecStart` is
-  `buzz-fleet conductor run` (`Restart=always`).
+**Notifier.** Every `escalate`, `run-paused`, `budget-paused`, `run-done`,
+`run-failed`, `takeover`, and `yield` is also sent through the notifier:
+ntfy (primary, hosted on the VPS via buzz-deploy), Telegram bot, SMTP email,
+generic webhook. One interface, per-target config in the conductor env,
+retries with backoff, and a delivery log in SQLite shown by `fleet status`.
+The notifier is the path that works when the relay or the app is what broke.
 
-`buzz-fleet conductor run`:
+**Metrics and budgets.** The conductor reads kind 44200 with the locally
+stored owner key, read-only (ADR 0002), joins turns to tasks by agent and
+time window, and records per step and per run: elapsed (delegate to report),
+time to ack, turns, tokens, cost where reported. `budget` in a pipeline or
+run (`usd` or `turns`) pauses the run with `budget-paused` and notifies the
+owner when exceeded; a fleet-wide daily budget does the same for ad-hoc
+tasks by refusing new delegations from the CLI.
 
-1. Replays: `query` fleet events across all its channels since (last checkpoint − 1 h),
-   reduces into state, persists the checkpoint in
-   `~/.local/share/buzz-fleet/conductor.sqlite` (cache only; deleting
-   it is safe).
-2. Streams: `subscribe` from the checkpoint; each event goes through the
-   reducer. On subprocess exit, backs off and reconnects with `since = last
-   event time`. Duplicate events are idempotent by event id.
-3. Ticks every 30 s and applies the rules below. Every action it takes is itself
-   a fleet event on the relay, so it is visible, replayable, and never taken
-   twice (the reducer sees the conductor's own `nudge`/`escalate` events).
-
-Rules:
+**Rules** (times from event timestamps):
 
 | Condition | Action |
 |---|---|
-| Task open past `deadline` and no `nudge` yet | post `nudge` (p-tags assignee): "task <id> is past its deadline; report with …" |
-| Task still open `grace` (default 15 min) after the nudge | if the run step has `fallback`: post a new `delegate` to the fallback agent and `cancel` the old task; else post `escalate` (p-tags owner) |
-| Task `answered-unstructured` for 5 min | post one `nudge`: "please close task <id> with `buzz-fleet task report`" (never repeated) |
-| Report `done` on run step k, no `--next`, and no `delegate` with `--run` from the reporter within 2 min | conductor posts `delegate` for step k+1 (brief = run brief + previous step summary), assigning the pipeline agent |
-| Report `done` with `--next <task>` | record that task as step k+1; no action |
-| Report `done` with `--next none`, or a `delegate --run` to an agent not in the pipeline | record as a deviation; the run continues from that task; when *that* task is done and has no onward delegation, the pipeline default for the *original* step k+1 applies |
-| Report `blocked` or `failed` on step k (k > 1) | open a rework task for the delegator (the step k−1 agent) with the failure summary and the step's `on_fail` timeout; the reporter's p-tag already woke them. When the rework task is reported `done`, the conductor re-delegates step k unless the delegator already did |
-| Report `blocked`/`failed` on step 1, or a rework task itself reported `failed` | post `run-failed` (p-tags owner) |
-| Last step reported `done` | post `run-done` (p-tags owner and the step-1 agent) with all step summaries |
-| `cancel` seen | mark run and open tasks cancelled; no further actions for them |
+| `open`, no `ack`, ack window passed (min(15 min, deadline/4)) | `redeliver` n+1 with backoff 15, 30, 60 min then hourly; after 6, `escalate(undelivered)`, or `fallback` if configured. Delivery recovery is separate from lateness. The agent side recovers through its heartbeat feed check (fact 6). |
+| live and past `deadline`, no nudge this attempt | one `nudge` |
+| still unreported `grace` (15 min) after the nudge | `fallback` (new attempt; old attempt `superseded`, its late report becomes a note) else `escalate` |
+| `report` with `mismatch` | one `nudge` asking for a re-report; counts as rework |
+| `report done`, `next = default`, step k not last | `advance` immediately: delegate step k+1 (or every member of a parallel group), requester = conductor, `rework_target` = step k assignee, artifact = report output commit |
+| `report done`, `next = <task>` | that task is step k+1; no action |
+| `report done`, `next = none`, step not last | `run-paused`; owner resumes with `!fleet resume` or the CLI |
+| parallel group: all `required` members `done` | advance past the group; optional members still open are left to finish and tracked |
+| parallel group: a required member `failed` | rework to the group's `rework_target` (the step before the group); on `done`, re-delegate the whole group as new attempts; other members' late reports become notes |
+| last step `done`, no required child live | `run-done`, notify `notify_on_done`, include metrics |
+| `report failed` on step k > 1 | rework task for `rework_target` with the failure summary and the step's `timeout`; `rework_count += 1`; when `done`, re-delegate step k |
+| `failed` on step 1, rework `failed`, `rework_count > max_rework` (3), `task_count > max_tasks` (20), or `run_deadline` passed (2 × sum of timeouts) | `run-failed` |
+| `report blocked` | route the question to the requester if an agent, else the owner; the run pauses on that task |
+| budget exceeded | `budget-paused` |
+| `cancel-task` / `cancel-run` | mark cancelled, post `cancel-notice` to live assignees |
+| retention elapsed for a closed run | `purge` (owner-key delete events, ADR 0002 scope) |
+| owner `!fleet ...` chat line in a run thread | validate, echo `owner-command`, apply |
 
-Ad-hoc tasks (no run) get only the deadline rules. Nothing else is
-auto-advanced, because there is no pipeline to advance.
+Ad-hoc tasks get delivery recovery, lateness, escalation, cancel notices, and
+the daily budget.
 
-The conductor never edits or deletes anything and never posts as another
-identity. If it is down, agents keep working through plain mentions; only
-timers and auto-advance pause, and they catch up on replay.
+**Recycling.** On every machine, buzz-fleet installs a `--user` timer
+(`buzz-fleet agent recycle`, hourly) that restarts an agent unit when that
+agent has no live task, no turn in the last 6 hours (from metrics, owner key
+read-only), and is not the assignee of any open run thread. This is the only
+cleanup buzz-acp's session model allows (fact 10).
 
 ### 5.5 Pipeline configuration
 
-`~/.config/buzz-fleet/pipelines/<name>.yaml` on whichever machine the owner
-runs `buzz-fleet run` from (a git repo synced across laptops is fine; the run
-record on the relay is self-contained, so nothing else needs the file).
-
 ```yaml
 name: impl-review-build
-channel: 6f1c…            # optional; defaults to the fleet channel (5.9)
+channel: null                 # defaults to the fleet channel
 steps:
   - role: implement
-    agent: Implementer     # display name resolved via channel-members at run time
+    agent: Implementer
     timeout: 90m
-  - role: review
-    agent: Reviewer
-    timeout: 45m
-    on_fail: back          # default; the only value in v1 — send findings to the previous step
-    fallback: Reviewer-2   # optional
+  - parallel:                 # a step group; the run continues when all required members are done
+      - role: review
+        agent: Reviewer
+        timeout: 45m
+        fallback: Reviewer-2
+      - role: security-review
+        agent: SecReviewer
+        timeout: 45m
+        required: false
+  - role: owner-gate          # a human step: the owner acts with !fleet ack/done/failed from a phone
+    agent: owner
+    timeout: 12h
   - role: build
     agent: Builder
     timeout: 60m
-notify_on_done: [owner, implement]   # who gets p-tagged in run-done
+limits: {max_rework: 3, max_tasks: 20, run_deadline: 8h}
+budget: {usd: 15}            # or {turns: 60}
+retention: keep              # or 30d
+notify_on_done: [owner, implement]
 ```
 
-Resolution fails fast on an unknown or ambiguous name. Agents are resolved once
-at run start; the run record stores pubkeys.
+Names resolve once at run start; `owner` resolves to the owner pubkey. Step
+1's artifact comes from `buzz-fleet run --repo/--commit` or the current
+checkout. Conditional branches are out of scope; agents deviate instead.
 
 ### 5.6 What the owner sees
 
-- Live: the channel in Buzz Desktop or mobile. Each run is one thread whose
-  root is the run event; delegations, reports, nudges, and the final notice
-  are its replies. A finished run is a collapsed thread, so nothing needs
-  archiving.
-- On demand from any machine: `buzz-fleet runs`, `buzz-fleet tasks --stuck`.
-- Pushed: an @-mention only on `escalate`, `run-done`, `run-failed`.
+- Live: the channel in Desktop or mobile; each run one thread.
+- Phone: notifier messages for every escalation, pause, done, failed, and
+  failover, and `!fleet` commands in the thread.
+- Any machine: `buzz-fleet runs --metrics`, `tasks --stuck`, `tasks
+  --unacked`, `fleet status` (record, conductors and which is active,
+  notifier delivery log, version drift, repo access), and a **Runs screen in
+  the TUI** with the same data.
 
 ### 5.7 Deployment
 
-- Layers 0–1 ship in the normal `buzz-fleet` release to all five machines
-  (`get.sh` already installs `buzz-fleet` and the signer; nothing new to
-  install).
-- The conductor is installed on exactly one always-on box (VPS or dedicated
-  server) with one command. Running two conductors for the same channel would
-  double-post; documented, and `conductor install` refuses if a member of the
-  fleet channel already has the kind 0 display name `Fleet Conductor`.
+- All layers ship in the normal `buzz-fleet` release to all five machines;
+  `self-update` brings a machine level with the record.
+- `fleet init` runs once on the VPS: creates the channel, the retrieval key,
+  the primary conductor key, the fleet record, and installs
+  `buzz-fleet-conductor@<community>`. `conductor install --standby` on the
+  dedicated server creates the standby key and registers it in the record.
+- ntfy is added to buzz-deploy's Compose next to the relay; its URL and token
+  go into the conductor env.
+- Every machine's `ensure_runtime_ready` installs the recycle timer.
 
-### 5.8 Sessions and parallelism (shared task sessions, parallel use)
+### 5.8 Sessions and lifecycle
 
-buzz-acp keys every provider session, queue partition, and in-flight turn on
-a `SessionScope` (`crates/buzz-acp/src/scope.rs`). Two policies exist:
-`channel` (default: the whole channel is one session) and `thread` (each
-canonical thread is an isolated session; DMs are their own conversation
-session). `BUZZ_ACP_AGENTS` sets how many agent subprocesses serve those
-sessions concurrently.
+- `thread` session policy by default; `channel` per-agent opt-out.
+- Parallelism guidance: 2 on laptops, 3–4 on servers; each slot costs API
+  usage.
+- Reports are self-contained.
+- Dormant sessions are recycled by the timer in 5.4; the turn cap rotates
+  active sessions only.
+- Retention: `keep` by default; a pipeline or the fleet record may set N
+  days, after which the conductor purges closed runs; `run purge` purges on
+  demand. Deletions are consumed by every reader (5.1).
 
-Because every run is one thread and every ad-hoc delegation lives in a
-thread (5.1), the `thread` policy makes a run a shared, memory-keeping session
-for the agents working it, while the owner can DM the same agent or open
-another thread at the same time with separate context.
-With parallelism ≥ 2 those sessions also run concurrently instead of queueing.
+### 5.9 The fleet channel and the fleet record
 
-Design decisions:
-
-- buzz-fleet writes `BUZZ_ACP_SESSION_POLICY=thread` for every managed agent by
-  default. `Agent` gains `session_policy: Literal["thread", "channel"] | None`
-  (None = thread) exposed in the CLI and TUI form, so an agent that should
-  keep one channel-wide memory can opt out.
-- Recommended `parallelism`: 2 on laptops, 3–4 on the VPS and dedicated server.
-  The README documents the trade-off (each slot is a live harness process with
-  its own API usage).
-- The fleet coordination instructions (5.0) tell agents that each thread is
-  its own session, so a report must carry the full summary rather than assume
-  the recipient shares context.
-
-Lifecycle, verified against source: nothing disposes of a thread or a session
-when a run ends.
-
-- Relay side: a thread is only messages linked by reply tags. There is no
-  close or archive event for threads (`buzz-core/src/kind.rs` has a
-  relay-synthesized thread summary overlay, nothing stored). Run threads are
-  therefore kept forever and serve as the audit log; the conductor's
-  `run-done` / `run-failed` / `cancel` event is what marks a run closed in the
-  reducer. Deletion is a deliberate owner action, never automatic and never a
-  per-run question: the `run-done` notice ends with the exact command
-  `buzz-fleet run purge <run_id>`, which deletes every message in the run
-  thread as the owner (Buzz-native kind 9005 delete with moderation metadata,
-  `buzz_sdk::build_delete_message_with_options`, via a new signer
-  `delete-message` subcommand) and posts nothing afterwards. The reducer
-  drops a run whose root has been deleted. A retention policy in pipeline
-  files (auto-purge closed runs after N days) is deferred until real usage
-  shows it is wanted.
-- Agent side: buzz-acp keeps a `SessionScope → session_id` map per agent
-  process (`crates/buzz-acp/src/pool.rs` `SessionState`). Entries leave it
-  only on rotation (max tokens, or `BUZZ_ACP_MAX_TURNS_PER_SESSION` reached)
-  or process restart; there is no idle eviction. buzz-fleet does not set the
-  cap today. Decision: `Agent` gains `max_turns_per_session: int | None`
-  (default 40, written as `BUZZ_ACP_MAX_TURNS_PER_SESSION`) so dormant run
-  sessions rotate out instead of accumulating in the harness process. No
-  scheduled restarts in v1; if growth still matters, a nightly unit restart
-  is a one-line follow-up.
-- The thread session policy is marked in source as shipped dark for
-  canarying with a rollback to `channel`. It works in the current build but is
-  the newer path; the per-agent opt-out above is the rollback.
-
-### 5.9 The fleet channel
-
-One dedicated channel per community carries all orchestration traffic by
-default. Rationale: the relay rejects a mention of a non-member, so a channel
-every managed agent has joined is what makes "delegate to any fleet agent"
-always valid; it keeps nudges and escalations out of human project channels;
-and it lets buzz-fleet hand agents their default channel without any prompt
-parsing.
-
-Lifecycle (create once, discover everywhere, never auto-create):
-
-- `buzz-fleet fleet init [--channel <uuid>]`, run once on any machine. Without
-  `--channel` it creates a channel named `fleet` (owner key, via a new signer
-  `create-channel` subcommand wrapping `buzz_sdk::build_create_channel`). With
-  `--channel` it adopts an existing one. Either way it saves
-  `Community.fleet_channel_id` locally. It refuses to create if a channel named
-  `fleet` already exists on the relay, to prevent duplicates across machines.
-- Every other machine discovers it: `ensure_runtime_ready` (already called on
-  every list/create/update/dashboard refresh) looks up the channel named
-  `fleet` through a new signer `find-channel --name` when
-  `fleet_channel_id` is unset, and persists it. No manual step per machine.
-- Every managed agent auto-joins it: `_sync_visibility` treats the fleet
-  channel as an implicit member of `channel_ids` (shown in the TUI as
-  "fleet (auto)"). Because buzz-acp discovers memberships only at startup
-  (fact 9), `ensure_runtime_ready` restarts a running unit once after joining
-  it to a channel it was not a member of at start. The same applies to
-  joining an agent to a project channel: one restart per channel, never per
-  run. The conductor joins on install. The owner is a member
-  because the owner created it, or must be for an adopted channel (validated
-  at init).
-- buzz-fleet writes `BUZZ_FLEET_CHANNEL=<uuid>` into every agent env file.
-  Because the harness inherits buzz-acp's environment (fact 3),
-  `buzz-fleet task delegate` defaults `--channel` to it. Precedence: explicit
-  `--channel` > the run's channel when `--run` is given > `BUZZ_FLEET_CHANNEL`.
-  This resolves risk 10.3.
-
-Scope of the conductor: it subscribes without an `h` filter; the relay scopes
-such a REQ to every channel the subscriber can access
-(`crates/buzz-relay/src/handlers/req.rs`, "community-wide channel scope"), so
-one conductor covers the fleet channel plus any project channel it is joined
-to. `buzz-fleet run --channel <project channel>` validates at start that the
-conductor and every step agent are members of that channel.
-
-`conductor install` therefore no longer takes `--channel`; the unit is
-`buzz-fleet-conductor.service` (one per machine, one per community). To add a
-project channel to its scope, join the conductor to it with
-`buzz-fleet conductor join <uuid>`.
+- `fleet init [--channel]` creates or adopts the channel and writes the
+  record into its owner-signed metadata `about`: a readable first line, then
+  JSON `{"buzz-fleet": 1, "retrieval_key", "conductors": {"primary": {pubkey,
+  host}, "standby": {pubkey, host}?}, "limits": {...}, "budget": {...},
+  "retention", "versions", "created_at"}`. Discovery is by that marker.
+- Every machine discovers and caches it in `ensure_runtime_ready`.
+- Every managed agent auto-joins the fleet channel; the retrieval key and
+  both conductor keys are members; no restarts needed (fact 9).
+- Agents get `BUZZ_FLEET_CHANNEL` and `BUZZ_FLEET_RETRIEVAL_KEY` in their env.
+- Project channels: `run --channel` validates membership of every step agent,
+  the retrieval key, and both conductors; the conductor subscribes per
+  channel with explicit `#h`.
 
 ## 6. Walkthroughs
 
-**Pipeline run.** Owner on a laptop: `buzz-fleet run impl-review-build --brief
-"Add CSV export to reports"`. buzz-fleet resolves three names, publishes
-`run`, publishes `delegate` (task a1b2c3, step 1) mentioning Implementer.
-Implementer wakes, works, runs `buzz-fleet task delegate --to Reviewer --run
-impl-review-build-9f3e --brief "…"` (the CLI appends "default when done:
-delegate to @Builder"), then `buzz-fleet task report --task a1b2c3 --status
-done --summary "…" --next d4e5f6`. Reviewer wakes, finds a bug, runs `task
-report --task d4e5f6 --status failed --summary "…"`. That p-tags Implementer,
-who wakes in the same run thread, and therefore in the session that built the
-feature; the conductor opens a rework task with the failure text. Implementer
-fixes, reports `done`; the conductor re-delegates review. Reviewer passes,
-reports `done` with no `--next`; two minutes later the conductor delegates
-step 3 to Builder. Builder reports `done`; conductor posts `run-done`
-mentioning the owner and Implementer.
+**Pipeline with review, owner gate, and build.** Owner starts the run from a
+pushed commit. Implementer acks, works in a worktree, pushes, reports `done`
+with its output commit. The conductor advances the parallel group: Reviewer
+and SecReviewer get the commit. Reviewer reports `failed` with findings;
+rework goes to Implementer, who fixes and reports; the group is re-delegated.
+Both pass; the owner gate task is delegated to the owner, who gets an ntfy
+notification, reads the thread on the phone, and types `!fleet done looks
+good`. The conductor advances to Builder, who reports `done` with evidence;
+`run-done` posts the summary with elapsed time, turns, and cost, and ntfy
+delivers it.
 
-**Agentic delegation.** Any agent, mid-task, runs `buzz-fleet task delegate
---to Builder --brief "…" --wait 30m` because it decided it needs a build. No
-run, no pipeline. Same deadline/nudge/escalate handling. The reply wakes it
-because `report` p-tags it.
+**Stopped builder, dead primary.** Builder's machine is off; redelivery at
+15, 30, 60 minutes. Meanwhile the VPS reboots; the standby on the dedicated
+server takes over after 10 minutes and continues the redelivery schedule
+under the same `cmd` ids. Builder's machine boots, its heartbeat feed check
+surfaces the mention, it acks and works. The VPS returns, the primary sees
+the `takeover`, waits, then reclaims; the standby yields.
 
-**Deviation.** Reviewer, instead of returning to Implementer, delegates to a
-different agent with `--run`. Recorded as a deviation; the run continues from
-there; the pipeline default resumes when that task completes without an onward
-hop.
-
-**Stall.** Builder's machine is off. Deadline passes: nudge. Grace passes: no
-fallback configured, so `escalate` mentions the owner with run id, task id,
-and age. The owner starts the machine or cancels the run.
+**Lost acknowledgement and cancel.** `task delegate` times out after send;
+the CLI re-reads by task id, finds the event, and returns success. Later the
+owner types `!fleet cancel` in the thread; the conductor echoes the command,
+cancels the run, posts cancel notices, and Builder's running turn receives it
+as a steering message and stops.
 
 ## 7. Error handling and edge cases
 
-- **Relay down or auth failure** in `task delegate`/`report`: the CLI exits
-  non-zero with a one-line JSON error so the agent can retry or say so in
-  chat; it never fakes success.
-- **Name resolution ambiguity** (two agents named "Reviewer"): fail with both
-  pubkeys listed; the caller may pass a pubkey instead.
-- **Reporter is not the assignee**: the reducer ignores `report` events whose
-  author is neither the assignee nor the delegator (delegator may cancel via
-  `cancel`, not report). Owner can always cancel.
-- **Duplicate reports**: first wins; later ones are recorded as notes.
-- **Conductor restart mid-grace**: state replays from the relay; timers resume
-  from event timestamps, not wall-clock since boot.
-- **Conductor's own events failing to publish**: logged, retried next tick;
-  since actions are derived from state, nothing is lost.
-- **Clock skew**: deadlines are absolute unix seconds computed by the
-  delegator; the relay rejects events skewed more than ±900 s, so skew is
-  bounded.
-- **Codex sandbox**: buzz-acp already injects `CODEX_CONFIG` with network
-  access enabled for its child; verify at implementation that `buzz-fleet task`
-  can reach the relay from inside a Codex turn on Linux. If not, that harness
-  gets an env-file override documented in README.
-- **PyInstaller start-up latency** (~1 s per `buzz-fleet task` call): acceptable
-  for a handful of calls per turn; measured before release.
+- Relay or auth failure: JSON error, exit 1, never fake success.
+- Ambiguous name: error listing candidates.
+- Report from a non-assignee or on a superseded or terminal attempt: refused
+  by the CLI, noted if it reaches the relay.
+- Duplicates: by event id, by `cmd`, by task and attempt ids.
+- Clock skew: absolute deadlines; relay rejects ±900 s; reads overlap 15 min.
+- Cancellation does not undo a push; a cancel notice steers a running turn;
+  the owner's `!cancel @Agent` hard-stops it.
+- Conductor database lost: full re-read; at most one repeated action.
+- Both conductors down: views and notifier log show stale; agents still work
+  through mentions; on return, catch-up before timers.
+- Notifier target down: retries with backoff, delivery log, and the message
+  is still in the channel.
+- Codex sandbox and `/tmp`: verified live (section 11).
+- Workspaces: convention plus detection through the artifact contract.
 
 ## 8. Testing
 
-- **Reducer**: table-driven unit tests over synthetic event lists covering
-  every rule in 5.4, deviations, duplicates, out-of-order arrival, and cancel.
-- **Conductor tick**: tests with a fake clock and a recording publisher;
-  assert exactly which fleet events are emitted for a given state and time.
-- **CLI**: tests using the existing `CommandRunner` mock to assert the signer
-  is invoked with the right tags, mentions, thread refs, and identity source
-  (env vs. local admin key).
-- **Signer**: Rust unit tests for `post-message` tag construction and the
-  filter JSON passed to `query`/`subscribe`, mirroring existing
-  `agent_events.rs` tests.
-- **Instructions block**: idempotent insert/update/no-op tests on team
-  instructions.
-- **Live smoke script** (documented, manual): three agents on one box in one
-  channel, run a 3-step pipeline end to end, then kill the builder unit and
-  observe nudge → escalate. This is the test that would have caught fact 3.
+Unit: reducer (every rule in 5.4 including groups, human steps, owner
+commands, deletions, authorization, terminal precedence, duplicates,
+out-of-order), conductor tick with fake clock and recording publisher
+(outbox reconcile, failover state machine, budgets, retention), paged reader
+against a fake relay with >1,000 events and boundary ties, notifier with a
+fake transport, metrics join, recycle decision, CLI argv and refusals, signer
+builders, instructions block.
 
-## 9. Non-goals (v1)
+Acceptance gates:
 
-- No device/host awareness. Steps name agents.
-- No parallel steps, branching, or conditions in pipelines; linear only.
-  Agents can still fan out by delegating twice; each task is tracked.
-- No MCP server. Revisit only if a harness turns out to lack shell access.
-- No use of buzz-workflow until WF-08 is fixed upstream.
-- No cross-channel runs; one channel per run (the fleet channel by default).
-- No per-run or disposable channels: buzz-acp would need a restart of every
-  participant per run (fact 9). Runs are threads instead.
-- No retries of the *same* agent beyond one nudge; escalation is the retry.
-- No web dashboard; the channel plus two CLI tables are the UI.
+1. A run behind more than 1,000 newer messages is reconstructed identically
+   by every machine and a cold conductor.
+2. Lost publish ack; crash between report and handoff; restart during grace:
+   one accepted successor, no duplicate accepted result.
+3. Assignee stopped before delegation, started after nudge and escalation:
+   resumes without a second logical task.
+4. Primary conductor killed mid-run: standby takes over within 10 minutes,
+   primary reclaims cleanly, no duplicate accepted action.
+5. Conductor-created assignments, failure, fallback with a late original
+   result, run cancellation reaching a running turn, clean process with no
+   session memory.
+6. Same immutable revision across reviewer and builder; concurrent runs in
+   separate worktrees; rework stops at the limit; parallel group joins
+   correctly with an optional member left open.
+7. Owner gate completed from a phone with `!fleet done`; every notice
+   delivered by ntfy; a purge leaves every reader consistent.
+8. Budget pause fires on cost where reported and on turns otherwise; metrics
+   in `run-done` match the decrypted turn metrics.
+9. All of the above in each of Claude Code, Codex, Pi, and goose, plus one
+   mixed-harness pipeline.
+10. Same representative tasks with one agent versus the fleet: quality,
+    interventions, elapsed, cost, recovery failures, sample size stated.
 
-## 10. Risks to verify during implementation
+## 9. Out of scope
 
-1. `#t` filter combined with `#h` and `kinds` on the live relay returns the
-   expected events with NIP-OA-delegated auth (fact 4 was verified in code,
-   not against `wss://buzz.eltahir.me`).
-2. Codex network access for shell-invoked CLIs (7).
-3. Resolved by 5.9: agents get `BUZZ_FLEET_CHANNEL` from their environment.
-4. A REQ with `kinds=[9]`, `#t=["fleet"]` and no `#h` returns events from all
-   channels the conductor is a member of under NIP-OA-delegated auth. The
-   scoping was read in the search path; confirm the plain REQ path behaves
-   the same on the live relay, else fall back to one `#h` per joined channel.
+- Device-aware routing (hostnames are informational).
+- Conditional branches in pipelines.
+- Cross-channel runs.
+- Automatic takeover across more than one standby.
+- Stopping a running turn from the conductor (only the owner can).
+
+## 10. Resolved in revisions 2 and 3
+
+Fact 9 corrected; retrieval by retrieval-key mention plus paging; fleet
+record in channel metadata; requester vs rework target; `--next`, cancel,
+`blocked`, limits; UUID ids; push gateway ruled out and notifier adopted;
+owner commands with the `!fleet` prefix; human steps; failover; purge with
+tombstones; recycling; metrics and budgets via owner-key reads; parallel
+groups; TUI screen; self-update; language validated (section 12).
+
+## 11. Verify on the live fleet during implementation
+
+1. Paged `#p` retrieval-key reads are complete past 1,000 rows under NIP-OA
+   delegated auth.
+2. `buzz-fleet task` reaches the relay from inside a Codex turn on Linux.
+3. Heartbeat feed check surfaces a mention that arrived while down.
+4. Membership notification subscribes the installed Sprig build to a new
+   channel without restart.
+5. systemd accepts quoted multi-line env values on every machine.
+6. Installed versions match the record; `self-update` brings a machine level.
+7. The PyInstaller CLI starts inside each harness sandbox (a read-only or
+   `noexec` `/tmp` would break it; mitigation `--runtime-tmpdir` or
+   `--onedir`).
+8. Kind 44200 metrics decrypt with the admin key stored in the community file
+   and carry `costUsd` for the providers in use.
+9. A steering message reaches a running turn on each harness.
+10. Per-machine SSH access to every repository named in a run.
+
+## 12. Implementation notes (language and seams)
+
+Keep the agent CLI and the conductor in Python (Typer + Pydantic); delegate
+all relay I/O to the Rust signer; shell only in unit files, timers, and the
+installer. Measured: 0.9 s per CLI call (0.55 s onefile extraction), 0.5 s
+with `--onedir`. The conductor needs only the standard library (`subprocess`
+streaming child, `sqlite3` WAL, a thread or `selectors` loop). Add a
+`StreamingCommandRunner` seam next to `CommandRunner` in `proc.py`
+(`stream(args)` → handle with `lines()`, `terminate()`, `returncode()`),
+faked by a list of connections. Signer subcommands are I/O only:
+`post-message`, `query` (paged), `subscribe`, `channel-members`,
+`create-channel`, `find-fleet-record`/`write-fleet-record`,
+`delete-message`, `decrypt-metrics`.
+
+## 13. Grilling decisions (2026-09-06)
+
+| # | Decision |
+|---|---|
+| 1 | Owner chat commands in run threads with the `!fleet` prefix |
+| 2 | Human (owner) steps in pipelines, acted on from a phone |
+| 3 | Per-agent working directory, shared clone, worktree per run |
+| 4 | Private repos with per-machine SSH keys (assumption to confirm) |
+| 5 | Any fleet member may start a run |
+| 6 | Ad-hoc limits: 5 open per requester, chain depth 4 |
+| 7 | Step clock starts at delegation |
+| 8 | Conductor primary on the VPS, standby on the dedicated server |
+| 9 | Refuse duplicate display names unless forced |
+| 10 | Hostname in the managed-agent record, display only |
+| 11 | Fleet record in the channel description |
+| 12 | Notifier: ntfy primary, Telegram, email, webhook supported |
+| 13 | Conductor failover with standby |
+| 14 | Purge, retention, tombstone handling |
+| 15 | Idle session recycling timer, 6 hours |
+| 16 | Cancel notices; owner hard stop via `!cancel @Agent` |
+| 17 | Parallel step groups with join |
+| 18 | No conditional branches |
+| 19 | Metrics per step and run |
+| 20 | Budgets in USD with turn fallback |
+| 21 | Runs screen in the TUI |
+| 22 | `self-update`, opt-in |
