@@ -548,6 +548,81 @@ def test_write_agent_files_no_mcp_server_writes_no_wrapper_or_mcp_command(tmp_pa
     assert not (tmp_path / "work" / "laravel-backend-dev" / "mcp-boost.sh").exists()
 
 
+def test_write_agent_files_clearing_mcp_server_removes_stale_wrapper(tmp_path: Path, monkeypatch) -> None:
+    # Finding 2 (final review): `write_agent_files` only ever wrote a wrapper
+    # when `agent.mcp_server is not None` and never removed a stale one — the
+    # TUI's documented "you can clear it" path (blank the MCP fields and save)
+    # left the secret-bearing `mcp-<name>.sh` on disk forever.
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    agent = _agent().model_copy(update={
+        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+    })
+    write_agent_files(agent, _community(), None, None)
+    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    assert wrapper.exists()
+
+    cleared = agent.model_copy(update={"mcp_server": None})
+    write_agent_files(cleared, _community(), None, None)
+
+    assert not wrapper.exists()
+    env = agent_env_path(agent.id).read_text()
+    assert "BUZZ_ACP_MCP_COMMAND" not in env
+
+
+def test_write_agent_files_renaming_mcp_server_removes_old_wrapper(tmp_path: Path, monkeypatch) -> None:
+    # Finding 2 (final review): renaming an MCP server orphans
+    # `mcp-<oldname>.sh` forever -- the new name gets its own wrapper, but
+    # nothing ever removed the old one.
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    agent = _agent().model_copy(update={
+        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+    })
+    write_agent_files(agent, _community(), None, None)
+    old_wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    assert old_wrapper.exists()
+
+    renamed = agent.model_copy(update={
+        "mcp_server": McpServer(name="renamed", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+    })
+    write_agent_files(renamed, _community(), None, None)
+
+    new_wrapper = tmp_path / "work" / agent.id / "mcp-renamed.sh"
+    assert new_wrapper.exists() and not old_wrapper.exists()
+
+
+def test_write_agent_files_editing_mcp_server_to_bare_command_removes_old_wrapper(tmp_path: Path, monkeypatch) -> None:
+    # Finding 2 (final review): editing the same-named server down to a bare
+    # command (no args/env) makes `write_mcp_wrapper` correctly return None --
+    # but a wrapper written before the edit must still be cleaned up, or
+    # buzz-acp keeps a secret script on disk it no longer even points at.
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    agent = _agent().model_copy(update={
+        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+    })
+    write_agent_files(agent, _community(), None, None)
+    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    assert wrapper.exists()
+
+    bare = agent.model_copy(update={"mcp_server": McpServer(name="boost", command="php")})
+    write_agent_files(bare, _community(), None, None)
+
+    assert not wrapper.exists()
+    env = agent_env_path(agent.id).read_text()
+    assert "BUZZ_ACP_MCP_COMMAND=php\n" in env
+
+
 def test_write_agent_files_pi_without_mcp_server_writes_no_mcp_json(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")

@@ -331,6 +331,38 @@ def test_delete_agent_removes_env_and_prompt_files(tmp_path: Path, monkeypatch) 
     assert not agent_prompt_path(agent.id).exists()
 
 
+def test_delete_agent_removes_mcp_wrapper_and_pi_mcp_json(tmp_path: Path, monkeypatch) -> None:
+    # Finding 2 (final review): Task 19 added two more secret-bearing
+    # artifacts under WORK_DIR/<agent_id>/ that the "Fix 4" cleanup above
+    # never covered -- the MCP wrapper script (mode 0700, a real
+    # `export TOKEN='<secret>'`) and Pi's private mcp.json (mode 0600, the
+    # same secrets as JSON). Both must be gone after delete_agent, the same
+    # as the env file and prompt file.
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", tmp_path / "pi-template-unused")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Secret Bearer",
+        harness="pi",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+        mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"}),
+    )
+    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    mcp_json = tmp_path / "work" / agent.id / ".pi-agent" / "mcp.json"
+    assert wrapper.exists() and mcp_json.exists()
+
+    manager.delete_agent(agent.id)
+
+    assert not wrapper.exists()
+    assert not mcp_json.exists()
+
+
 def test_update_agent_preserves_previously_set_api_keys(tmp_path: Path, monkeypatch) -> None:
     """Regression test for Fix 9: update_agent must not wipe a previously-set
     ANTHROPIC_API_KEY/OPENAI_API_KEY when the update doesn't touch keys at all.

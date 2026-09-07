@@ -217,6 +217,30 @@ def write_mcp_wrapper(agent: Agent) -> Path | None:
     return path
 
 
+def _cleanup_stale_mcp_wrappers(agent_id: str, *, keep: Path | None) -> None:
+    """Remove any `mcp-*.sh` wrapper under this agent's WORK_DIR other than
+    `keep` (the path `write_mcp_wrapper` just (re)wrote this call, or None if
+    it wrote nothing this call).
+
+    Without this, three paths leave a secret-bearing wrapper (mode 0700,
+    `export TOKEN='<real secret>'`) behind forever: clearing the MCP server
+    entirely (`agent.mcp_server` goes to None — `write_mcp_wrapper` is never
+    even called), renaming it (the old `mcp-<oldname>.sh` is orphaned; the new
+    name gets its own file), and editing it down to a bare command with no
+    args/env (`write_mcp_wrapper` correctly returns None for that case, but a
+    wrapper from before the edit may still be on disk). Glob-based rather than
+    remembering the previous Agent's server name so it is correct even for a
+    fresh env-file rewrite with no "previous" state to diff against — it just
+    deletes whatever doesn't match what was (or wasn't) written this call.
+    """
+    agent_dir = WORK_DIR / agent_id
+    if not agent_dir.is_dir():
+        return
+    for path in agent_dir.glob("mcp-*.sh"):
+        if path != keep:
+            path.unlink(missing_ok=True)
+
+
 def _pi_agent_dir(agent_id: str) -> Path:
     return WORK_DIR / agent_id / ".pi-agent"
 
@@ -350,8 +374,9 @@ def write_agent_files(
     for key, value in (agent.env or {}).items():
         lines.append(env_line(key, _secret_value(value)))
 
+    wrapper_path = write_mcp_wrapper(agent) if agent.mcp_server is not None else None
+    _cleanup_stale_mcp_wrappers(agent.id, keep=wrapper_path)
     if agent.mcp_server is not None:
-        wrapper_path = write_mcp_wrapper(agent)
         if wrapper_path is not None:
             lines.append(env_line("BUZZ_ACP_MCP_COMMAND", str(wrapper_path)))
         else:

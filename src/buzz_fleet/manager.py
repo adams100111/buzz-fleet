@@ -676,3 +676,15 @@ class AgentManager:
         # slug (Fix 4).
         systemd.agent_env_path(agent_id).unlink(missing_ok=True)
         systemd.agent_prompt_path(agent_id).unlink(missing_ok=True)
+        # Task 19 added two more secret-bearing artifacts under this agent's
+        # WORK_DIR that this cleanup never covered: the MCP wrapper script
+        # (mode 0700, `export TOKEN='<real secret>'`) and Pi's private
+        # mcp.json (mode 0600, the same secrets as JSON) — without this an
+        # agent's real MCP credentials survive "deletion" on disk exactly like
+        # the private key did before the fix above. Glob rather than building
+        # one expected `mcp-<name>.sh` path from `agent.mcp_server` — a server
+        # renamed at some point (before `write_agent_files`'s own stale-wrapper
+        # cleanup existed) can have orphaned more than one wrapper here.
+        for wrapper in (systemd.WORK_DIR / agent_id).glob("mcp-*.sh"):
+            wrapper.unlink(missing_ok=True)
+        (systemd.WORK_DIR / agent_id / ".pi-agent" / "mcp.json").unlink(missing_ok=True)
