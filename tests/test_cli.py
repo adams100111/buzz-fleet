@@ -548,3 +548,16 @@ def test_agent_create_rejects_bad_session_policy(monkeypatch) -> None:
     result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X",
                                      "--harness", "claude", "--prompt-file", "/dev/null", "--session-policy", "bogus"])
     assert result.exit_code == 1 and "thread, channel" in result.output
+
+
+def test_fleet_init_prints_channel_and_record(monkeypatch) -> None:
+    from buzz_fleet.orchestration.record import FleetRecord
+
+    class FakeManager:
+        def init_fleet_channel(self, existing, host):
+            return "6f1c0000-0000-4000-8000-000000000000", FleetRecord(retrieval_key="r" * 64, created_at=1)
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "init", "--community", "e"])
+    assert result.exit_code == 0, result.output
+    assert "6f1c0000-0000-4000-8000-000000000000" in result.output and "r" * 64 in result.output

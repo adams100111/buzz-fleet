@@ -76,3 +76,10 @@ def test_session_fields_default_none_and_round_trip() -> None:
         Agent(**_base_kwargs(), session_policy="channel", max_turns_per_session=12, heartbeat_interval_seconds=300).model_dump_json()
     )
     assert (again.session_policy, again.max_turns_per_session, again.heartbeat_interval_seconds) == ("channel", 12, 300)
+
+
+def test_community_fleet_fields_default_none() -> None:
+    from buzz_fleet.models import Community
+
+    c = Community(id="e", relay_url="wss://r", relay_admin_nsec="nsec1a")
+    assert c.fleet_channel_id is None and c.fleet_record is None

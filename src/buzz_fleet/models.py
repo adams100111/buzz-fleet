@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
+from buzz_fleet.orchestration.record import FleetRecord
+
 
 class Community(BaseModel):
     id: str
@@ -19,6 +21,11 @@ class Community(BaseModel):
     # first time it's needed, then persists it, rather than requiring a
     # migration step or breaking on load.
     owner_pubkey: str | None = None
+    # Spec 5.9: the community's orchestration channel and the owner-signed
+    # fleet record cached from its metadata. Created once by `fleet init`;
+    # discovered everywhere else by `AgentManager.ensure_fleet_record`.
+    fleet_channel_id: str | None = None
+    fleet_record: FleetRecord | None = None
 
 
 class SystemPromptSource(BaseModel):

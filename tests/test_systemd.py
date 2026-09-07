@@ -361,3 +361,21 @@ def test_write_agent_files_quotes_multiline_team_instructions(tmp_path: Path, mo
     write_agent_files(agent, _community(), None, None)
 
     assert 'BUZZ_ACP_TEAM_INSTRUCTIONS="# Rules\n\n- one\n- two' in agent_env_path(agent.id).read_text()
+
+
+def test_write_agent_files_exports_fleet_env_when_known(tmp_path: Path, monkeypatch) -> None:
+    from buzz_fleet.orchestration.record import FleetRecord
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    community = _community().model_copy(update={
+        "fleet_channel_id": "6f1c0000-0000-4000-8000-000000000000",
+        "fleet_record": FleetRecord(retrieval_key="r" * 64, created_at=1),
+    })
+
+    write_agent_files(_agent(), community, None, None)
+
+    env = agent_env_path("laravel-backend-dev").read_text()
+    assert "BUZZ_FLEET_CHANNEL=6f1c0000-0000-4000-8000-000000000000\n" in env
+    assert f"BUZZ_FLEET_RETRIEVAL_KEY={'r' * 64}\n" in env

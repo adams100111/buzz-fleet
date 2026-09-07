@@ -76,3 +76,14 @@ def test_saved_agent_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "communities" / "test-community" / "agents" / "agent-1.json"
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600
+
+
+def test_list_community_ids(tmp_path, monkeypatch) -> None:
+    from buzz_fleet import state
+    from buzz_fleet.models import Community
+
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path)
+    assert state.list_community_ids() == []
+    for cid in ("b", "a"):
+        state.save_community(Community(id=cid, relay_url="wss://r", relay_admin_nsec="nsec1a"))
+    assert state.list_community_ids() == ["a", "b"]

@@ -22,9 +22,14 @@ _SIGNER_OK_SUBCOMMANDS = {
 }
 
 
+FLEET = "6f1c0000-0000-4000-8000-000000000000"
+
+
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.channels: list[dict] = []
+        self.members: list[dict] = []
 
     def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
@@ -34,6 +39,14 @@ class FakeRunner:
             stdout = json.dumps({"ok": True, "public_key": "c" * 64})
         elif args[:2] == ["buzz-fleet-signer", "compute-auth-tag"]:
             stdout = json.dumps({"ok": True, "auth_tag": json.dumps(["auth", "d" * 64, "", "e" * 128])})
+        elif args[:2] == ["buzz-fleet-signer", "read-channel-meta"]:
+            stdout = json.dumps({"ok": True, "channels": self.channels})
+        elif args[:2] == ["buzz-fleet-signer", "create-channel"]:
+            stdout = json.dumps({"ok": True, "channel_id": FLEET})
+        elif args[:2] == ["buzz-fleet-signer", "write-channel-about"]:
+            stdout = json.dumps({"ok": True})
+        elif args[:2] == ["buzz-fleet-signer", "channel-members"]:
+            stdout = json.dumps({"ok": True, "members": self.members})
         elif "add-member" in args or "remove-member" in args or tuple(args[:2]) in _SIGNER_OK_SUBCOMMANDS:
             stdout = json.dumps({"ok": True})
         elif args[:2] == ["loginctl", "show-user"]:
@@ -1053,3 +1066,83 @@ def test_template_change_restarts_every_agent(tmp_path: Path, monkeypatch) -> No
     manager.ensure_runtime_ready()
 
     assert any(a[:3] == ["systemctl", "--user", "restart"] and agent.id in a[3] for a in runner.calls)
+
+
+from buzz_fleet.orchestration.record import ABOUT_HEADER, FleetRecord, encode_about
+
+
+def _fresh_manager(tmp_path: Path, monkeypatch, runner: FakeRunner) -> AgentManager:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "unit" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.ensure_linger_enabled", lambda runner: None)
+    from buzz_fleet import state
+    community = _community()
+    state.save_community(community)
+    return AgentManager(runner, community)
+
+
+def _record_about() -> str:
+    return encode_about(FleetRecord(retrieval_key="r" * 64, created_at=1))
+
+
+def test_init_fleet_channel_creates_writes_record_and_persists(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+
+    channel_id, rec = manager.init_fleet_channel(existing=None, host="vps")
+
+    assert channel_id == FLEET and len(rec.retrieval_key) == 64
+    from buzz_fleet import state
+    saved = state.load_community("eltahir")
+    assert saved.fleet_channel_id == FLEET and saved.fleet_record.retrieval_key == rec.retrieval_key
+    about_call = next(a for a in runner.calls if a[1] == "write-channel-about")
+    assert about_call[about_call.index("--about") + 1].startswith(ABOUT_HEADER)
+
+
+def test_init_fleet_channel_refuses_when_record_exists(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    runner.channels = [{"channel_id": FLEET, "name": "fleet", "about": _record_about(), "archived": False}]
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+    with pytest.raises(RuntimeError, match="already exists"):
+        manager.init_fleet_channel(existing=None, host="vps")
+
+
+def test_init_fleet_channel_adopts_and_writes_record(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    runner.channels = [{"channel_id": FLEET, "name": "ops", "about": "plain", "archived": False}]
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+    channel_id, _ = manager.init_fleet_channel(existing=FLEET, host="vps")
+    assert channel_id == FLEET
+    assert not any(a[1] == "create-channel" for a in runner.calls)
+    assert any(a[1] == "write-channel-about" for a in runner.calls)
+
+
+def test_ensure_runtime_ready_discovers_record_joins_and_rewrites_env(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+    agent = manager.create_agent(display_name="Reviewer", harness="claude",
+                                 system_prompt_source=SystemPromptSource(kind="inline", text="hi"))
+    runner.channels = [{"channel_id": FLEET, "name": "fleet", "about": _record_about(), "archived": False}]
+    runner.calls.clear()
+
+    manager.ensure_runtime_ready()
+
+    from buzz_fleet import state
+    assert state.load_community("eltahir").fleet_channel_id == FLEET
+    assert len([a for a in runner.calls if a[1] == "join-channel" and FLEET in a]) == 1
+    env = agent_env_path(agent.id).read_text()
+    assert f"BUZZ_FLEET_CHANNEL={FLEET}\n" in env and f"BUZZ_FLEET_RETRIEVAL_KEY={'r' * 64}\n" in env
+    assert state.load_agents("eltahir")[0].visibility_state.channels[FLEET] == "joined"
+
+
+def test_create_agent_refuses_duplicate_display_name_unless_forced(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    runner.channels = [{"channel_id": FLEET, "name": "fleet", "about": _record_about(), "archived": False}]
+    runner.members = [{"pubkey": "d" * 64, "display_name": "Reviewer"}]
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+    src = SystemPromptSource(kind="inline", text="hi")
+    with pytest.raises(ValueError, match="already used"):
+        manager.create_agent(display_name="Reviewer", harness="claude", system_prompt_source=src)
+    assert manager.create_agent(display_name="Reviewer", harness="claude", system_prompt_source=src, force=True)

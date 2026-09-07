@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 from buzz_fleet import (
+    __version__,
     buzz_acp,
     harnesses,
     signer_client,
@@ -17,10 +19,18 @@ from buzz_fleet import (
     visibility,
 )
 from buzz_fleet.models import Agent, Community, SystemPromptSource
+from buzz_fleet.orchestration.record import FleetRecord, decode_about, encode_about
 from buzz_fleet.proc import CommandRunner
 from buzz_fleet.slug import agent_slug
 
 _ENV_KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+
+FLEET_CHANNEL_NAME = "fleet"
+
+
+def _agent_env_has(agent_id: str, key: str, value: str) -> bool:
+    path = systemd.agent_env_path(agent_id)
+    return path.exists() and f"{key}={value}\n" in path.read_text()
 
 
 def _agent_env_has_auth_tag(agent_id: str) -> bool:
@@ -90,6 +100,76 @@ class AgentManager:
         )
         self._community = self._community.model_copy(update={"owner_pubkey": owner_pubkey})
         state.save_community(self._community)
+
+    def _owner_nsec(self) -> str:
+        return self._community.relay_admin_nsec.get_secret_value()
+
+    def _find_fleet_record(self) -> tuple[str, FleetRecord] | None:
+        found = []
+        for meta in signer_client.read_channel_meta(self._runner, self._community.relay_url, self._owner_nsec(),
+                                                    channel_id=None, auth_tag=None):
+            if meta.get("archived"):
+                continue
+            rec = decode_about(meta.get("about"))
+            if rec:
+                found.append((meta["channel_id"], rec))
+        if len(found) > 1:
+            raise RuntimeError("more than one channel carries a fleet record: " + ", ".join(c for c, _ in found)
+                               + "; archive all but one")
+        return found[0] if found else None
+
+    def _save_fleet(self, channel_id: str, rec: FleetRecord) -> None:
+        self._community = self._community.model_copy(update={"fleet_channel_id": channel_id, "fleet_record": rec})
+        state.save_community(self._community)
+
+    def init_fleet_channel(self, existing: str | None, host: str) -> tuple[str, FleetRecord]:
+        """Create (or adopt) the fleet channel and write the fleet record, once per community.
+
+        Never automatic: five machines auto-creating would produce five channels.
+        Refuses when a record already exists anywhere the owner can see.
+        """
+        if self._find_fleet_record() is not None:
+            raise RuntimeError("a fleet record already exists on this relay; other machines discover it automatically "
+                               "(`buzz-fleet agent list`). Use `fleet status` to see it.")
+        retrieval_pub, retrieval_secret = signer_client.generate_key(self._runner)
+        rec = FleetRecord(
+            retrieval_key=retrieval_pub, conductors={},
+            versions={"buzz-fleet": __version__}, created_at=int(time.time()),
+        )
+        if existing:
+            channel_id = existing
+        else:
+            channel_id = signer_client.create_channel(self._runner, self._community.relay_url, self._owner_nsec(),
+                                                      FLEET_CHANNEL_NAME, about=None)
+        signer_client.write_channel_about(self._runner, self._community.relay_url, self._owner_nsec(), channel_id, encode_about(rec))
+        self._save_fleet(channel_id, rec)
+        # The retrieval secret is deliberately not stored: nothing ever signs
+        # with it (spec 5.1). Returned once so the owner can archive it.
+        self._last_retrieval_secret = retrieval_secret
+        return channel_id, rec
+
+    def ensure_fleet_record(self) -> FleetRecord | None:
+        if self._community.fleet_record:
+            return self._community.fleet_record
+        try:
+            found = self._find_fleet_record()
+        except (RuntimeError, json.JSONDecodeError, KeyError, OSError):
+            return None
+        if found:
+            self._save_fleet(*found)
+            return found[1]
+        return None
+
+    def display_name_taken(self, display_name: str) -> bool:
+        channel = self._community.fleet_channel_id
+        if not channel:
+            return False
+        try:
+            members = signer_client.channel_members(self._runner, self._community.relay_url, self._owner_nsec(),
+                                                    channel, auth_tag=None)
+        except (RuntimeError, json.JSONDecodeError, KeyError, OSError):
+            return False
+        return any(n and n.strip().lower() == display_name.strip().lower() for _, n in members)
 
     def _compute_agent_auth_tag(self, agent: Agent) -> str | None:
         """The NIP-OA auth tag to write into `agent`'s env file as
@@ -168,6 +248,7 @@ class AgentManager:
         buzz_acp_just_installed = buzz_acp.ensure_buzz_acp_installed()
         buzz_acp.ensure_buzz_cli_link()
         needs_full_refresh = buzz_acp_just_installed or owner_pubkey_just_backfilled or template_changed
+        rec = self.ensure_fleet_record()
 
         for agent in self.list_agents():
             synced = self._sync_visibility(agent)
@@ -177,9 +258,14 @@ class AgentManager:
 
             resolved_command = harnesses.resolve_adapter_command(agent.harness)
             needs_auth_tag = agent.visibility_managed and not _agent_env_has_auth_tag(agent.id)
+            needs_fleet_env = rec is not None and not (
+                _agent_env_has(agent.id, "BUZZ_FLEET_CHANNEL", self._community.fleet_channel_id or "")
+                and _agent_env_has(agent.id, "BUZZ_FLEET_RETRIEVAL_KEY", rec.retrieval_key)
+            )
             if (
                 not needs_full_refresh
                 and not needs_auth_tag
+                and not needs_fleet_env
                 and _read_agent_command(agent.id) == resolved_command
             ):
                 continue
@@ -256,7 +342,10 @@ class AgentManager:
                 if visibility.classify_signer_error(e) == "permanent":
                     vs.add_policy_error = str(e)
 
-        for channel_id in agent.channel_ids or []:
+        wanted = list(agent.channel_ids or [])
+        if self._community.fleet_channel_id and self._community.fleet_channel_id not in wanted:
+            wanted.append(self._community.fleet_channel_id)
+        for channel_id in wanted:
             if vs.channels.get(channel_id) == "joined" or channel_id in vs.channel_errors:
                 continue
             try:
@@ -291,8 +380,12 @@ class AgentManager:
         channel_add_policy: str | None = None,
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
+        force: bool = False,
     ) -> Agent:
         self.ensure_runtime_ready()
+        if not force and self.display_name_taken(display_name):
+            raise ValueError(f"display name {display_name!r} is already used by an agent in the fleet channel; "
+                             f"pick another or pass --force")
         existing_ids = {a.id for a in self.list_agents()}
         agent_id = agent_slug(display_name, existing_ids)
         public_key, secret_key = signer_client.generate_key(self._runner)

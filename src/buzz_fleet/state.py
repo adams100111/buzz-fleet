@@ -67,6 +67,11 @@ def load_community(community_id: str) -> Community | None:
     return Community.model_validate_json(path.read_text())
 
 
+def list_community_ids() -> list[str]:
+    directory = CONFIG_DIR / "communities"
+    return sorted(p.stem for p in directory.glob("*.json")) if directory.exists() else []
+
+
 def _agents_dir(community_id: str) -> Path:
     return CONFIG_DIR / "communities" / community_id / "agents"
 

@@ -218,13 +218,7 @@ async fn main() {
             }
         }
         Command::JoinChannel { relay, agent_nsec, channel_id, auth_tag } => {
-            let builder = uuid::Uuid::parse_str(&channel_id)
-                .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
-                .and_then(|id| {
-                    let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
-                    buzz_sdk::builders::build_add_member(id, &agent_pubkey, Some(buzz_sdk::MemberRole::Bot))
-                        .map_err(|e| anyhow::anyhow!(e))
-                });
+            let builder = build_join_channel_event(&channel_id, &agent_nsec);
             let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
             let result = match tag {
                 Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
@@ -236,13 +230,7 @@ async fn main() {
             }
         }
         Command::LeaveChannel { relay, agent_nsec, channel_id, auth_tag } => {
-            let builder = uuid::Uuid::parse_str(&channel_id)
-                .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
-                .and_then(|id| {
-                    let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
-                    buzz_sdk::builders::build_remove_member(id, &agent_pubkey)
-                        .map_err(|e| anyhow::anyhow!(e))
-                });
+            let builder = build_leave_channel_event(&channel_id, &agent_nsec);
             let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
             let result = match tag {
                 Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
@@ -395,6 +383,34 @@ async fn run_check_connection(relay: &str, nsec: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build the self-join (kind 9000) event for `JoinChannel`.
+///
+/// `allow_self_tagging()` is required: this is a self-join, so the `p` tag
+/// equals the signing key's own pubkey, and `nostr::EventBuilder` discards
+/// any `p` tag matching the signer by default (`allow_self_tagging` defaults
+/// to false) — without this call, the tag silently vanished at *sign* time
+/// (never at build time), and the relay rejected the resulting event as
+/// "missing p tag" on every self-join. Confirmed live against
+/// buzz.eltahir.me: a real agent's join-channel call failed with exactly
+/// this error until this fix.
+fn build_join_channel_event(channel_id: &str, agent_nsec: &str) -> anyhow::Result<nostr::EventBuilder> {
+    let id = uuid::Uuid::parse_str(channel_id).map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))?;
+    let agent_pubkey = Keys::parse(agent_nsec)?.public_key().to_hex();
+    buzz_sdk::builders::build_add_member(id, &agent_pubkey, Some(buzz_sdk::MemberRole::Bot))
+        .map(|b| b.allow_self_tagging())
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Build the self-leave (kind 9001) event for `LeaveChannel` — same
+/// self-tagging fix as `build_join_channel_event` above.
+fn build_leave_channel_event(channel_id: &str, agent_nsec: &str) -> anyhow::Result<nostr::EventBuilder> {
+    let id = uuid::Uuid::parse_str(channel_id).map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))?;
+    let agent_pubkey = Keys::parse(agent_nsec)?.public_key().to_hex();
+    buzz_sdk::builders::build_remove_member(id, &agent_pubkey)
+        .map(|b| b.allow_self_tagging())
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// `auth_tag` is the NIP-OA credential attached to *this call's own*
 /// connection AUTH event (`None` for a call signed by the community owner,
 /// who is already a direct relay member; `Some` for a call signed by an
@@ -465,12 +481,7 @@ mod tests {
     fn join_channel_builds_self_add_with_bot_role() {
         let keys = Keys::generate();
         let channel_id = uuid::Uuid::new_v4();
-        let builder = buzz_sdk::builders::build_add_member(
-            channel_id,
-            &keys.public_key().to_hex(),
-            Some(buzz_sdk::MemberRole::Bot),
-        )
-        .unwrap();
+        let builder = build_join_channel_event(&channel_id.to_string(), &keys.secret_key().to_secret_hex()).unwrap();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind, Kind::Custom(9000));
         assert!(event.tags.iter().any(|t| {
@@ -481,18 +492,32 @@ mod tests {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["h", channel_id.to_string().as_str()]
         }));
+        // Regression: nostr::EventBuilder discards a `p` tag matching the
+        // signer by default — without `allow_self_tagging()` in
+        // `build_join_channel_event`, this self-join `p` tag (agent's own
+        // pubkey) silently vanishes at sign time and the relay rejects the
+        // event as "missing p tag" (confirmed live).
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["p", keys.public_key().to_hex().as_str()]
+        }));
     }
 
     #[test]
     fn leave_channel_builds_self_remove() {
         let keys = Keys::generate();
         let channel_id = uuid::Uuid::new_v4();
-        let builder = buzz_sdk::builders::build_remove_member(channel_id, &keys.public_key().to_hex()).unwrap();
+        let builder = build_leave_channel_event(&channel_id.to_string(), &keys.secret_key().to_secret_hex()).unwrap();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind, Kind::Custom(9001));
         assert!(event.tags.iter().any(|t| {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["h", channel_id.to_string().as_str()]
+        }));
+        // Regression: same self-tagging fix as join-channel above.
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["p", keys.public_key().to_hex().as_str()]
         }));
     }
 

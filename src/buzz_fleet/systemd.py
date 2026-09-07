@@ -191,6 +191,10 @@ def write_agent_files(
         # saved before this field existed, so this is only ever unset for
         # a Community not yet round-tripped through that once.
         lines.append(env_line("BUZZ_ACP_AGENT_OWNER", community.owner_pubkey))
+    if community.fleet_channel_id:
+        lines.append(env_line("BUZZ_FLEET_CHANNEL", community.fleet_channel_id))
+    if community.fleet_record:
+        lines.append(env_line("BUZZ_FLEET_RETRIEVAL_KEY", community.fleet_record.retrieval_key))
     if agent.team_instructions:
         lines.append(env_line("BUZZ_ACP_TEAM_INSTRUCTIONS", agent.team_instructions))
     if agent.model:

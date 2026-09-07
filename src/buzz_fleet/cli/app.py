@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from buzz_fleet import __version__, harnesses, state
+from buzz_fleet.cli.fleet_commands import fleet_app
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import SystemPromptSource
@@ -33,6 +34,7 @@ agent_app = typer.Typer(help="Manage agent identities")
 app.add_typer(agent_app, name="agent")
 harness_app = typer.Typer(help="Detect and install harness adapters")
 app.add_typer(harness_app, name="harness")
+app.add_typer(fleet_app, name="fleet")
 
 
 def _version_callback(show_version: bool) -> None:
@@ -108,6 +110,9 @@ def agent_create(
     channel_add_policy: Annotated[
         str | None, typer.Option(help="Who may add this agent to a new channel: anyone, owner_only, nobody")
     ] = None,
+    force: Annotated[
+        bool, typer.Option(help="Create even if the display name is already used in the fleet channel")
+    ] = False,
 ) -> None:
     manager = _load_manager(community)
     parsed_channel_ids = _parse_channel_ids(channel_ids)
@@ -137,6 +142,7 @@ def agent_create(
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             channel_ids=parsed_channel_ids,
             channel_add_policy=channel_add_policy,
+            force=force,
         )
     except ValueError as e:
         # e.g. a blank/punctuation-only --display-name (agent_slug raises)
