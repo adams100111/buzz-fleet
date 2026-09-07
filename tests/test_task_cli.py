@@ -55,7 +55,7 @@ _DEFAULT_ARTIFACT = {"repo": "git@x:o/r.git", "commit": "c" * 40, "branch": None
 
 
 def _delegate_event(task=T1, attempt=AT1, requester=A, assignee=B, run=None, parent=None, event_id=None,
-                    artifact=_DEFAULT_ARTIFACT) -> dict:
+                    artifact=_DEFAULT_ARTIFACT, content="brief") -> dict:
     payload = {"v": 1, "type": "delegate", "task": task, "attempt": attempt, "run": run, "step": None, "parent_task": parent,
                "required": True, "from": requester, "to": assignee, "deadline": 1000, "rework_target": None,
                "artifact": artifact, "acceptance": []}
@@ -64,7 +64,7 @@ def _delegate_event(task=T1, attempt=AT1, requester=A, assignee=B, run=None, par
     # reducer's own event-level dedup (reduce()'s `seen` set) would silently drop the
     # second one. The explicit override lets a test construct a genuine prefix ambiguity
     # (same task-id prefix, distinct underlying relay events) without tripping that dedup.
-    return {"id": event_id or task[:8] * 8, "pubkey": requester, "created_at": 100, "kind": 9, "content": "brief",
+    return {"id": event_id or task[:8] * 8, "pubkey": requester, "created_at": 100, "kind": 9, "content": content,
             "tags": [["h", CH], ["p", RK], ["t", "fleet"], ["t", f"fleet:task:{task}"], ["p", assignee], ["fleet", json.dumps(payload)]]}
 
 
@@ -310,6 +310,40 @@ def test_cli_tasks_json_and_show(monkeypatch) -> None:
     assert result.exit_code == 0 and "11111111" in result.output and "open" in result.output
 
 
+def test_cli_tasks_table_survives_rich_markup_in_brief(monkeypatch) -> None:
+    # Residual (final fix pass): `render_tasks` passed the summary (derived from
+    # `task.brief`, attacker-controlled -- any fleet member's delegate content)
+    # straight into `add_row`, and Rich interprets `[...]` in cell content as markup
+    # by default. A brief starting with an unmatched closing tag like `[/bold]` raised
+    # `rich.errors.MarkupError` out of `Console().print(render_tasks(...))`, breaking
+    # `buzz-fleet tasks` for every reader from one hostile delegate.
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner(events=[_delegate_event(content="[/bold]evil")]))
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["tasks"])
+    # The column is narrow enough to ellipsis-truncate the summary under the
+    # CliRunner's 80-column fallback -- the point is that this doesn't raise
+    # MarkupError, not that the full literal text survives truncation.
+    assert result.exit_code == 0, result.output
+    assert "[/bo" in result.output
+
+
+def test_cli_task_show_survives_rich_markup_in_brief_and_report(monkeypatch) -> None:
+    # Residual (final fix pass): same exposure as the table above, but `task_show`
+    # has it twice more -- `console.print(f"[bold]Brief[/bold]\n{task.brief}")` and
+    # `console.print(a.report.get("content", ""))` -- both interpolating
+    # attacker-controlled text directly, and both outside this command's own
+    # try/except, so the MarkupError propagated straight out of `task_show` with no
+    # chance for its error handling to catch it.
+    ev = _delegate_event(content="[/bold]evil brief")
+    ack = _ack_event(T1, AT1, B, "2" * 64)
+    report = _report_event(T1, AT1, B, "done", "3" * 64, content="[/bold]evil report")
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner(events=[ev, ack, report]))
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["task", "show", T1[:8]])
+    assert result.exit_code == 0, result.output
+    assert "[/bold]evil brief" in result.output and "[/bold]evil report" in result.output
+
+
 # --- Tests added beyond the brief (Task 15) ---------------------------------------
 #
 # The brief's own test_task_rows_filters exercises each filter in isolation (and one
@@ -330,10 +364,10 @@ def _ack_event(task: str, attempt: str, assignee: str, event_id: str) -> dict:
             "tags": [["h", CH], ["p", RK], ["t", "fleet"], ["t", f"fleet:task:{task}"], ["fleet", json.dumps(payload)]]}
 
 
-def _report_event(task: str, attempt: str, assignee: str, status: str, event_id: str) -> dict:
+def _report_event(task: str, attempt: str, assignee: str, status: str, event_id: str, content: str | None = None) -> dict:
     payload = {"v": 1, "type": "report", "task": task, "attempt": attempt, "from": assignee, "status": status,
                "next": "default", "input_commit": None, "output": None, "evidence": [], "run": None}
-    return {"id": event_id, "pubkey": assignee, "created_at": 200, "kind": 9, "content": f"{status} report",
+    return {"id": event_id, "pubkey": assignee, "created_at": 200, "kind": 9, "content": content or f"{status} report",
             "tags": [["h", CH], ["p", RK], ["t", "fleet"], ["t", f"fleet:task:{task}"], ["fleet", json.dumps(payload)]]}
 
 
@@ -535,6 +569,27 @@ def test_cli_fleet_agents_table_renders_columns(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "Reviewer" in result.output and "reviewer" in result.output and "laravel" in result.output
     assert "claude" in result.output and "vps" in result.output
+
+
+def test_cli_fleet_agents_survives_rich_markup_in_display_name(monkeypatch) -> None:
+    # Residual (final fix pass): `render_agents`'s `display_name`/`role`/
+    # `capabilities` come from relay-published kind:30177 records -- attacker-
+    # controlled by any fleet member, same as `render_tasks`'s summary. A stray
+    # `[/bold]` in a display name raised `rich.errors.MarkupError` out of
+    # `Console().print(render_agents(...))`, breaking `fleet agents` for everyone.
+    from buzz_fleet.orchestration.relay import DirectoryEntry
+
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    monkeypatch.setattr(fc.relay, "directory", lambda runner, ident, channel_id: [DirectoryEntry(
+        pubkey=B, display_name="[/bold]evil", role="[/bold]evil-role", capabilities=["[/bold]evil-cap"],
+        description=None, harness="claude", host="vps", online=True, last_seen=1, live_tasks=0, version="0.8.0")])
+    result = cli.invoke(app, ["fleet", "agents"])
+    # As above, the Name column is narrow enough to ellipsis-truncate under the
+    # CliRunner's 80-column fallback -- the point is no MarkupError, not survival
+    # of the full literal text.
+    assert result.exit_code == 0, result.output
+    assert "[/bold]" in result.output
 
 
 def test_cli_fleet_agents_empty_prints_no_rows(monkeypatch) -> None:

@@ -103,7 +103,12 @@ def fleet_agents(
     if as_json:
         typer.echo(json.dumps([asdict(e) for e in entries]))
         return
-    Console().print(render_agents(entries))
+    # `markup=False`: `display_name`/`role`/`capabilities` come from relay-published
+    # kind:30177 records -- attacker-controlled by any fleet member. Rich interprets
+    # `[...]` in cell content as markup by default, so a stray `[/bold]` (an unmatched
+    # closing tag) raised `rich.errors.MarkupError` out of this print, breaking `fleet
+    # agents` for every reader. None of this output is meant to carry markup.
+    Console(markup=False).print(render_agents(entries))
 
 
 task_app = typer.Typer(help="Delegate work to fleet agents, ack it, report it, cancel it")
@@ -434,7 +439,10 @@ def tasks_command(
     if as_json:
         typer.echo(json.dumps([task_to_json(t) for t in rows]))
         return
-    Console().print(render_tasks(rows, now))
+    # `markup=False`: see the matching comment on `fleet_agents`'s `Console(markup=
+    # False)` -- `render_tasks`'s summary cell is `t.brief`/a report's `content`,
+    # both attacker-controlled (a delegate's own content, or an assignee's report).
+    Console(markup=False).print(render_tasks(rows, now))
 
 
 @task_app.command("show")
@@ -451,13 +459,21 @@ def task_show(task_ref: Annotated[str, typer.Argument()], channel: Annotated[str
     if as_json:
         typer.echo(json.dumps(task_to_json(task)))
         return
-    console = Console()
+    # `markup=False`: see the matching comment on `fleet_agents`/`tasks_command`.
+    # `task.brief` and a report's `content` are printed directly here -- both
+    # attacker-controlled -- and unlike the table paths above, these two prints sit
+    # outside this command's own try/except, so a hostile `[/bold]`-style value in
+    # either one raised `rich.errors.MarkupError` straight out of `task_show` with no
+    # chance for the command's own error handling to catch it. The literal `[bold]`/
+    # `[dim]` wrappers below are dropped along with markup support -- none of this
+    # output is meant to carry markup, so there is no styling left to preserve.
+    console = Console(markup=False)
     console.print(render_tasks([task], now))
-    console.print(f"[bold]Brief[/bold]\n{task.brief}")
+    console.print(f"Brief\n{task.brief}")
     for i, a in enumerate(task.attempts, 1):
-        console.print(f"[bold]Attempt {i}[/bold] {a.assignee[:8]} {a.status}"
+        console.print(f"Attempt {i} {a.assignee[:8]} {a.status}"
                       + (f" acked {_age(now - a.acked_at)} ago" if a.acked_at else " (not acked)"))
         if a.report:
             console.print(a.report.get("content", ""))
     for note in task.notes:
-        console.print(f"[dim]note: {note}[/dim]")
+        console.print(f"note: {note}")
