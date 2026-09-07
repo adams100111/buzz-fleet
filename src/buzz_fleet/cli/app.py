@@ -196,8 +196,13 @@ def agent_create(
         typer.echo("--session-policy must be one of: thread, channel", err=True)
         raise typer.Exit(code=1)
     parsed_env = _resolve_env(env, env_file)
-    mcp_server = _resolve_mcp_server(mcp_name, mcp_command, mcp_arg, mcp_env)
     try:
+        # `_resolve_mcp_server` is inside the try, not just `create_agent`:
+        # an invalid `--mcp-name '../x'` raises a raw pydantic ValidationError
+        # out of McpServer's own constructor, before create_agent is ever
+        # called. Outside this try, that printed a traceback instead of the
+        # message-plus-exit-1 every other validation on this command produces.
+        mcp_server = _resolve_mcp_server(mcp_name, mcp_command, mcp_arg, mcp_env)
         agent = manager.create_agent(
             display_name=display_name,
             harness=harness,
@@ -346,13 +351,23 @@ def agent_update(
         changes["channel_add_policy"] = channel_add_policy
     if env is not None or env_file is not None:
         changes["env"] = _resolve_env(env, env_file)
-    mcp_server = _resolve_mcp_server(mcp_name, mcp_command, mcp_arg, mcp_env)
-    if mcp_server is not None:
-        changes["mcp_server"] = mcp_server
-    if not changes:
-        typer.echo("Nothing to update — pass at least one field to change.", err=True)
-        raise typer.Exit(code=1)
-    updated = manager.update_agent(agent_id, **changes)
+    try:
+        # Same reasoning as agent_create: `_resolve_mcp_server` can raise a
+        # raw pydantic ValidationError out of McpServer's own constructor
+        # (e.g. an unsafe --mcp-name), and update_agent itself can raise
+        # ValueError too (e.g. an unsafe --env key — see
+        # models.validate_env_key). Both belong inside the same try as every
+        # other validation this command produces, not a bare traceback.
+        mcp_server = _resolve_mcp_server(mcp_name, mcp_command, mcp_arg, mcp_env)
+        if mcp_server is not None:
+            changes["mcp_server"] = mcp_server
+        if not changes:
+            typer.echo("Nothing to update — pass at least one field to change.", err=True)
+            raise typer.Exit(code=1)
+        updated = manager.update_agent(agent_id, **changes)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
     typer.echo(f"Updated agent '{updated.id}'.")
 
 

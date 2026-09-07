@@ -44,7 +44,7 @@ def fleet_init(
     manager = _load_manager(community)
     try:
         channel_id, rec = manager.init_fleet_channel(existing=channel, host=socket.gethostname())
-    except RuntimeError as e:
+    except _ERRORS as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
     typer.echo(f"Fleet channel: {channel_id}")
@@ -66,7 +66,10 @@ def fleet_status(community: Annotated[str, typer.Option()]) -> None:
             # again here would create a THIRD one. Show the real reason.
             typer.echo(f"Could not determine the fleet record: {manager._last_fleet_error}", err=True)
         else:
-            typer.echo("No fleet record found. Run `buzz-fleet fleet init` once on the conductor host.")
+            # Both branches precede the same `raise typer.Exit(code=1)` --
+            # this one must go to stderr too, not stdout, or a caller
+            # piping/capturing errors only sees the duplicate-record case.
+            typer.echo("No fleet record found. Run `buzz-fleet fleet init` once on the conductor host.", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Channel: {manager._community.fleet_channel_id}")
     typer.echo(f"Retrieval key: {rec.retrieval_key}")
@@ -255,6 +258,10 @@ def cancel_task(runner: CommandRunner, ident: Identity, *, task_ref: str, reason
 
 
 def _fail(e: Exception) -> None:
+    # `task` errors are JSON (this function) while `fleet` errors above are
+    # plain text (typer.echo(str(e), err=True)) -- a deliberate difference,
+    # not an inconsistency to unify: `task` is the agent-facing surface
+    # (buzz-acp parses its own output), `fleet` is owner-facing.
     typer.echo(json.dumps({"error": str(e)}), err=True)
     raise typer.Exit(code=1)
 

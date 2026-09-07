@@ -647,6 +647,51 @@ def test_agent_create_rejects_mcp_command_without_mcp_name(monkeypatch) -> None:
     assert "--mcp-name and --mcp-command" in result.output
 
 
+def test_agent_create_rejects_unsafe_mcp_name_with_message_not_traceback(monkeypatch) -> None:
+    # Finding 5 (final review): _resolve_mcp_server was called outside the
+    # try in agent_create, so an invalid --mcp-name raised a raw pydantic
+    # ValidationError (out of McpServer's own constructor) and printed a
+    # traceback instead of the message-plus-exit-1 every other validation
+    # on this command produces.
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--mcp-name", "../x", "--mcp-command", "php"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "not a safe filesystem path segment" in result.output
+
+
+def test_agent_update_rejects_unsafe_mcp_name_with_message_not_traceback(monkeypatch) -> None:
+    # Same bug, the agent_update half: agent_update had no try/except at all
+    # around _resolve_mcp_server or manager.update_agent, so any ValueError
+    # from either -- an unsafe --mcp-name, or an unsafe --env key -- printed
+    # a raw traceback.
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1",
+                                     "--mcp-name", "../x", "--mcp-command", "php"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "not a safe filesystem path segment" in result.output
+
+
+def test_agent_update_rejects_unsafe_env_key_with_message_not_traceback(monkeypatch) -> None:
+    # agent_update's own try/except (added by this fix) must also catch a
+    # ValueError raised by manager.update_agent itself (e.g. an unsafe
+    # --env key -- see test_manager.py's
+    # test_update_agent_rejects_unsafe_env_key for that check in isolation),
+    # not just one raised earlier by _resolve_mcp_server.
+    class FakeManager:
+        def update_agent(self, agent_id, **changes):
+            raise ValueError("env var name 'BUZZ_ACP_AGENT_OWNER' is reserved for buzz-fleet's own use")
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1",
+                                     "--env", "BUZZ_ACP_AGENT_OWNER=attacker"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "reserved" in result.output
+
+
 def test_agent_create_without_env_or_mcp_flags_passes_none(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -713,6 +758,43 @@ def test_fleet_init_prints_channel_and_record(monkeypatch) -> None:
     # init` — nothing stores it and nothing can regenerate it — so the CLI
     # must actually print it, not just the channel id and public key.
     assert "nsec1thesecretkeynevergetsstoredanywhere" in result.output
+
+
+def test_fleet_init_surfaces_non_runtime_error_as_message_not_traceback(monkeypatch) -> None:
+    # Finding 5 (final review): fleet_init caught only RuntimeError where
+    # every sibling command uses fleet_commands._ERRORS (RuntimeError,
+    # ValueError, JSONDecodeError, KeyError) -- _find_fleet_record indexes
+    # a relay response with meta["channel_id"], which can raise KeyError on
+    # a malformed relay reply. That must produce the same message-plus-
+    # exit-1 contract as every other failure here, not a raw traceback.
+    class FakeManager:
+        def init_fleet_channel(self, existing, host):
+            raise KeyError("channel_id")
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "init", "--community", "e"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "channel_id" in result.output
+
+
+def test_fleet_status_no_record_message_goes_to_stderr_like_its_sibling(monkeypatch) -> None:
+    # Finding 5 (final review): the duplicate-record branch already wrote to
+    # stderr, but the adjacent "No fleet record found" branch -- the *other*
+    # half of the same `if/else` that ends in the same `raise
+    # typer.Exit(code=1)` -- wrote to stdout instead. Both are the failure
+    # output of the same command and must go to the same stream.
+    class FakeManager:
+        _last_fleet_error = None
+
+        def ensure_fleet_record(self):
+            return None
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "status", "--community", "e"])
+    assert result.exit_code == 1
+    assert "No fleet record found" in result.stderr
+    assert "No fleet record found" not in result.stdout
 
 
 def test_fleet_status_reports_duplicate_record_error_instead_of_generic_message(monkeypatch) -> None:
