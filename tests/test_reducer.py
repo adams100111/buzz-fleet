@@ -4,6 +4,7 @@ import time
 import pytest
 
 from buzz_fleet.cli import fleet_commands as fc
+from buzz_fleet.orchestration import protocol
 from buzz_fleet.orchestration.protocol import parse_event
 from buzz_fleet.orchestration.record import ConductorEntry, FleetRecord
 from buzz_fleet.orchestration.reducer import reduce
@@ -316,3 +317,41 @@ def test_hostile_empty_content_does_not_crash_render_tasks() -> None:
     table = fc.render_tasks(list(state.tasks.values()), now)
     assert table is not None
     assert fc.task_to_json(state.tasks[T1])["brief"] == ""
+
+
+def test_wire_round_trip_from_build_delegate_through_parse_event_and_reduce() -> None:
+    # Addition B (final review): the highest-value test named in the review.
+    # Every reducer and CLI test hand-builds the raw event dict rather than
+    # deriving it from build_delegate's own output, so payload key names are
+    # asserted independently on each side and nothing checks they are the
+    # *same* names. The reviewer's mutation proved it: renaming
+    # `parent_task` to `parent_taskXX` in build_delegate left all 411
+    # existing tests green while silently disabling the chain-depth limit --
+    # one of the plan's four global constraints. This test takes
+    # build_delegate's real output, shapes it exactly as the relay returns
+    # it (h/p/e tags added the way relay.post/signer_client.post_message
+    # add them from OutgoingMessage's mentions/root/parent, not hand-typed
+    # payload keys), and runs it through parse_event -> reduce, checking the
+    # resulting Task's fields came from the real wire payload.
+    parent_task_id = "44444444-4444-4444-8444-444444444444"
+    msg = protocol.build_delegate(
+        task_id=T1, attempt_id=AT1, from_pubkey=A, to_pubkey=B, to_name="Reviewer", retrieval_key=RK,
+        brief="Review the CSV export.", deadline=1_800_000_000, acceptance=["tests pass"],
+        artifact=None, run_id="run-1", step=None, parent_task=parent_task_id, required=True,
+        rework_target=None, default_next=None, thread_root=None, thread_parent=None,
+    )
+    tags = [["h", CH], *(list(t) for t in msg.tags)] + [["p", m] for m in msg.mentions]
+    if msg.root:
+        tags.append(["e", msg.root, "", "root"])
+    if msg.parent and msg.parent != msg.root:
+        tags.append(["e", msg.parent, "", "reply"])
+    raw = {"id": "9" * 64, "pubkey": A, "created_at": 1_700_000_000, "kind": 9, "content": msg.content, "tags": tags}
+
+    ev = parse_event(raw)
+    task = reduce([ev], REC).tasks[T1]
+
+    assert task.parent_task == parent_task_id
+    assert task.run_id == "run-1"
+    assert task.assignee == B
+    assert task.deadline == 1_800_000_000
+    assert task.acceptance == ["tests pass"]
