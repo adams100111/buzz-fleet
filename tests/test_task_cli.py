@@ -414,3 +414,41 @@ def test_cli_tasks_empty_state_prints_no_rows(monkeypatch) -> None:
     assert result.exit_code == 0 and json.loads(result.output) == []
     result = cli.invoke(app, ["tasks"])
     assert result.exit_code == 0 and "Fleet tasks" in result.output
+
+
+def test_task_to_json_promotes_status_and_assignee_to_top_level() -> None:
+    # dataclasses.asdict(task) alone would drop these -- they're @property on Task
+    # (derived from attempts[-1]), not dataclass fields. A JSON consumer must not
+    # have to know Attempt's shape, or assume attempts is never empty, just to find
+    # out what's happening with a task.
+    s = _all_statuses_state()
+    acked = s.tasks[T_ACKED]
+    out = fc.task_to_json(acked)
+    assert out["status"] == "acked"
+    assert out["assignee"] == A
+    assert out["is_live"] is True
+    assert out["unacked"] is False
+    # still round-trips through JSON (no non-serializable values snuck in), and the
+    # ordinary dataclass fields (asdict's own contribution) are still present.
+    reloaded = json.loads(json.dumps(out))
+    assert reloaded["task_id"] == T_ACKED
+    assert reloaded["status"] == "acked"
+
+    done = fc.task_to_json(s.tasks[T_DONE])
+    assert done["status"] == "done" and done["is_live"] is False and done["unacked"] is False
+
+    open_task = fc.task_to_json(s.tasks[T_OPEN])
+    assert open_task["status"] == "open" and open_task["is_live"] is True and open_task["unacked"] is True
+
+
+def test_cli_tasks_json_includes_status_and_assignee(monkeypatch) -> None:
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner(events=[_delegate_event()]))
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["tasks", "--json"])
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.output)[0]
+    assert row["status"] == "open" and row["assignee"] == B and row["is_live"] is True and row["unacked"] is True
+    result = cli.invoke(app, ["task", "show", T1[:8], "--json"])
+    assert result.exit_code == 0, result.output
+    shown = json.loads(result.output)
+    assert shown["status"] == "open" and shown["assignee"] == B

@@ -337,7 +337,15 @@ def _age(seconds: int) -> str:
 
 def render_tasks(tasks: list[Task], now: int) -> Table:
     table = Table(title="Fleet tasks")
-    for col in ("Task", "Run", "Status", "Assignee", "Requester", "Age", "Deadline", "Attempt", "Summary"):
+    # Task/Run hold `ids.short()` 8-char ids -- these must never be squeezed below
+    # that by the table's column-width negotiation (which otherwise ellipsis-
+    # truncates them under a narrow console, e.g. the 80-column fallback Rich uses
+    # when stdout isn't a real terminal), or the "views show the first 8
+    # characters" contract silently breaks. min_width pins the floor; the other
+    # columns still shrink to fit a narrow terminal exactly as before.
+    table.add_column("Task", min_width=8, no_wrap=True)
+    table.add_column("Run", min_width=8, no_wrap=True)
+    for col in ("Status", "Assignee", "Requester", "Age", "Deadline", "Attempt", "Summary"):
         table.add_column(col)
     for t in tasks:
         remaining = t.deadline - now
@@ -349,7 +357,17 @@ def render_tasks(tasks: list[Task], now: int) -> Table:
 
 
 def task_to_json(task: Task) -> dict:
-    return asdict(task)
+    # `status`/`assignee`/`is_live`/`unacked` are @property on Task (derived from
+    # `attempts[-1]`), not dataclass fields -- `asdict()` walks fields only, so on
+    # its own it would silently drop exactly the columns a fleet-status consumer
+    # needs most, forcing every agent parsing this JSON to know Attempt's shape and
+    # assume `attempts` is never empty. `is_live`/`unacked` are included alongside
+    # `status`/`assignee` for the same reason: they're precisely what `--open` and
+    # `--unacked` already select on, so a JSON consumer gets the same status-board
+    # semantics without re-deriving the open/acked/terminal grouping from `status`
+    # itself (a literal it would otherwise have to hardcode and keep in sync with
+    # `reducer.TaskStatus`).
+    return {**asdict(task), "status": task.status, "assignee": task.assignee, "is_live": task.is_live, "unacked": task.unacked}
 
 
 def tasks_command(
@@ -372,7 +390,7 @@ def tasks_command(
     if as_json:
         typer.echo(json.dumps([task_to_json(t) for t in rows]))
         return
-    Console(width=200).print(render_tasks(rows, now))
+    Console().print(render_tasks(rows, now))
 
 
 @task_app.command("show")
@@ -389,7 +407,7 @@ def task_show(task_ref: Annotated[str, typer.Argument()], channel: Annotated[str
     if as_json:
         typer.echo(json.dumps(task_to_json(task)))
         return
-    console = Console(width=200)
+    console = Console()
     console.print(render_tasks([task], now))
     console.print(f"[bold]Brief[/bold]\n{task.brief}")
     for i, a in enumerate(task.attempts, 1):
