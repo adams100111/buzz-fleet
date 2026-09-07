@@ -553,13 +553,15 @@ def test_write_agent_files_clearing_mcp_server_removes_stale_wrapper(tmp_path: P
     # when `agent.mcp_server is not None` and never removed a stale one — the
     # TUI's documented "you can clear it" path (blank the MCP fields and save)
     # left the secret-bearing `mcp-<name>.sh` on disk forever.
+    from pydantic import SecretStr
+
     from buzz_fleet.models import McpServer
 
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={
-        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")})
     })
     write_agent_files(agent, _community(), None, None)
     wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
@@ -577,20 +579,22 @@ def test_write_agent_files_renaming_mcp_server_removes_old_wrapper(tmp_path: Pat
     # Finding 2 (final review): renaming an MCP server orphans
     # `mcp-<oldname>.sh` forever -- the new name gets its own wrapper, but
     # nothing ever removed the old one.
+    from pydantic import SecretStr
+
     from buzz_fleet.models import McpServer
 
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={
-        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")})
     })
     write_agent_files(agent, _community(), None, None)
     old_wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
     assert old_wrapper.exists()
 
     renamed = agent.model_copy(update={
-        "mcp_server": McpServer(name="renamed", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+        "mcp_server": McpServer(name="renamed", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")})
     })
     write_agent_files(renamed, _community(), None, None)
 
@@ -603,13 +607,15 @@ def test_write_agent_files_editing_mcp_server_to_bare_command_removes_old_wrappe
     # command (no args/env) makes `write_mcp_wrapper` correctly return None --
     # but a wrapper written before the edit must still be cleaned up, or
     # buzz-acp keeps a secret script on disk it no longer even points at.
+    from pydantic import SecretStr
+
     from buzz_fleet.models import McpServer
 
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={
-        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})
+        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")})
     })
     write_agent_files(agent, _community(), None, None)
     wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"

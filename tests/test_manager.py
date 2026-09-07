@@ -338,6 +338,8 @@ def test_delete_agent_removes_mcp_wrapper_and_pi_mcp_json(tmp_path: Path, monkey
     # `export TOKEN='<secret>'`) and Pi's private mcp.json (mode 0600, the
     # same secrets as JSON). Both must be gone after delete_agent, the same
     # as the env file and prompt file.
+    from pydantic import SecretStr
+
     from buzz_fleet.models import McpServer
 
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
@@ -351,7 +353,7 @@ def test_delete_agent_removes_mcp_wrapper_and_pi_mcp_json(tmp_path: Path, monkey
         display_name="Secret Bearer",
         harness="pi",
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
-        mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"}),
+        mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")}),
     )
     wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
     mcp_json = tmp_path / "work" / agent.id / ".pi-agent" / "mcp.json"
