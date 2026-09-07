@@ -8,6 +8,20 @@ COORDINATION_VERSION = "v1"
 BLOCK_START = f"<!-- buzz-fleet:coordination {COORDINATION_VERSION} -->"
 BLOCK_END = "<!-- /buzz-fleet:coordination -->"
 _ANY_BLOCK = re.compile(r"<!-- buzz-fleet:coordination [^>]*-->.*?<!-- /buzz-fleet:coordination -->\n?", re.DOTALL)
+# An unterminated start marker (no matching end marker anywhere after it) is
+# corrupt input `_ANY_BLOCK` cannot safely touch: applied on its own, that
+# regex requires *both* markers, so it leaves the orphan in place; a later
+# apply_coordination_block call would then match `_ANY_BLOCK` greedily from
+# that orphan all the way to some unrelated, later block's own end marker --
+# silently deleting everything in between, operator-authored text included.
+# The negative lookahead requires no end marker anywhere after this start
+# marker, so a genuinely well-paired block (matched by `_ANY_BLOCK` instead)
+# is never touched by this -- only a true orphan is stripped, to end of
+# string, since there is no principled way to know where its missing body
+# was meant to stop.
+_ORPHAN_START = re.compile(
+    r"<!-- buzz-fleet:coordination [^>]*-->(?!.*<!-- /buzz-fleet:coordination -->).*\Z", re.DOTALL
+)
 
 COORDINATION_TEXT = """## Fleet coordination
 
@@ -49,7 +63,8 @@ def _block() -> str:
 
 
 def apply_coordination_block(text: str | None) -> str:
-    base = _ANY_BLOCK.sub("", text or "").rstrip()
+    base = _ORPHAN_START.sub("", text or "")
+    base = _ANY_BLOCK.sub("", base).rstrip()
     return f"{base}\n\n{_block()}" if base else _block()
 
 
