@@ -145,6 +145,30 @@ def test_create_agent_writes_env_and_mcp_server_into_agent_files(tmp_path: Path,
     assert reloaded.env["DATABASE_URL"].get_secret_value() == "postgres://x"
 
 
+def test_update_agent_rejects_unsafe_env_key(tmp_path: Path, monkeypatch) -> None:
+    # Finding 4 (final review), extended: Agent.env's field_validator
+    # (models.validate_env_key) never runs for update_agent, because
+    # `current.model_copy(update=changes)` does not run field validation at
+    # all -- update_agent already knows this for the *value* type (its own
+    # comment: "Coerce explicitly rather than relying on validate-on-copy")
+    # but, before this fix, never applied the same reasoning to the *key*.
+    # `agent update --env BUZZ_ACP_AGENT_OWNER=attacker` would otherwise
+    # silently re-point a live agent's owner with no validation anywhere.
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Update Env Guard",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+
+    with pytest.raises(ValueError, match="reserved"):
+        manager.update_agent(agent.id, env={"BUZZ_ACP_AGENT_OWNER": "attacker-pubkey"})
+
+
 @pytest.mark.parametrize("field", ["env", "mcp_server"])
 def test_update_agent_env_or_mcp_server_change_does_not_republish_managed_agent(
     field: str, tmp_path: Path, monkeypatch

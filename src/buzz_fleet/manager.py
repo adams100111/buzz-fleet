@@ -20,7 +20,7 @@ from buzz_fleet import (
     systemd,
     visibility,
 )
-from buzz_fleet.models import Agent, Community, McpServer, SystemPromptSource
+from buzz_fleet.models import Agent, Community, McpServer, SystemPromptSource, validate_env_key
 from buzz_fleet.orchestration import instructions
 from buzz_fleet.orchestration.record import FleetRecord, decode_about, encode_about
 from buzz_fleet.proc import CommandRunner
@@ -536,9 +536,17 @@ class AgentManager:
             # dict[str, SecretStr] without ever becoming SecretStr — which
             # blows up the next time this agent is serialized (state.py's
             # SecretStr serializer expects an actual SecretStr instance).
-            # Coerce explicitly rather than relying on validate-on-copy.
+            # Coerce explicitly rather than relying on validate-on-copy. The
+            # same "model_copy skips validation" gap applies to the *keys*,
+            # not just the value type -- Agent.env's field_validator
+            # (models.validate_env_key) never runs for an update, so an
+            # update path calling this with an unsafe key (a newline, or the
+            # reserved BUZZ_ prefix/PI_CODING_AGENT_DIR) would otherwise
+            # silently bypass the same check `agent create` enforces.
             raw_env = changes["env"]
             assert isinstance(raw_env, dict)
+            for key in raw_env:
+                validate_env_key(key)
             changes = {**changes, "env": {k: v if isinstance(v, SecretStr) else SecretStr(v) for k, v in raw_env.items()}}
         self._ensure_owner_pubkey()
         agents = {a.id: a for a in self.list_agents()}
