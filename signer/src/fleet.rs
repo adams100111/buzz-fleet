@@ -216,6 +216,16 @@ pub fn managed_agents_from_events(events: &[nostr::Event]) -> Vec<ManagedAgentRe
     events.iter().filter_map(|e| {
         let pubkey = tag_value(e, "d")?.to_string();
         let content: serde_json::Value = serde_json::from_str(&e.content).ok()?;
+        // A record whose content is valid JSON but not an *object* (a bare
+        // array, string, number...) would make `directory()`'s `rec.get("role")`
+        // (Python side) raise on every member, not just the malformed one --
+        // the same one-bad-event-breaks-every-reader failure mode ruled on in
+        // Task 12. `managed_agent_content()` always writes a dict, so this is
+        // unreachable from buzz-fleet's own publish path, but a foreign or
+        // corrupted record must still be skipped, not trusted.
+        if !content.is_object() {
+            return None;
+        }
         Some(ManagedAgentRecord { pubkey, content })
     }).collect()
 }
@@ -272,9 +282,21 @@ pub struct PresenceEntry {
     pub updated_at: u64,
 }
 
+/// The subject of a presence event is its `p` tag, not its signer:
+/// `synthesize_presence` signs with the *relay's* keypair and carries the
+/// subject in a `p` tag (see the doc comment above). Both real upstream
+/// consumers of this shape -- `buzz-cli`'s `presence_subject()`
+/// (`crates/buzz-cli/src/commands/users.rs`) and desktop's `get_presence`
+/// (`desktop/src-tauri/src/commands/profile.rs`) -- read the `p` tag first
+/// and fall back to `event.pubkey` only when there is none (a self-signed
+/// event, which is what this parser's own unit fixtures use, but which
+/// never occurs on a real relay for this kind). Falling back to
+/// `event.pubkey` unconditionally would collapse every subject onto the
+/// relay's own key once the transport gap above is closed -- silently
+/// wrong, not just unreachable today.
 pub fn presence_from_events(events: &[nostr::Event]) -> Vec<PresenceEntry> {
     events.iter().map(|e| PresenceEntry {
-        pubkey: e.pubkey.to_hex(),
+        pubkey: tag_value(e, "p").map(str::to_string).unwrap_or_else(|| e.pubkey.to_hex()),
         status: e.content.clone(),
         updated_at: e.created_at.as_secs(),
     }).collect()
@@ -440,7 +462,45 @@ mod tests {
     }
 
     #[test]
-    fn presence_from_events_reads_pubkey_content_and_created_at() {
+    fn managed_agents_from_events_skips_non_object_content() {
+        // Valid JSON, but not an object -- a bare array must not reach
+        // `ManagedAgentRecord.content`, where the Python side's `rec.get("role")`
+        // would raise on every member, not just this malformed one.
+        let owner = Keys::generate();
+        let bare_array = signed(EventBuilder::new(Kind::Custom(30177), "[1,2,3]").tags([
+            nostr::Tag::parse(["d", &"d".repeat(64)]).unwrap(),
+        ]), &owner);
+        let bare_string = signed(EventBuilder::new(Kind::Custom(30177), "\"hello\"").tags([
+            nostr::Tag::parse(["d", &"e".repeat(64)]).unwrap(),
+        ]), &owner);
+        assert!(managed_agents_from_events(&[bare_array, bare_string]).is_empty());
+    }
+
+    #[test]
+    fn presence_from_events_reads_subject_from_p_tag_over_signer() {
+        // The real shape: `synthesize_presence` signs with the relay's own
+        // keypair and carries the *subject* in a `p` tag -- the subject must
+        // come from there, not from `event.pubkey` (which would be the relay).
+        let relay_keys = Keys::generate();
+        let agent = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(40902), "online")
+            .tag(nostr::Tag::parse(["p", &agent.public_key().to_hex()]).unwrap())
+            .custom_created_at(nostr::Timestamp::from(1700))
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+        let entries = presence_from_events(&[event]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pubkey, agent.public_key().to_hex());
+        assert_ne!(entries[0].pubkey, relay_keys.public_key().to_hex());
+        assert_eq!(entries[0].status, "online");
+        assert_eq!(entries[0].updated_at, 1700);
+    }
+
+    #[test]
+    fn presence_from_events_falls_back_to_signer_pubkey_when_no_p_tag() {
+        // Fallback case for a self-signed event with no `p` tag -- not the
+        // real relay-synthesized shape, but a defensible degrade rather than
+        // an empty/panicking read.
         let agent = Keys::generate();
         let event = EventBuilder::new(Kind::Custom(40902), "online")
             .custom_created_at(nostr::Timestamp::from(1700))
