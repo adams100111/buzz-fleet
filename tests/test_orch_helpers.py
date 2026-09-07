@@ -41,5 +41,8 @@ def test_record_round_trips_through_about() -> None:
 
 def test_record_decode_ignores_foreign_about() -> None:
     assert record.decode_about(None) is None
+    assert record.decode_about("") is None
     assert record.decode_about("just a channel description") is None
     assert record.decode_about(record.ABOUT_HEADER + "\n{not json") is None
+    assert record.decode_about(record.ABOUT_HEADER) is None
+    assert record.decode_about(record.ABOUT_HEADER + "\n" + '{"foo": "bar"}') is None
