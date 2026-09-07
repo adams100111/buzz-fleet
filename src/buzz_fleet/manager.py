@@ -147,7 +147,7 @@ class AgentManager:
            published fine — publishing the tag on the agent's kind:0
            profile is a separate, client-side-only verification path that
            never reaches the relay's own ownership record on its own.
-        6. The `buzz` CLI was never on the unit's PATH — `buzz-acp` tells an
+        8. The `buzz` CLI was never on the unit's PATH — `buzz-acp` tells an
            agent to run `buzz messages send` to reply, not something it
            posts itself, so an agent woke on a mention and could not answer
            at all. Fixed by symlinking `buzz` to `buzz-acp` (Sprig's own
