@@ -536,6 +536,11 @@ network access.
   `mcp_server` once set** — only to replace it with a new non-empty value.
   The TUI can clear both (blank the relevant fields and save); the CLI
   cannot yet.
+- **Per-agent secrets provide no isolation between agents on the same
+  host.** All units run as one user, so any agent's harness process can
+  read every other agent's env file and MCP wrapper on that machine,
+  including their private keys — spec 5.13 presents these as per-agent, but
+  on one machine they are effectively fleet-wide.
 
 ### Conductor and pipelines
 
