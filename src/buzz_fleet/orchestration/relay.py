@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from buzz_fleet import signer_client
 from buzz_fleet.orchestration.identity import Identity
 from buzz_fleet.orchestration.protocol import FleetEvent, OutgoingMessage, parse_event
@@ -104,6 +106,61 @@ def resolve_member(runner: CommandRunner, ident: Identity, channel_id: str, name
         known = ", ".join(sorted(n for _, n in members if n)) or "no named members"
         raise RuntimeError(f"{key!r} is not a member of channel {channel_id} (members: {known})")
     return matches[0]
+
+
+@dataclass(frozen=True)
+class DirectoryEntry:
+    pubkey: str
+    display_name: str | None
+    role: str | None
+    capabilities: list[str]
+    description: str | None
+    harness: str | None
+    host: str | None
+    online: bool | None
+    last_seen: int | None
+    live_tasks: int
+    version: str | None
+
+
+def directory(runner: CommandRunner, ident: Identity, *, channel_id: str | None) -> list[DirectoryEntry]:
+    """The fleet directory: every channel member joined with its owner-signed
+    managed-agent record (role/capabilities/description/harness/host/
+    version), its relay presence (online/last_seen), and its live task count
+    from the reducer. Each source is independently best-effort -- a member
+    with no managed-agent record, no presence entry, or no open tasks still
+    gets a row, with the corresponding fields None/empty/0 rather than the
+    row vanishing or the join raising.
+
+    The retrieval key and any conductor pubkeys are real channel members
+    (they hold keypairs the fleet posts to/reads as) but are not agents, so
+    both are excluded from the listing whenever a fleet record is known.
+    `ident.record` is `None` for an identity -- typically an agent's own --
+    that has never seen a fleet record, in which case nothing is excluded
+    (there is nothing to exclude it *with*).
+    """
+    default_channel, _ = _require(ident)
+    channel = channel_id or default_channel
+    members = signer_client.channel_members(runner, ident.relay_url, ident.nsec, channel, auth_tag=ident.auth_tag)
+    if ident.record:
+        excluded = {ident.record.retrieval_key, *(c.pubkey for c in ident.record.conductors.values())}
+        members = [(pk, name) for pk, name in members if pk not in excluded]
+    records = {r["pubkey"]: r["content"] for r in signer_client.read_managed_agents(
+        runner, ident.relay_url, ident.nsec, owner=ident.owner_pubkey or "", auth_tag=ident.auth_tag)} if ident.owner_pubkey else {}
+    presence = {p["pubkey"]: p for p in signer_client.read_presence(
+        runner, ident.relay_url, ident.nsec, pubkeys=[pk for pk, _ in members], auth_tag=ident.auth_tag)}
+    state = load_state(runner, ident, channel_id=channel)
+    load = {t.assignee: 0 for t in state.open_tasks()}
+    for t in state.open_tasks():
+        load[t.assignee] += 1
+    out = []
+    for pubkey, name in members:
+        rec, pres = records.get(pubkey, {}), presence.get(pubkey)
+        out.append(DirectoryEntry(pubkey=pubkey, display_name=name, role=rec.get("role"), capabilities=list(rec.get("capabilities") or []),
+                                  description=rec.get("description"), harness=rec.get("harness"), host=rec.get("host"),
+                                  online=(pres["status"] == "online") if pres else None, last_seen=pres["updated_at"] if pres else None,
+                                  live_tasks=load.get(pubkey, 0), version=rec.get("version")))
+    return sorted(out, key=lambda e: (e.display_name or "").lower())
 
 
 def post(runner: CommandRunner, ident: Identity, channel_id: str, msg: OutgoingMessage) -> str:

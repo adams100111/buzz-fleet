@@ -452,3 +452,63 @@ def test_cli_tasks_json_includes_status_and_assignee(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     shown = json.loads(result.output)
     assert shown["status"] == "open" and shown["assignee"] == B
+
+
+def test_cli_fleet_agents_json(monkeypatch) -> None:
+    from buzz_fleet.orchestration.relay import DirectoryEntry
+
+    monkeypatch.setattr(fc, "_load_manager", lambda community: type("M", (), {"ensure_fleet_record": lambda self: None, "_community": None})())
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    monkeypatch.setattr(fc.relay, "directory", lambda runner, ident, channel_id: [DirectoryEntry(
+        pubkey=B, display_name="Reviewer", role="reviewer", capabilities=["laravel"], description=None, harness="claude",
+        host="vps", online=True, last_seen=1, live_tasks=0, version="0.8.0")])
+    result = cli.invoke(app, ["fleet", "agents", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)[0]["role"] == "reviewer"
+
+
+# --- Tests added beyond the brief (Task 18: fleet agents) --------------------
+#
+# The brief's own test exercises the JSON path with a single fully-populated
+# entry. It says nothing about the table-rendering path, the error path when
+# `relay.directory` raises, or the empty-fleet case -- all specified behaviour
+# ("Errors to stderr as {"error": "..."} with exit 1. Never fake success." and
+# the shared `_ERRORS`/`_fail` contract every other fleet/task command follows).
+
+
+def test_cli_fleet_agents_table_renders_columns(monkeypatch) -> None:
+    from buzz_fleet.orchestration.relay import DirectoryEntry
+
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    monkeypatch.setattr(fc.relay, "directory", lambda runner, ident, channel_id: [DirectoryEntry(
+        pubkey=B, display_name="Reviewer", role="reviewer", capabilities=["laravel"], description=None, harness="claude",
+        host="vps", online=True, last_seen=1, live_tasks=2, version="0.8.0")])
+    result = cli.invoke(app, ["fleet", "agents"])
+    assert result.exit_code == 0, result.output
+    assert "Reviewer" in result.output and "reviewer" in result.output and "laravel" in result.output
+    assert "claude" in result.output and "vps" in result.output
+
+
+def test_cli_fleet_agents_empty_prints_no_rows(monkeypatch) -> None:
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    monkeypatch.setattr(fc.relay, "directory", lambda runner, ident, channel_id: [])
+    result = cli.invoke(app, ["fleet", "agents", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == []
+    result = cli.invoke(app, ["fleet", "agents"])
+    assert result.exit_code == 0, result.output
+
+
+def test_cli_fleet_agents_surfaces_errors_as_json_on_stderr(monkeypatch) -> None:
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner())
+
+    def _raise(env, runner, community_id):
+        raise RuntimeError("no fleet record known here")
+
+    monkeypatch.setattr(fc, "resolve_identity", _raise)
+    result = cli.invoke(app, ["fleet", "agents"])
+    assert result.exit_code == 1
+    assert json.loads(result.output) == {"error": "no fleet record known here"}

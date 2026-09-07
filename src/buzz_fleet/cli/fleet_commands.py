@@ -74,6 +74,35 @@ def fleet_status(community: Annotated[str, typer.Option()]) -> None:
     typer.echo(f"Versions recorded: {rec.versions}")
 
 
+def render_agents(entries: list[relay.DirectoryEntry]) -> Table:
+    table = Table(title="Fleet agents")
+    for col in ("Name", "Role", "Capabilities", "Harness", "Host", "Online", "Live tasks", "Version"):
+        table.add_column(col)
+    for e in entries:
+        online = "yes" if e.online is True else "no" if e.online is False else "?"
+        table.add_row(e.display_name or e.pubkey[:8], e.role or "-", ", ".join(e.capabilities) or "-",
+                      e.harness or "-", e.host or "-", online, str(e.live_tasks), e.version or "-")
+    return table
+
+
+@fleet_app.command("agents")
+def fleet_agents(
+    community: Annotated[str | None, typer.Option()] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    runner = RealCommandRunner()
+    try:
+        ident = resolve_identity(os.environ, runner, community)
+        entries = relay.directory(runner, ident, channel_id=None)
+    except _ERRORS as e:
+        _fail(e)
+        return
+    if as_json:
+        typer.echo(json.dumps([asdict(e) for e in entries]))
+        return
+    Console().print(render_agents(entries))
+
+
 task_app = typer.Typer(help="Delegate work to fleet agents, ack it, report it, cancel it")
 
 

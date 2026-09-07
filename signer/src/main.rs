@@ -160,6 +160,10 @@ enum Command {
     ReadChannelMeta { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] channel: Option<String> },
     /// Owner-signed update of a channel's about text (`-` reads stdin).
     WriteChannelAbout { #[arg(long)] relay: String, #[arg(long)] owner_nsec: String, #[arg(long)] channel: String, #[arg(long)] about: String },
+    /// Read every kind:30177 managed-agent record authored by `owner`.
+    ReadManagedAgents { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] owner: String },
+    /// Read kind:40902 presence snapshots for the given pubkeys.
+    ReadPresence { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long = "pubkey")] pubkeys: Vec<String> },
 }
 
 #[tokio::main]
@@ -363,6 +367,30 @@ async fn main() {
                 run_publish(&relay, &owner_nsec, fleet::build_write_about(channel, &about), None).await
             }.await;
             match result { Ok(()) => ok_json(json!({"ok": true})), Err(e) => err_json(e, 1) }
+        }
+        Command::ReadManagedAgents { relay, nsec, auth_tag, owner } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let owner = nostr::PublicKey::from_hex(&owner).map_err(|e| anyhow::anyhow!("invalid: owner {e}"))?;
+                fleet::run_read_managed_agents(&relay, &nsec, tag.as_ref(), owner).await
+            }.await;
+            match result {
+                Ok(records) => ok_json(json!({"ok": true, "agents": records})),
+                Err(e) => err_json(e, 1),
+            }
+        }
+        Command::ReadPresence { relay, nsec, auth_tag, pubkeys } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let pubkeys: Vec<nostr::PublicKey> = pubkeys.iter()
+                    .map(|p| nostr::PublicKey::from_hex(p).map_err(|e| anyhow::anyhow!("invalid: pubkey {e}")))
+                    .collect::<anyhow::Result<_>>()?;
+                fleet::run_read_presence(&relay, &nsec, tag.as_ref(), pubkeys).await
+            }.await;
+            match result {
+                Ok(entries) => ok_json(json!({"ok": true, "presence": entries})),
+                Err(e) => err_json(e, 1),
+            }
         }
     };
     std::process::exit(code);

@@ -530,6 +530,7 @@ class AgentManager:
                 "role",
                 "capabilities",
                 "description",
+                "harness",
             }
             vs = updated.visibility_state.model_copy(deep=True)
             if any(f in changes and getattr(updated, f) != getattr(current, f) for f in content_fields):

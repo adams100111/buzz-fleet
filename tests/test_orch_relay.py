@@ -8,6 +8,7 @@ from buzz_fleet.orchestration.identity import Identity
 from buzz_fleet.orchestration.protocol import PAYLOAD_VERSION, TAG_FLEET, OutgoingMessage, task_tag
 
 CH, RK, OWNER = "6f1c0000-0000-4000-8000-000000000000", "r" * 64, "0" * 64
+B = "b" * 64
 IDENT = Identity(nsec="nsec1a", pubkey="a" * 64, relay_url="wss://r", auth_tag=None, fleet_channel=CH,
                  retrieval_key=RK, is_owner=False, owner_pubkey=OWNER, record=None)
 
@@ -191,3 +192,125 @@ def test_load_state_defaults_channel_and_drops_deleted_tasks() -> None:
     runner = PagingRunner([keep, dropped, tomb])
     st = relay.load_state(runner, IDENT, channel_id=None)
     assert set(st.tasks) == {kept_task}
+
+
+def test_directory_joins_members_records_presence_and_load() -> None:
+    members = json.dumps({"ok": True, "members": [{"pubkey": B, "display_name": "Reviewer"}]})
+    records = json.dumps({"ok": True, "agents": [{"pubkey": B, "content": {"role": "reviewer", "capabilities": ["laravel"],
+                                                                            "description": "Reviews.", "harness": "claude", "host": "vps", "version": "0.8.0"}}]})
+    presence = json.dumps({"ok": True, "presence": [{"pubkey": B, "status": "online", "updated_at": 1700}]})
+    runner = PagingRunner([_event(1, 1000) | {"tags": [["p", RK], ["fleet", json.dumps({"v": 1, "type": "delegate", "task": "t", "attempt": "a", "from": "a" * 64, "to": B, "deadline": 9, "required": True, "acceptance": []})], ["t", "fleet:task:t"]]}],
+                          {"channel-members": members, "read-managed-agents": records, "read-presence": presence})
+    ident = Identity(**{**IDENT.__dict__, "owner_pubkey": OWNER})
+    [entry] = relay.directory(runner, ident, channel_id=CH)
+    assert (entry.display_name, entry.role, entry.capabilities, entry.host, entry.online, entry.live_tasks) == ("Reviewer", "reviewer", ["laravel"], "vps", True, 1)
+
+
+# --- Beyond the brief (directory) -------------------------------------------
+#
+# The brief's own test covers the full-data happy path (a member with a matching
+# managed-agent record, a matching presence entry, and one open task). It says
+# nothing about how the join degrades when any of those three sources has no
+# entry for a member -- exactly the seam the task brief calls out by name
+# ("what does directory() do for a channel member with no managed-agent record,
+# no presence entry, or no tasks?"). The following exercises each of those, plus
+# the retrieval-key/conductor exclusion the brief's prose specifies but gives no
+# test for, plus the harness/version fields (the gap this task closed).
+
+
+def test_directory_degrades_with_no_record_no_presence_and_no_tasks() -> None:
+    """A member with no managed-agent record, no presence entry, and no live
+    tasks must still appear -- with role/capabilities/description/harness/host/
+    version/online/last_seen all sensibly empty/None, not a KeyError or a
+    dropped row."""
+    members = json.dumps({"ok": True, "members": [{"pubkey": B, "display_name": "Nobody's Agent"}]})
+    empty_records = json.dumps({"ok": True, "agents": []})
+    empty_presence = json.dumps({"ok": True, "presence": []})
+    runner = PagingRunner([], {"channel-members": members, "read-managed-agents": empty_records, "read-presence": empty_presence})
+    ident = Identity(**{**IDENT.__dict__, "owner_pubkey": OWNER})
+    [entry] = relay.directory(runner, ident, channel_id=CH)
+    assert entry.pubkey == B
+    assert entry.display_name == "Nobody's Agent"
+    assert entry.role is None
+    assert entry.capabilities == []
+    assert entry.description is None
+    assert entry.harness is None
+    assert entry.host is None
+    assert entry.version is None
+    assert entry.online is None
+    assert entry.last_seen is None
+    assert entry.live_tasks == 0
+
+
+def test_directory_reports_offline_when_presence_status_is_not_online() -> None:
+    members = json.dumps({"ok": True, "members": [{"pubkey": B, "display_name": "Reviewer"}]})
+    records = json.dumps({"ok": True, "agents": []})
+    presence = json.dumps({"ok": True, "presence": [{"pubkey": B, "status": "offline", "updated_at": 1234}]})
+    runner = PagingRunner([], {"channel-members": members, "read-managed-agents": records, "read-presence": presence})
+    ident = Identity(**{**IDENT.__dict__, "owner_pubkey": OWNER})
+    [entry] = relay.directory(runner, ident, channel_id=CH)
+    assert entry.online is False
+    assert entry.last_seen == 1234
+
+
+def test_directory_excludes_retrieval_key_and_conductors_when_record_present() -> None:
+    """The retrieval key and any conductor pubkeys are channel members (they
+    hold real keypairs the fleet posts to/reads as), but they are not agents
+    -- the brief's prose says both must be excluded from the listing whenever
+    a fleet record is known."""
+    from buzz_fleet.orchestration.record import ConductorEntry, FleetRecord
+
+    conductor_pubkey = "c" * 64
+    members = json.dumps({"ok": True, "members": [
+        {"pubkey": B, "display_name": "Reviewer"},
+        {"pubkey": RK, "display_name": None},
+        {"pubkey": conductor_pubkey, "display_name": "conductor-host"},
+    ]})
+    empty = json.dumps({"ok": True, "agents": []})
+    no_presence = json.dumps({"ok": True, "presence": []})
+    runner = PagingRunner([], {"channel-members": members, "read-managed-agents": empty, "read-presence": no_presence})
+    record = FleetRecord(retrieval_key=RK, conductors={"h1": ConductorEntry(pubkey=conductor_pubkey, host="h1")}, created_at=1)
+    ident = Identity(**{**IDENT.__dict__, "owner_pubkey": OWNER, "record": record})
+    entries = relay.directory(runner, ident, channel_id=CH)
+    assert [e.pubkey for e in entries] == [B]
+
+
+def test_directory_keeps_all_members_when_no_record_known() -> None:
+    """Without a known fleet record (e.g. an agent identity with no local
+    record), there is no retrieval key or conductor set to exclude -- every
+    member is listed."""
+    members = json.dumps({"ok": True, "members": [{"pubkey": B, "display_name": "Reviewer"},
+                                                   {"pubkey": RK, "display_name": None}]})
+    empty = json.dumps({"ok": True, "agents": []})
+    no_presence = json.dumps({"ok": True, "presence": []})
+    runner = PagingRunner([], {"channel-members": members, "read-managed-agents": empty, "read-presence": no_presence})
+    entries = relay.directory(runner, IDENT, channel_id=CH)
+    assert {e.pubkey for e in entries} == {B, RK}
+
+
+def test_directory_sorts_by_display_name_case_insensitively() -> None:
+    # Sort key is `(display_name or "").lower()` -- a member with no display
+    # name sorts to the front (empty string is the lexicographically smallest
+    # key), not to the back and not dropped.
+    members = json.dumps({"ok": True, "members": [{"pubkey": "c" * 64, "display_name": "zeta"},
+                                                   {"pubkey": "d" * 64, "display_name": "Alpha"},
+                                                   {"pubkey": "e" * 64, "display_name": None}]})
+    empty = json.dumps({"ok": True, "agents": []})
+    no_presence = json.dumps({"ok": True, "presence": []})
+    runner = PagingRunner([], {"channel-members": members, "read-managed-agents": empty, "read-presence": no_presence})
+    entries = relay.directory(runner, IDENT, channel_id=CH)
+    assert [e.display_name for e in entries] == [None, "Alpha", "zeta"]
+
+
+def test_directory_skips_managed_agent_read_when_owner_pubkey_unknown() -> None:
+    """`ident.owner_pubkey` is `None` for an agent identity whose owner hasn't
+    been resolved -- the brief's own `directory()` body only calls
+    `read_managed_agents` `if ident.owner_pubkey`. Confirm that guard actually
+    prevents the call rather than passing an empty-string owner through."""
+    members = json.dumps({"ok": True, "members": [{"pubkey": B, "display_name": "Reviewer"}]})
+    no_presence = json.dumps({"ok": True, "presence": []})
+    runner = PagingRunner([], {"channel-members": members, "read-presence": no_presence})
+    ident = Identity(**{**IDENT.__dict__, "owner_pubkey": None})
+    [entry] = relay.directory(runner, ident, channel_id=CH)
+    assert entry.role is None
+    assert not any(c[1] == "read-managed-agents" for c in runner.calls)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import socket
 from typing import Literal
 
-from buzz_fleet import systemd
+from buzz_fleet import __version__, systemd
 from buzz_fleet.models import Agent
 
 
@@ -59,6 +59,8 @@ def managed_agent_content(agent: Agent) -> dict:
         "role": agent.role,
         "capabilities": list(agent.capabilities or []),
         "description": agent.description,
+        "harness": agent.harness,
+        "version": __version__,
     }
 
 

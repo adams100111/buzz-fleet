@@ -197,6 +197,105 @@ pub async fn run_read_channel_meta(relay: &str, nsec: &str, auth_tag: Option<&no
     Ok(channel_meta(&metadata))
 }
 
+/// One kind:30177 managed-agent record: `pubkey` is the value of the
+/// event's own `d` tag (the agent's pubkey, per
+/// `agent_events::build_managed_agent` -- not the pubkey that *signed* the
+/// event, which is always the owner), `content` is the event's JSON body
+/// parsed per `visibility.py`'s field set.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ManagedAgentRecord {
+    pub pubkey: String,
+    pub content: serde_json::Value,
+}
+
+/// Parses kind:30177 events into `(pubkey, content)` pairs. An event with no
+/// `d` tag, or whose content is not valid JSON, is skipped rather than
+/// failing the whole read -- one malformed record must not take down `fleet
+/// agents` for every other agent.
+pub fn managed_agents_from_events(events: &[nostr::Event]) -> Vec<ManagedAgentRecord> {
+    events.iter().filter_map(|e| {
+        let pubkey = tag_value(e, "d")?.to_string();
+        let content: serde_json::Value = serde_json::from_str(&e.content).ok()?;
+        Some(ManagedAgentRecord { pubkey, content })
+    }).collect()
+}
+
+pub async fn run_read_managed_agents(
+    relay: &str, nsec: &str, auth_tag: Option<&nostr::Tag>, owner: nostr::PublicKey,
+) -> anyhow::Result<Vec<ManagedAgentRecord>> {
+    let keys = nostr::Keys::parse(nsec)?;
+    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, auth_tag).await?;
+    let events = collect_events(&mut conn, nostr::Filter::new().kind(nostr::Kind::Custom(30177)).authors([owner])).await?;
+    let _ = conn.disconnect().await;
+    Ok(managed_agents_from_events(&events))
+}
+
+/// One kind:40902 presence entry, matching `read-presence`'s documented
+/// `{"pubkey","status","updated_at"}` interface: `pubkey`/`status` come from
+/// the matching event's `pubkey`/`content`, `updated_at` from its
+/// `created_at`.
+///
+/// IMPORTANT -- confirmed against the upstream relay (`buzz` @ 7a9a523):
+/// this interface, and the `.authors(pubkeys)` filter `run_read_presence`
+/// builds below, are written exactly as specified, but neither kind:40902
+/// nor kind:20001 (`KIND_PRESENCE_SNAPSHOT`/`KIND_PRESENCE_UPDATE` in
+/// `crates/buzz-core/src/kind.rs`) is reachable through the plain NIP-01
+/// `REQ`/`EOSE` websocket protocol `collect_events` speaks:
+/// - kind:40902 is documented as a "relay-only sidecar kind (never
+///   client-submitted)" and is never persisted; the only place it is ever
+///   produced is `synthesize_presence` in the relay's HTTP bridge
+///   (`crates/buzz-relay/src/api/bridge.rs`), which answers a
+///   `kind:40902`/`kind:20001` + `authors` filter with a Redis lookup,
+///   returning synthesized **kind:20001** events **signed by the relay's
+///   own keypair** (not the subject), with the subject in a `p` tag and
+///   `content` a bare status string -- never a stored, subject-signed
+///   kind:40902 event an `authors` filter could ever match.
+/// - kind:20001 is itself in the ephemeral range (20000-29999) and is
+///   explicitly "never stored" (`handlers/event.rs`'s
+///   `handle_ephemeral_event`).
+/// - The HTTP bridge is a *separate* transport (`reqwest` + a NIP-98-style
+///   signed request, per upstream `buzz-cli`'s `BuzzClient`) from the
+///   websocket connection every other subcommand in this file uses.
+///
+/// Confirmed live against wss://buzz.eltahir.me: a `query` for both
+/// kind:40902 and kind:20001 (`authors` = known live agent pubkeys)
+/// returned zero events on this same websocket path, while an equivalent
+/// kind:0 query over the same connection succeeded -- so `read-presence`
+/// will return an empty list against every real relay today. Fixing this
+/// for real needs an HTTP-bridge client or a different design; that is an
+/// architectural decision outside this function's scope -- see
+/// task-18-report.md.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PresenceEntry {
+    pub pubkey: String,
+    pub status: String,
+    pub updated_at: u64,
+}
+
+pub fn presence_from_events(events: &[nostr::Event]) -> Vec<PresenceEntry> {
+    events.iter().map(|e| PresenceEntry {
+        pubkey: e.pubkey.to_hex(),
+        status: e.content.clone(),
+        updated_at: e.created_at.as_secs(),
+    }).collect()
+}
+
+pub async fn run_read_presence(
+    relay: &str, nsec: &str, auth_tag: Option<&nostr::Tag>, pubkeys: Vec<nostr::PublicKey>,
+) -> anyhow::Result<Vec<PresenceEntry>> {
+    // Matches `run_channel_members`'s own guard: an empty `authors` filter
+    // legitimately matches nothing, but there is no reason to open a
+    // connection and round-trip a REQ just to learn that.
+    if pubkeys.is_empty() {
+        return Ok(vec![]);
+    }
+    let keys = nostr::Keys::parse(nsec)?;
+    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, auth_tag).await?;
+    let events = collect_events(&mut conn, nostr::Filter::new().kind(nostr::Kind::Custom(40902)).authors(pubkeys)).await?;
+    let _ = conn.disconnect().await;
+    Ok(presence_from_events(&events))
+}
+
 pub fn build_create_channel(name: &str, about: Option<&str>) -> anyhow::Result<(Uuid, EventBuilder)> {
     let id = Uuid::new_v4();
     let builder = buzz_sdk::builders::build_create_channel(id, name, None, None, about, None).map_err(|e| anyhow::anyhow!(e))?;
@@ -312,5 +411,45 @@ mod tests {
         assert_eq!(m.about.as_deref(), Some("line one\n{\"buzz-fleet\":1}"));
         assert!(!m.archived);
         assert!(metas.iter().find(|m| m.channel_id == id2.to_string()).unwrap().archived);
+    }
+
+    #[test]
+    fn managed_agents_from_events_reads_d_tag_and_parses_content() {
+        let owner = Keys::generate();
+        let agent_pubkey = "c".repeat(64);
+        let content = r#"{"name":"Reviewer","role":"reviewer","harness":"claude","version":"0.8.0"}"#;
+        let event = signed(EventBuilder::new(Kind::Custom(30177), content).tags([
+            nostr::Tag::parse(["d", &agent_pubkey]).unwrap(),
+        ]), &owner);
+        let records = managed_agents_from_events(&[event]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pubkey, agent_pubkey);
+        assert_eq!(records[0].content["role"], "reviewer");
+        assert_eq!(records[0].content["harness"], "claude");
+        assert_eq!(records[0].content["version"], "0.8.0");
+    }
+
+    #[test]
+    fn managed_agents_from_events_skips_missing_d_tag_and_malformed_content() {
+        let owner = Keys::generate();
+        let no_d_tag = signed(EventBuilder::new(Kind::Custom(30177), r#"{"name":"x"}"#), &owner);
+        let bad_json = signed(EventBuilder::new(Kind::Custom(30177), "not json").tags([
+            nostr::Tag::parse(["d", &"d".repeat(64)]).unwrap(),
+        ]), &owner);
+        assert!(managed_agents_from_events(&[no_d_tag, bad_json]).is_empty());
+    }
+
+    #[test]
+    fn presence_from_events_reads_pubkey_content_and_created_at() {
+        let agent = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(40902), "online")
+            .custom_created_at(nostr::Timestamp::from(1700))
+            .sign_with_keys(&agent)
+            .unwrap();
+        let entries = presence_from_events(&[event]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pubkey, agent.public_key().to_hex());
+        assert_eq!(entries[0].status, "online");
+        assert_eq!(entries[0].updated_at, 1700);
     }
 }

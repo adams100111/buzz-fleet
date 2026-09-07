@@ -20,6 +20,8 @@ from buzz_fleet.signer_client import (
     publish_managed_agent,
     query,
     read_channel_meta,
+    read_managed_agents,
+    read_presence,
     retract_managed_agent,
     write_channel_about,
 )
@@ -208,3 +210,45 @@ def test_create_channel() -> None:
     runner = FakeRunner(json.dumps({"ok": True, "channel_id": CH}))
     assert create_channel(runner, "wss://r", "nsec1owner", "fleet", about="Fleet") == CH
     assert runner.calls[0][-4:] == ["--name", "fleet", "--about", "Fleet"]
+
+
+def test_read_managed_agents_argv_and_parsing() -> None:
+    content = {"role": "reviewer", "capabilities": ["laravel"], "harness": "claude", "version": "0.8.0"}
+    runner = FakeRunner(json.dumps({"ok": True, "agents": [{"pubkey": "b" * 64, "content": content}]}))
+    agents = read_managed_agents(runner, "wss://r", "nsec1a", owner="a" * 64, auth_tag=None)
+    assert agents == [{"pubkey": "b" * 64, "content": content}]
+    assert runner.calls == [["buzz-fleet-signer", "read-managed-agents", "--relay", "wss://r", "--nsec", "nsec1a",
+                             "--owner", "a" * 64]]
+
+
+def test_read_managed_agents_passes_auth_tag() -> None:
+    runner = FakeRunner(json.dumps({"ok": True, "agents": []}))
+    read_managed_agents(runner, "wss://r", "nsec1a", owner="a" * 64, auth_tag='["auth","a","","b"]')
+    assert "--auth-tag" in runner.calls[0] and '["auth","a","","b"]' in runner.calls[0]
+
+
+def test_read_managed_agents_raises_on_error() -> None:
+    runner = FakeRunner(json.dumps({"ok": False, "error": "restricted"}), returncode=1)
+    with pytest.raises(RuntimeError, match="restricted"):
+        read_managed_agents(runner, "wss://r", "nsec1a", owner="a" * 64, auth_tag=None)
+
+
+def test_read_presence_argv_and_parsing() -> None:
+    runner = FakeRunner(json.dumps({"ok": True, "presence": [{"pubkey": "b" * 64, "status": "online", "updated_at": 1700}]}))
+    presence = read_presence(runner, "wss://r", "nsec1a", pubkeys=["b" * 64, "c" * 64], auth_tag=None)
+    assert presence == [{"pubkey": "b" * 64, "status": "online", "updated_at": 1700}]
+    assert runner.calls == [["buzz-fleet-signer", "read-presence", "--relay", "wss://r", "--nsec", "nsec1a",
+                             "--pubkey", "b" * 64, "--pubkey", "c" * 64]]
+
+
+def test_read_presence_passes_auth_tag_and_empty_pubkeys() -> None:
+    runner = FakeRunner(json.dumps({"ok": True, "presence": []}))
+    assert read_presence(runner, "wss://r", "nsec1a", pubkeys=[], auth_tag='["auth","a","","b"]') == []
+    assert runner.calls == [["buzz-fleet-signer", "read-presence", "--relay", "wss://r", "--nsec", "nsec1a", "--auth-tag",
+                             '["auth","a","","b"]']]
+
+
+def test_read_presence_raises_on_error() -> None:
+    runner = FakeRunner(json.dumps({"ok": False, "error": "restricted"}), returncode=1)
+    with pytest.raises(RuntimeError, match="restricted"):
+        read_presence(runner, "wss://r", "nsec1a", pubkeys=["b" * 64], auth_tag=None)

@@ -278,3 +278,17 @@ def read_channel_meta(runner: CommandRunner, relay_url: str, nsec: str, *, chann
 def write_channel_about(runner: CommandRunner, relay_url: str, owner_nsec: str, channel_id: str, about: str) -> None:
     args = [BINARY, "write-channel-about", "--relay", relay_url, "--owner-nsec", owner_nsec, "--channel", channel_id, "--about", about]
     _check_ok(runner.run(args), "write-channel-about")
+
+
+def read_managed_agents(runner: CommandRunner, relay_url: str, nsec: str, *, owner: str, auth_tag: str | None) -> list[dict]:
+    args = [BINARY, "read-managed-agents", "--relay", relay_url, "--nsec", nsec, *_auth_args(auth_tag), "--owner", owner]
+    agents: list[dict] = _check_ok(runner.run(args), "read-managed-agents")["agents"]
+    return agents
+
+
+def read_presence(runner: CommandRunner, relay_url: str, nsec: str, *, pubkeys: list[str], auth_tag: str | None) -> list[dict]:
+    args = [BINARY, "read-presence", "--relay", relay_url, "--nsec", nsec, *_auth_args(auth_tag)]
+    for pk in pubkeys:
+        args += ["--pubkey", pk]
+    presence: list[dict] = _check_ok(runner.run(args), "read-presence")["presence"]
+    return presence
