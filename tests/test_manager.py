@@ -1139,6 +1139,21 @@ def test_ensure_runtime_ready_discovers_record_joins_and_rewrites_env(tmp_path: 
     assert state.load_agents("eltahir")[0].visibility_state.channels[FLEET] == "joined"
 
 
+def test_ensure_runtime_ready_refreshes_stale_block(tmp_path: Path, monkeypatch) -> None:
+    runner = FakeRunner()
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+    agent = manager.create_agent(display_name="Blocky", harness="claude",
+                                 system_prompt_source=SystemPromptSource(kind="inline", text="hi"))
+    env_path = agent_env_path(agent.id)
+    env_path.write_text(env_path.read_text().replace("coordination v1", "coordination v0"))
+    runner.calls.clear()
+
+    manager.ensure_runtime_ready()
+
+    assert "coordination v1" in env_path.read_text()
+    assert any(a[:3] == ["systemctl", "--user", "restart"] and agent.id in a[3] for a in runner.calls)
+
+
 def test_create_agent_refuses_duplicate_display_name_unless_forced(tmp_path: Path, monkeypatch) -> None:
     runner = FakeRunner()
     runner.channels = [{"channel_id": FLEET, "name": "fleet", "about": _record_about(), "archived": False}]

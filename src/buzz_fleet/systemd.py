@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from buzz_fleet.buzz_acp import BUZZ_ACP_DIR, BUZZ_ACP_PATH
 from buzz_fleet.harnesses import resolve_adapter_command
 from buzz_fleet.models import Agent, Community
+from buzz_fleet.orchestration.instructions import apply_coordination_block
 
 if TYPE_CHECKING:
     # Task 7 creates buzz_fleet.proc; guard this import so Task 6 doesn't
@@ -195,8 +196,7 @@ def write_agent_files(
         lines.append(env_line("BUZZ_FLEET_CHANNEL", community.fleet_channel_id))
     if community.fleet_record:
         lines.append(env_line("BUZZ_FLEET_RETRIEVAL_KEY", community.fleet_record.retrieval_key))
-    if agent.team_instructions:
-        lines.append(env_line("BUZZ_ACP_TEAM_INSTRUCTIONS", agent.team_instructions))
+    lines.append(env_line("BUZZ_ACP_TEAM_INSTRUCTIONS", apply_coordination_block(agent.team_instructions)))
     if agent.model:
         lines.append(env_line("BUZZ_ACP_MODEL", agent.model))
     if agent.parallelism is not None:

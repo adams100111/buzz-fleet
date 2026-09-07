@@ -19,6 +19,7 @@ from buzz_fleet import (
     visibility,
 )
 from buzz_fleet.models import Agent, Community, SystemPromptSource
+from buzz_fleet.orchestration import instructions
 from buzz_fleet.orchestration.record import FleetRecord, decode_about, encode_about
 from buzz_fleet.proc import CommandRunner
 from buzz_fleet.slug import agent_slug
@@ -311,10 +312,13 @@ class AgentManager:
                 _agent_env_has(agent.id, "BUZZ_FLEET_CHANNEL", self._community.fleet_channel_id or "")
                 and _agent_env_has(agent.id, "BUZZ_FLEET_RETRIEVAL_KEY", rec.retrieval_key)
             )
+            env_path = systemd.agent_env_path(agent.id)
+            needs_block = not instructions.has_current_block(env_path.read_text() if env_path.exists() else "")
             if (
                 not needs_full_refresh
                 and not needs_auth_tag
                 and not needs_fleet_env
+                and not needs_block
                 and _read_agent_command(agent.id) == resolved_command
             ):
                 continue

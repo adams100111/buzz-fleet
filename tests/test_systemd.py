@@ -50,7 +50,11 @@ def test_write_agent_files_creates_env_and_prompt(tmp_path: Path, monkeypatch) -
     assert "BUZZ_ACP_AGENT_COMMAND=claude-agent-acp" in env_content
     assert "ANTHROPIC_API_KEY=sk-ant-test" in env_content
     assert f"BUZZ_ACP_SYSTEM_PROMPT_FILE={agent_prompt_path(agent.id)}" in env_content
-    assert "BUZZ_ACP_TEAM_INSTRUCTIONS=Team-wide rules here." in env_content
+    # Quoted, not bare: every agent's team instructions now always carry the
+    # appended fleet coordination block (instructions.apply_coordination_block),
+    # which is itself multi-line — so even a single-line operator value like
+    # this one is written in systemd's quoted multi-line form (env_line).
+    assert 'BUZZ_ACP_TEAM_INSTRUCTIONS="Team-wide rules here.' in env_content
     assert agent_prompt_path(agent.id).read_text() == "You are the Laravel dev."
 
 
@@ -361,6 +365,18 @@ def test_write_agent_files_quotes_multiline_team_instructions(tmp_path: Path, mo
     write_agent_files(agent, _community(), None, None)
 
     assert 'BUZZ_ACP_TEAM_INSTRUCTIONS="# Rules\n\n- one\n- two' in agent_env_path(agent.id).read_text()
+
+
+def test_write_agent_files_injects_coordination_block(tmp_path: Path, monkeypatch) -> None:
+    from buzz_fleet.orchestration.instructions import BLOCK_START
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+
+    write_agent_files(_agent().model_copy(update={"team_instructions": None}), _community(), None, None)
+
+    assert BLOCK_START in agent_env_path("laravel-backend-dev").read_text()
 
 
 def test_write_agent_files_exports_fleet_env_when_known(tmp_path: Path, monkeypatch) -> None:
