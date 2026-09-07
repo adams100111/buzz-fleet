@@ -45,11 +45,16 @@ class FakeRunner:
         return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
 
 
-def _delegate_event(task=T1, attempt=AT1, requester=A, assignee=B, run=None, parent=None) -> dict:
+def _delegate_event(task=T1, attempt=AT1, requester=A, assignee=B, run=None, parent=None, event_id=None) -> dict:
     payload = {"v": 1, "type": "delegate", "task": task, "attempt": attempt, "run": run, "step": None, "parent_task": parent,
                "required": True, "from": requester, "to": assignee, "deadline": 1000, "rework_target": None,
                "artifact": {"repo": "git@x:o/r.git", "commit": "c" * 40, "branch": None, "base": None}, "acceptance": []}
-    return {"id": task[:8] * 8, "pubkey": requester, "created_at": 100, "kind": 9, "content": "brief",
+    # event_id defaults to task[:8] * 8 (the brief's own fixture derivation) -- but two
+    # tasks sharing an 8-char task-id prefix would then collide on event id too, and the
+    # reducer's own event-level dedup (reduce()'s `seen` set) would silently drop the
+    # second one. The explicit override lets a test construct a genuine prefix ambiguity
+    # (same task-id prefix, distinct underlying relay events) without tripping that dedup.
+    return {"id": event_id or task[:8] * 8, "pubkey": requester, "created_at": 100, "kind": 9, "content": "brief",
             "tags": [["h", CH], ["p", RK], ["t", "fleet"], ["t", f"fleet:task:{task}"], ["p", assignee], ["fleet", json.dumps(payload)]]}
 
 
@@ -130,6 +135,23 @@ def test_report_refusals() -> None:
     with pytest.raises(RuntimeError, match="unknown id"):
         fc.report_task(runner, REVIEWER, task_ref="zzzzzzzz", status="done", summary="x", next_task="default",
                        input_commit=None, output_commit=None, evidence=[], channel=None)
+
+
+def test_ambiguous_task_prefix_raises_and_lists_candidates() -> None:
+    # Global constraint: "a task reference accepts a unique prefix; ambiguity is an
+    # error listing candidates, never a silent pick." The behaviour is already
+    # correct (ids.match_prefix), but nothing exercised it through the task_cli
+    # surface -- silently acting on the wrong task is exactly what this must prevent.
+    prefix = "abcdefgh"
+    task_x, attempt_x = f"{prefix}-1111-4111-8111-111111111111", f"{prefix}-aaaa-4aaa-8aaa-111111111111"
+    task_y, attempt_y = f"{prefix}-2222-4222-8222-222222222222", f"{prefix}-bbbb-4bbb-8bbb-222222222222"
+    runner = FakeRunner(events=[_delegate_event(task=task_x, attempt=attempt_x, event_id="e" * 63 + "1"),
+                                _delegate_event(task=task_y, attempt=attempt_y, event_id="e" * 63 + "2")])
+    with pytest.raises(RuntimeError, match="ambiguous id") as exc_info:
+        fc.ack_task(runner, REVIEWER, task_ref=prefix, channel=None)
+    message = str(exc_info.value)
+    assert prefix in message
+    assert message.count(",") == 1, f"expected exactly two candidates listed, got: {message!r}"
 
 
 def test_cancel_by_requester_only() -> None:

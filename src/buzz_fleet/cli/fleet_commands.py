@@ -89,15 +89,19 @@ def _limits(ident: Identity) -> Limits:
     return ident.record.limits if ident.record else Limits()
 
 
-def _find_task(state: State, task_ref: str) -> Task:
+def _match_task_id(state: State, task_ref: str) -> str:
     try:
-        return state.tasks[ids.match_prefix(task_ref, state.tasks)]
+        return ids.match_prefix(task_ref, state.tasks)
     except ValueError as e:
         # ids.match_prefix raises ValueError (Task 8's contract, shared with other
         # callers that still expect ValueError) -- but every other error path in
-        # this module raises RuntimeError, and callers of ack/report/cancel_task
-        # rely on that uniformly. Re-wrap here rather than changing match_prefix.
+        # this module raises RuntimeError, and every caller of this helper relies
+        # on that uniformly. Re-wrap here rather than changing match_prefix.
         raise RuntimeError(str(e)) from e
+
+
+def _find_task(state: State, task_ref: str) -> Task:
+    return state.tasks[_match_task_id(state, task_ref)]
 
 
 def _post_idempotent(runner: CommandRunner, ident: Identity, channel: str, msg: protocol.OutgoingMessage,
@@ -137,7 +141,7 @@ def delegate_task(runner: CommandRunner, ident: Identity, *, to: str, brief: str
     if run_id is None and state.open_adhoc_by_requester(ident.pubkey) >= limits.open_adhoc_per_requester:
         raise RuntimeError(f"you already have {limits.open_adhoc_per_requester} open ad-hoc tasks; report or cancel one first")
     if parent_task:
-        parent_task = ids.match_prefix(parent_task, state.tasks)
+        parent_task = _match_task_id(state, parent_task)
         if state.chain_depth(parent_task) + 1 > limits.chain_depth:
             raise RuntimeError(f"delegation chain would exceed depth {limits.chain_depth}")
     if artifact is None and cwd is not None and git_run is not None:
