@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from buzz_fleet.orchestration import protocol as p
 
 RK = "f" * 64
@@ -59,6 +61,45 @@ def test_build_ack_and_report_and_cancel() -> None:
     can = p.build_cancel_task(task_id=T, reason="superseded", from_pubkey=A, assignee_pubkey=B, retrieval_key=RK,
                               root="d" * 64, parent="d" * 64)
     assert json.loads(dict(can.tags)["fleet"])["type"] == "cancel-task" and can.mentions == [B, RK]
+
+
+def test_build_delegate_oversized_payload_rejected() -> None:
+    # `brief` lives only in the human-readable content, not the JSON payload, so a giant
+    # acceptance list (a genuine payload field) is what actually drives the payload over the
+    # 8 KiB cap.
+    with pytest.raises(ValueError, match="exceeds"):
+        p.build_delegate(
+            task_id=T, attempt_id=AT, from_pubkey=A, to_pubkey=B, to_name="Reviewer", retrieval_key=RK,
+            brief="x", deadline=1, acceptance=["x" * 9000], artifact=None, run_id=None, step=None,
+            parent_task=None, required=True, rework_target=None, default_next=None,
+            thread_root=None, thread_parent=None,
+        )
+
+
+def test_build_delegate_run_without_step_omits_step_from_header() -> None:
+    msg = p.build_delegate(
+        task_id=T, attempt_id=AT, from_pubkey=A, to_pubkey=B, to_name="Reviewer", retrieval_key=RK,
+        brief="x", deadline=1, acceptance=[], artifact=None,
+        run_id="33333333-3333-4333-8333-333333333333", step=None, parent_task=None,
+        required=True, rework_target=None, default_next=None, thread_root=None, thread_parent=None,
+    )
+    assert msg.content.startswith("@Reviewer ▶ task 11111111 (run 33333333)\n")
+
+
+def test_build_report_hands_onward_to_explicit_next_task() -> None:
+    rep = p.build_report(task_id=T, attempt_id=AT, status="done", summary="Done.", from_pubkey=B,
+                         recipient_pubkey=A, recipient_name="Implementer", retrieval_key=RK, next_task=AT,
+                         input_commit=None, output_commit=None, evidence=[], run_id=None,
+                         root="d" * 64, parent="d" * 64)
+    assert "Handed onward as task 22222222." in rep.content
+
+
+def test_build_report_falls_back_to_requester_when_no_recipient_name() -> None:
+    rep = p.build_report(task_id=T, attempt_id=AT, status="done", summary="Done.", from_pubkey=B,
+                         recipient_pubkey=A, recipient_name=None, retrieval_key=RK, next_task="default",
+                         input_commit=None, output_commit=None, evidence=[], run_id=None,
+                         root="d" * 64, parent="d" * 64)
+    assert rep.content.startswith("@requester ✅ task 11111111 done: Done.")
 
 
 def test_parse_event_full() -> None:
