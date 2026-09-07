@@ -20,3 +20,11 @@ React, .NET, React Native, native iOS, native Android) plus one shared
 `pack_instructions.md` (test-first, strict typing, idempotent operations,
 and the rest of the team-wide discipline every persona in the pack
 inherits). Sourced from `buzz-deploy`'s `packs/developers/` pack.
+
+`fleet/` — the planning pack: one persona, `Fleet PM` (`fleet-pm.persona.md`),
+its `pack_instructions.md` (planning discipline), a `fleet-planning` skill
+under `skills/`, and harness rule files under `workspace/` that buzz-fleet
+copies into the agent's working directory as declared by the persona's
+`workspace_files` (spec 5.12). The planner reads the agent directory,
+surveys the codebase, and publishes run proposals for the owner to approve;
+it never does the work itself.

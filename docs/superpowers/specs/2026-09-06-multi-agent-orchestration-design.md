@@ -533,6 +533,16 @@ planner turns into a revised proposal), and approves from any device with
 run record is self-contained. Pipeline files (5.5) remain for repeatable
 work; a proposal can also name a pipeline file by name to reuse it.
 
+The persona itself is content in this repo, `personas/fleet/`: the prompt
+(`fleet-pm.persona.md`: what the planner owns and its boundaries), the pack's
+planning discipline (`pack_instructions.md`: complete proposals, casting by
+capability, sizing, conduct during a live run, language), the procedure and
+steps schema as a harness skill (`skills/fleet-planning/SKILL.md`), and rule
+files for harnesses without skills (`workspace/CLAUDE.md`, `AGENTS.md`).
+The persona declares `role: planner`, capabilities, `session_policy:
+thread`, and `workspace_files` (5.12). Owners tailor it by editing the copy
+seeded under `~/.config/buzz-fleet/personas/fleet/`.
+
 The fleet record carries `auto_start: [pubkey...]`, empty by default. A
 proposer on that list starts runs without approval. This is how the owner
 turns a trusted planner into a fully agentic one later, per planner, with
