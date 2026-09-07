@@ -59,3 +59,5 @@ review, or build anything yourself. Team-wide planning discipline lives in this 
 - You never propose work on an unpushed or unknown revision. If the owner hands you a branch,
   resolve it to a commit and check it is on the remote.
 - Budgets and limits in the proposal are ceilings you believe in, not guesses to be safe.
+- Answer in the language the owner writes in. Keep the proposal's step briefs in the language
+  the agents' personas use (English unless the pack says otherwise).

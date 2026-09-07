@@ -130,6 +130,10 @@ _Avoid_: approval gate, manual step
 A planner's suggested run, with steps, agents, timeouts, budget, and rationale, waiting in its thread for the owner to approve, edit, or reject.
 _Avoid_: plan, draft run
 
+**Allowed action**:
+A named destructive or externally visible action (force-push, production deploy, shared migration) an agent may take only when its task's delegation lists it.
+_Avoid_: permission, privilege
+
 **Workspace files**:
 Skills and rules a persona ships into an agent's working directory so the harness loads them.
 _Avoid_: dotfiles, config

@@ -100,6 +100,16 @@ the live checks.
     a webhook action, gated by the non-functional WF-08 path.
 14. **Sibling trust.** Agents sharing the same NIP-OA owner may trigger each
     other under `owner-only`.
+16. **Per-harness MCP support for the one server buzz-acp passes** (checked
+    in the adapters installed on this machine on 2026-09-07):
+    `claude-agent-acp` 0.74 hands `mcpServers` to the Claude Agent SDK
+    session (supported); `codex-acp` 1.10 writes them into Codex's
+    `mcp_servers` config (supported); `pi-acp` 0.0.33 stores `mcpServers` on
+    the session object and never reads it again, and advertises
+    `mcpCapabilities: {http: false, sse: false}` (not supported); goose is the
+    ACP reference buzz-acp was written against and spawns the server per
+    agent (supported per buzz-acp's README; goose is not installed here, so
+    unverified locally, section 11).
 15. The signer links `buzz-ws-client` and `buzz-sdk`: `build_message`,
     `build_create_channel`, `build_update_channel`, `build_delete_message`,
     authenticated connections, `send_raw`, `next_event`.
@@ -242,13 +252,18 @@ strings; views show 8-character prefixes; lookups accept a unique prefix.
 - `owner-command` — author: owner, produced by the conductor from a chat
   line in a run thread that starts with `!fleet` (5.3). The original chat line
   is not state; the echoed event is.
+- `relay-mention` — author: conductor. When the owner posts in a proposal
+  thread without mentioning anyone, the conductor mentions the proposer with
+  a one-line pointer to the owner's message, so the planner wakes.
 - Conductor-only (author must be an active conductor key): `redeliver`,
   `nudge`, `escalate`, `advance` with its `delegate`, `fallback`,
   `cancel-notice`, `run-paused`, `run-done`, `run-failed`, `budget-paused`,
   `heartbeat` (`{host, role: primary|standby, last_reconciled_at}`),
   `takeover`, `yield`. Each carries a deterministic `cmd`.
 
-**Threading.** One thread per run rooted at the `run` event. An ad-hoc
+**Threading.** One thread per run, rooted at the `run` event, or at the
+proposal thread's root when the run was started from a proposal (the `run`
+event is then a reply in that thread and names the root). An ad-hoc
 `delegate` replies in the thread named by `--thread <root>` or starts one;
 its `ack` and `report` reply in the same thread. Thread memory is an
 optimisation; every command works from persisted task data.
@@ -304,7 +319,7 @@ buzz-fleet task show <id> | buzz-fleet tasks [--open|--stuck|--mine|--unacked]
 buzz-fleet runs [--open] [--metrics] | buzz-fleet run <pipeline> --brief <text|-> [--channel]
 buzz-fleet run cancel <id> | run resume <id> | run purge <id>
 buzz-fleet fleet init [--channel <uuid>] | fleet status | fleet agents [--json] | self-update
-buzz-fleet run propose --brief <text|-> --steps <yaml|-> [--rationale <text|->]   (any fleet member)
+buzz-fleet run propose --brief <text|-> --steps <yaml|-> [--rationale <text|->] [--revises <id>]   (any fleet member)
 buzz-fleet run approve <id> [--edit <yaml>] | run reject <id> --reason <text>      (owner)
 buzz-fleet conductor install [--standby] | conductor move
 ```
@@ -397,6 +412,8 @@ tasks by refusing new delegations from the CLI.
 | `report failed` on step k > 1 | rework task for `rework_target` with the failure summary and the step's `timeout`; `rework_count += 1`; when `done`, re-delegate step k |
 | `failed` on step 1, rework `failed`, `rework_count > max_rework` (3), `task_count > max_tasks` (20), or `run_deadline` passed (2 × sum of timeouts) | `run-failed` |
 | `report blocked` | route the question to the requester if an agent, else the owner; the run pauses on that task |
+| human step (assignee = owner) delegated | one notifier message; no redelivery loop; one `nudge` at the deadline; the step timeout is the only clock |
+| owner posts in a proposal thread without a mention | `relay-mention` to the proposer |
 | budget exceeded | `budget-paused` |
 | `cancel-task` / `cancel-run` | mark cancelled, post `cancel-notice` to live assignees |
 | retention elapsed for a closed run | `purge` (owner-key delete events, ADR 0002 scope) |
@@ -411,7 +428,10 @@ the daily budget.
 (`buzz-fleet agent recycle`, hourly) that restarts an agent unit when that
 agent has no live task, no turn in the last 6 hours (from metrics, owner key
 read-only), and is not the assignee of any open run thread. This is the only
-cleanup buzz-acp's session model allows (fact 10).
+cleanup buzz-acp's session model allows (fact 10). The same timer removes
+worktrees under `work/<agent>/runs/` whose run or task has been closed for
+longer than `worktree_retention_days` (fleet record, default 7), keeping the
+shared clones under `repos/`.
 
 ### 5.5 Pipeline configuration
 
@@ -422,21 +442,29 @@ steps:
   - role: implement
     agent: Implementer
     timeout: 90m
+    brief: |                  # self-contained; the assignee shares no session with anyone
+      Add CSV export to reports (app/Exports/, ReportController). Follow the ExcelExport pattern.
+    acceptance: ["php artisan test --filter=ReportExport passes"]
   - parallel:                 # a step group; the run continues when all required members are done
       - role: review
         agent: Reviewer
         timeout: 45m
         fallback: Reviewer-2
+        brief: Review the implement step's output commit against its acceptance criteria.
       - role: security-review
         agent: SecReviewer
         timeout: 45m
         required: false
+        brief: Check the export for injection through report filters.
   - role: owner-gate          # a human step: the owner acts with !fleet ack/done/failed from a phone
     agent: owner
     timeout: 12h
+    brief: Approve the reviewed commit for build.
   - role: build
     agent: Builder
     timeout: 60m
+    brief: Build and deploy the approved commit to staging; report the URL as evidence.
+    allowed_actions: [deploy-staging]   # destructive or external actions must be named here (5.13)
 limits: {max_rework: 3, max_tasks: 20, run_deadline: 8h}
 budget: {usd: 15}            # or {turns: 60}
 retention: keep              # or 30d
@@ -487,7 +515,8 @@ checkout. Conditional branches are out of scope; agents deviate instead.
   record into its owner-signed metadata `about`: a readable first line, then
   JSON `{"buzz-fleet": 1, "retrieval_key", "conductors": {"primary": {pubkey,
   host}, "standby": {pubkey, host}?}, "limits": {...}, "budget": {...},
-  "retention", "auto_start": [], "versions", "created_at"}`. Discovery is by that marker.
+  "retention", "auto_start": [], "worktree_retention_days": 7,
+  "action_vocabulary": [...], "versions", "created_at"}`. Discovery is by that marker.
 - Every machine discovers and caches it in `ensure_runtime_ready`.
 - Every managed agent auto-joins the fleet channel; the retrieval key and
   both conductor keys are members; no restarts needed (fact 9).
@@ -560,6 +589,32 @@ its working directory (verified in section 11). The `Fleet PM` persona
 ships a planning skill this way. Files are written only when missing or
 when the persona's copy changed (hash marker), never over an operator's
 edits without `--force`.
+
+### 5.13 Agent environment, one MCP server, and allowed actions
+
+- **Environment secrets.** `Agent` gains `env: dict[str, SecretStr]`, written
+  into the agent's env file with the existing 0600 handling, editable from
+  the CLI (`--env KEY=VALUE`, repeatable; `--env-file`) and the TUI, and
+  imported from a persona's `env` block. The harness inherits buzz-acp's
+  environment, so project tools see them. This closes the recorded "no
+  generic env passthrough" gap; builders and testers need it.
+- **One MCP server per agent.** buzz-acp passes exactly one stdio server as a
+  bare command (fact 8). `Agent` gains `mcp_server: {name, command, args,
+  env} | None`, imported from a persona's first `mcp_servers` entry; a
+  persona declaring more than one is refused at import with the reason. When
+  args or env are needed, buzz-fleet writes `work/<agent>/mcp-<name>.sh`
+  (0700) that execs the command with them, and sets `BUZZ_ACP_MCP_COMMAND` to
+  it. Harness support is a fact per adapter, recorded in section 2.
+- **Allowed actions.** A pipeline step may list `allowed_actions`: names from
+  a fleet-wide vocabulary in the fleet record (default: `force-push`,
+  `delete-branch`, `migrate-shared-db`, `deploy-staging`, `deploy-production`,
+  `delete-data`). The delegation carries the list. The coordination block
+  states the rule: an agent performs one of these actions only when its
+  current task's delegation names it; from an ad-hoc delegation or a
+  delegation without it, the agent refuses and reports `blocked` naming the
+  action. This turns "an agent asked me" into "the owner's approved plan
+  asked me" for anything that cannot be undone. Personas may add their own
+  refusals on top.
 
 ## 6. Walkthroughs
 
@@ -688,6 +743,9 @@ groups; TUI screen; self-update; language validated (section 12).
     (Codex), `.goosehints` (goose), and Pi's equivalent.
 12. The presence snapshot (kind 40902) is readable by the owner and reflects
     a stopped agent within a few minutes.
+13. goose honours `mcpServers` from `session/new` for a buzz-fleet-generated
+    wrapper script; Pi agents get no MCP server and `agent create --harness
+    pi` warns when a persona declares one.
 
 ## 12. Implementation notes (language and seams)
 
@@ -732,3 +790,9 @@ faked by a list of connections. Signer subcommands are I/O only:
 | 23 | Agent directory: role, capabilities, description in the managed-agent record; `fleet agents` |
 | 24 | Planner persona (`Fleet PM`) and run proposals with owner approval; `auto_start` list for trusted planners |
 | 25 | Workspace files per persona (skills and rules) written into the agent's working directory |
+| 26 | Conductor re-mentions the proposer when the owner replies in a proposal thread without a mention |
+| 27 | Human steps: one notification, one nudge at the deadline, no redelivery loop |
+| 28 | Per-agent environment secrets (`env`), CLI, TUI, and persona import |
+| 29 | One MCP server per agent via a generated wrapper; personas with more are refused |
+| 30 | Recycle timer removes worktrees of runs closed for 7 days (configurable) |
+| 31 | `allowed_actions` on steps; agents refuse unlisted destructive actions and report blocked |

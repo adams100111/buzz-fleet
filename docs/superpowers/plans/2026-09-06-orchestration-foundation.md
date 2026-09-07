@@ -4,7 +4,7 @@
 
 **Goal:** Make fleet agents able to reply, delegate work to each other with an exact code revision, ack and report reliably, and let any machine reconstruct the complete state of every delegation from the relay.
 
-**Architecture:** Spec layers 0 and 1. Agents publish kind 9 channel messages carrying fleet tags through `buzz-fleet task` commands; every fleet event mentions a retrieval key so one indexed relay filter plus `until` paging reads the complete history; a pure reducer turns events into task state for the views. The Rust signer gains I/O-only subcommands. A fleet channel and an owner-signed fleet record are created once and discovered by every machine. Plan 2 is the conductor (outbox, timers, failover, notifier, metrics, recycling); plan 3 is pipelines (runs, groups, human steps, proposals and the `Fleet PM` planner, workspace files, purge, TUI screen, self-update). The agent directory (spec 5.10) is in this plan: Tasks 17 and 18.
+**Architecture:** Spec layers 0 and 1. Agents publish kind 9 channel messages carrying fleet tags through `buzz-fleet task` commands; every fleet event mentions a retrieval key so one indexed relay filter plus `until` paging reads the complete history; a pure reducer turns events into task state for the views. The Rust signer gains I/O-only subcommands. A fleet channel and an owner-signed fleet record are created once and discovered by every machine. Plan 2 is the conductor (outbox, timers, failover, notifier, metrics, recycling); plan 3 is pipelines (runs, groups, human steps, proposals and the `Fleet PM` planner, workspace files, purge, TUI screen, self-update). The agent directory (spec 5.10) is in this plan: Tasks 17 and 18; environment secrets and the single MCP server (spec 5.13) are Task 19.
 
 **Tech Stack:** Python 3.12+ (Typer, Pydantic, Rich, pytest), Rust (clap, nostr 0.44, buzz-sdk, buzz-ws-client, tokio), systemd `--user` units.
 
@@ -3791,6 +3791,144 @@ git add signer/src src/buzz_fleet tests && git commit -m "Add buzz-fleet fleet a
 ```
 
 
+
+---
+
+### Task 19: Per-agent environment secrets and one MCP server
+
+**Files:**
+- Modify: `src/buzz_fleet/models.py`, `src/buzz_fleet/systemd.py`, `src/buzz_fleet/personas.py`, `src/buzz_fleet/manager.py`, `src/buzz_fleet/state.py`, `src/buzz_fleet/cli/app.py`, `src/buzz_fleet/tui/screens/agent_form.py`
+- Test: `tests/test_models.py`, `tests/test_systemd.py`, `tests/test_personas.py`, `tests/test_state.py`, `tests/test_cli.py`
+
+**Interfaces:**
+- `Agent.env: dict[str, SecretStr] | None`; `Agent.mcp_server: McpServer | None` with `McpServer(name: str, command: str, args: list[str] = [], env: dict[str, SecretStr] = {})`.
+- `state._serialize_with_secrets` must reveal `SecretStr` values nested in `env` and `mcp_server.env` (today it only patches top-level fields and `system_prompt_source`).
+- `systemd.write_agent_files` writes every `env` entry as `env_line(K, V)` after the API keys, and, when `mcp_server` is set, writes `WORK_DIR/<agent>/mcp-<name>.sh` (0700, `#!/bin/sh`, `export K=V` lines, `exec "<command>" <args...>`) and `BUZZ_ACP_MCP_COMMAND=<that path>`.
+- `personas.py`: import the persona's `env` block; import the first `mcp_servers` entry; raise `ValueError("persona declares N MCP servers; buzz-acp supports one")` for more than one.
+- CLI: `--env KEY=VALUE` (repeatable), `--env-file <path>` (KEY=VALUE lines), `--mcp-command`, `--mcp-arg` (repeatable), `--mcp-name`, `--mcp-env KEY=VALUE` (repeatable) on create and update; `agent create --harness pi` with an MCP server prints a warning that Pi ignores it (spec fact 16).
+- TUI: a multi-line `TextArea` for env (KEY=VALUE per line) and three inputs for the MCP server (name, command, args); secrets are masked in the edit form by showing `KEY=********` for existing values and only replacing a value when the user types a new one.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/test_models.py
+def test_env_and_mcp_round_trip_with_secrets(tmp_path, monkeypatch) -> None:
+    from buzz_fleet import state
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path)
+    agent = Agent(**_base_kwargs(), env={"DATABASE_URL": "postgres://x"},
+                  mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"}))
+    state.save_agent(agent)
+    again = state.load_agents("eltahir")[0]
+    assert again.env["DATABASE_URL"].get_secret_value() == "postgres://x"
+    assert again.mcp_server.env["TOKEN"].get_secret_value() == "t" and again.mcp_server.args == ["artisan", "boost:mcp"]
+
+
+# tests/test_systemd.py
+def test_write_agent_files_env_and_mcp_wrapper(tmp_path: Path, monkeypatch) -> None:
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    agent = _agent().model_copy(update={"env": {"DATABASE_URL": "postgres://x"},
+                                        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})})
+
+    write_agent_files(agent, _community(), None, None)
+
+    env = agent_env_path(agent.id).read_text()
+    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    assert "DATABASE_URL=postgres://x\n" in env and f"BUZZ_ACP_MCP_COMMAND={wrapper}\n" in env
+    assert wrapper.stat().st_mode & 0o777 == 0o700
+    body = wrapper.read_text()
+    assert "export TOKEN='t'" in body and "exec 'php' 'artisan' 'boost:mcp'" in body
+
+
+# tests/test_personas.py
+def test_persona_imports_env_and_single_mcp_server() -> None:
+    template = load_persona_template(LARAVEL_PERSONA_PATH)   # declares one server: boost
+    assert template.mcp_server.name == "boost" and template.mcp_server.command == "php"
+
+
+def test_persona_with_two_mcp_servers_is_refused(tmp_path) -> None:
+    path = tmp_path / "two.persona.md"
+    path.write_text("---\nname: two\ndisplay_name: Two\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n  - {name: b, command: b}\n---\nbody\n")
+    with pytest.raises(ValueError, match="supports one"):
+        load_persona_template(path)
+
+
+# tests/test_cli.py
+def test_agent_create_env_and_mcp_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--env", "A=1", "--env", "B=2",
+                                     "--mcp-name", "boost", "--mcp-command", "php", "--mcp-arg", "artisan", "--mcp-arg", "boost:mcp"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"] == {"A": "1", "B": "2"}
+    assert captured["mcp_server"].command == "php" and captured["mcp_server"].args == ["artisan", "boost:mcp"]
+```
+
+Use `shlex.quote` for every value in the wrapper so the assertions above hold for values with spaces.
+
+- [ ] **Step 2: Run to verify failure**
+
+`uv run pytest tests/test_models.py tests/test_systemd.py tests/test_personas.py tests/test_cli.py -q`
+
+- [ ] **Step 3: Implement**
+
+`models.py`:
+
+```python
+class McpServer(BaseModel):
+    name: str
+    command: str
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, SecretStr] = Field(default_factory=dict)
+```
+
+and on `Agent`: `env: dict[str, SecretStr] | None = None`, `mcp_server: McpServer | None = None`. `state.py`: extend `patch_secrets` to recurse into dict values (`env`, and `mcp_server.env`) by walking the original model: for a `dict[str, SecretStr]` field, replace each masked value with `original[key].get_secret_value()`; for a nested `BaseModel`, recurse. `systemd.py`:
+
+```python
+def _mcp_wrapper_path(agent_id: str, name: str) -> Path:
+    return WORK_DIR / agent_id / f"mcp-{name}.sh"
+
+
+def write_mcp_wrapper(agent: Agent) -> Path | None:
+    if agent.mcp_server is None:
+        return None
+    m = agent.mcp_server
+    lines = ["#!/bin/sh"] + [f"export {k}={shlex.quote(v.get_secret_value())}" for k, v in m.env.items()]
+    lines.append("exec " + " ".join(shlex.quote(x) for x in [m.command, *m.args]))
+    path = _mcp_wrapper_path(agent.id, m.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+    try:
+        os.write(fd, ("\n".join(lines) + "\n").encode())
+    finally:
+        os.close(fd)
+    return path
+```
+
+called from `write_agent_files`, which then appends `env_line("BUZZ_ACP_MCP_COMMAND", str(path))` and one `env_line(k, v.get_secret_value())` per `agent.env` entry. `personas.py`: parse `env` (dict of strings) and `mcp_servers` (list); build `McpServer` from the first; raise on more than one; carry both on `PersonaTemplate` and into `create_agent`. `manager.create_agent`/`update_agent`: accept `env` and `mcp_server`; `update_agent` restarts on change (it already rewrites files and restarts). CLI and TUI per the interfaces above; parse `KEY=VALUE` with `split("=", 1)` and reject lines without `=`.
+
+- [ ] **Step 4: Run tests, verify live, commit**
+
+```bash
+uv run pytest -q && uv run ruff check . && uv run mypy
+uv run buzz-fleet agent update --community <id> laravel-backend-developer-claude --mcp-name boost --mcp-command php --mcp-arg artisan --mcp-arg boost:mcp
+pid=$(systemctl --user show -p MainPID --value buzz-agent@laravel-backend-developer-claude); tr '\0' '\n' < /proc/$pid/environ | grep BUZZ_ACP_MCP_COMMAND
+git add src/buzz_fleet tests && git commit -m "Add per-agent environment secrets and a single MCP server with a generated wrapper"
+```
+
+
 ## Self-review
 
 **Spec coverage, layers 0–1.**
@@ -3805,4 +3943,4 @@ git add signer/src src/buzz_fleet tests && git commit -m "Add buzz-fleet fleet a
 
 **Placeholders.** None: every step carries its code or the exact command.
 
-**Addendum coverage.** Spec 5.10 (directory) → Tasks 17–18. Spec 5.11 (planner, proposals, `auto_start`) and 5.12 (workspace files) → plan 3; they need the conductor (approval handling) and the persona pack changes, and nothing in this plan blocks them.
+**Addendum coverage.** Spec 5.10 (directory) → Tasks 17–18. Spec 5.13 (env secrets, one MCP server) → Task 19; `allowed_actions` → plan 3 with pipelines, and the coordination block paragraph for it is added when plan 3 lands. Spec 5.11 (planner, proposals, `auto_start`) and 5.12 (workspace files) → plan 3; they need the conductor (approval handling) and the persona pack changes, and nothing in this plan blocks them.
