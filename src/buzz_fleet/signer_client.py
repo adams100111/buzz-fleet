@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from buzz_fleet.proc import CommandRunner
@@ -204,3 +205,76 @@ def archive_agent(
     payload = json.loads(result.stdout)
     if not payload["ok"]:
         raise RuntimeError(f"archive-agent failed: {payload.get('error')}")
+
+
+def _auth_args(auth_tag: str | None) -> list[str]:
+    return ["--auth-tag", auth_tag] if auth_tag else []
+
+
+def _check_ok(result: subprocess.CompletedProcess[str], what: str) -> dict:
+    payload = json.loads(result.stdout)
+    if not payload.get("ok"):
+        raise RuntimeError(f"{what} failed: {payload.get('error')}")
+    return payload
+
+
+def post_message(runner: CommandRunner, relay_url: str, nsec: str, channel_id: str, content: str, *,
+                 mentions: list[str], root: str | None, parent: str | None, tags: list[tuple[str, str]],
+                 auth_tag: str | None) -> str:
+    args = [BINARY, "post-message", "--relay", relay_url, "--nsec", nsec, *_auth_args(auth_tag),
+            "--channel", channel_id, "--content", content]
+    for m in mentions:
+        args += ["--mention", m]
+    if root:
+        args += ["--root", root]
+    if parent:
+        args += ["--parent", parent]
+    for name, value in tags:
+        args += ["--tag", f"{name}={value}"]
+    event_id: str = _check_ok(runner.run(args), "post-message")["event_id"]
+    return event_id
+
+
+def query(runner: CommandRunner, relay_url: str, nsec: str, filter: dict, *, auth_tag: str | None) -> list[dict]:
+    args = [BINARY, "query", "--relay", relay_url, "--nsec", nsec, *_auth_args(auth_tag),
+            "--filter", json.dumps(filter, separators=(",", ":"))]
+    result = runner.run(args)
+    events: list[dict] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        if "ok" in obj and not obj["ok"]:
+            raise RuntimeError(f"query failed: {obj.get('error')}")
+        events.append(obj)
+    if result.returncode != 0:
+        raise RuntimeError(f"query failed with exit code {result.returncode}: {result.stderr.strip()}")
+    return events
+
+
+def channel_members(runner: CommandRunner, relay_url: str, nsec: str, channel_id: str, *,
+                    auth_tag: str | None) -> list[tuple[str, str | None]]:
+    args = [BINARY, "channel-members", "--relay", relay_url, "--nsec", nsec, *_auth_args(auth_tag), "--channel", channel_id]
+    return [(m["pubkey"], m.get("display_name")) for m in _check_ok(runner.run(args), "channel-members")["members"]]
+
+
+def create_channel(runner: CommandRunner, relay_url: str, owner_nsec: str, name: str, *, about: str | None) -> str:
+    args = [BINARY, "create-channel", "--relay", relay_url, "--owner-nsec", owner_nsec, "--name", name]
+    if about:
+        args += ["--about", about]
+    channel_id: str = _check_ok(runner.run(args), "create-channel")["channel_id"]
+    return channel_id
+
+
+def read_channel_meta(runner: CommandRunner, relay_url: str, nsec: str, *, channel_id: str | None,
+                      auth_tag: str | None) -> list[dict]:
+    args = [BINARY, "read-channel-meta", "--relay", relay_url, "--nsec", nsec, *_auth_args(auth_tag)]
+    if channel_id:
+        args += ["--channel", channel_id]
+    channels: list[dict] = _check_ok(runner.run(args), "read-channel-meta")["channels"]
+    return channels
+
+
+def write_channel_about(runner: CommandRunner, relay_url: str, owner_nsec: str, channel_id: str, about: str) -> None:
+    args = [BINARY, "write-channel-about", "--relay", relay_url, "--owner-nsec", owner_nsec, "--channel", channel_id, "--about", about]
+    _check_ok(runner.run(args), "write-channel-about")
