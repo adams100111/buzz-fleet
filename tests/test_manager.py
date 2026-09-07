@@ -1148,3 +1148,128 @@ def test_create_agent_refuses_duplicate_display_name_unless_forced(tmp_path: Pat
     with pytest.raises(ValueError, match="already used"):
         manager.create_agent(display_name="Reviewer", harness="claude", system_prompt_source=src)
     assert manager.create_agent(display_name="Reviewer", harness="claude", system_prompt_source=src, force=True)
+
+
+class _CustomReadMetaRunner(FakeRunner):
+    """`FakeRunner` whose `read-channel-meta` response is fully overridable
+    — used to drive `ensure_fleet_record`'s never-raise contract through
+    each of its `except` clauses individually (a signer-reported failure, a
+    malformed/non-JSON payload, and a channel entry missing `channel_id`),
+    none of which the shared `FakeRunner` (which always returns `ok: true`)
+    can exercise on its own.
+    """
+
+    def __init__(self, stdout: str, returncode: int = 0) -> None:
+        super().__init__()
+        self._meta_stdout = stdout
+        self._meta_returncode = returncode
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["buzz-fleet-signer", "read-channel-meta"]:
+            self.calls.append(args)
+            return subprocess.CompletedProcess(args, self._meta_returncode, stdout=self._meta_stdout, stderr="")
+        return super().run(args)
+
+
+def test_ensure_fleet_record_never_raises_on_signer_reported_failure(tmp_path: Path, monkeypatch) -> None:
+    runner = _CustomReadMetaRunner(json.dumps({"ok": False, "error": "boom"}), returncode=1)
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+
+    assert manager.ensure_fleet_record() is None
+    assert manager._last_fleet_error is not None and "boom" in manager._last_fleet_error
+    manager.ensure_runtime_ready()  # must complete, not raise
+
+
+def test_ensure_fleet_record_never_raises_on_malformed_json(tmp_path: Path, monkeypatch) -> None:
+    runner = _CustomReadMetaRunner("not json at all")
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+
+    assert manager.ensure_fleet_record() is None
+    manager.ensure_runtime_ready()  # must complete, not raise
+
+
+def test_ensure_fleet_record_never_raises_on_channel_missing_id(tmp_path: Path, monkeypatch) -> None:
+    runner = _CustomReadMetaRunner(json.dumps({"ok": True, "channels": [{"about": _record_about(), "archived": False}]}))
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+
+    assert manager.ensure_fleet_record() is None
+    manager.ensure_runtime_ready()  # must complete, not raise
+
+
+def test_ensure_fleet_record_still_returns_record_when_local_caching_fails(tmp_path: Path, monkeypatch) -> None:
+    """Regression: `_save_fleet` reaches `state._write_secure`, whose
+    `mkdir`/`os.open(O_CREAT)`/`os.write` all raise `OSError` on a
+    read-only home, a full disk, or a root-owned `~/.config/buzz-fleet`.
+    The record itself was still found and is perfectly usable — a local
+    caching failure must not masquerade as "no fleet record exists", and
+    must not propagate out of `ensure_runtime_ready` either.
+    """
+    from buzz_fleet import state
+
+    runner = FakeRunner()
+    runner.channels = [{"channel_id": FLEET, "name": "fleet", "about": _record_about(), "archived": False}]
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+    real_save_community = state.save_community
+    call_count = {"n": 0}
+
+    def _boom(community: Community) -> None:
+        # Only the FIRST save (the fleet-record caching write triggered by
+        # ensure_fleet_record below) fails. A later, unrelated write (e.g.
+        # _ensure_owner_pubkey's own backfill save inside
+        # ensure_runtime_ready) must keep working — this isolates exactly
+        # the scenario finding 1 is about, not every write forever after.
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OSError("disk full")
+        real_save_community(community)
+
+    monkeypatch.setattr(state, "save_community", _boom)
+
+    rec = manager.ensure_fleet_record()
+
+    assert rec is not None and rec.retrieval_key == "r" * 64
+    manager.ensure_runtime_ready()  # must complete, not raise
+
+
+def test_ensure_fleet_record_reports_duplicate_records_via_last_fleet_error(tmp_path: Path, monkeypatch) -> None:
+    """Two racing `fleet init` runs produce two channels each carrying a
+    fleet record. `ensure_fleet_record` must not raise (never-raise
+    contract) but must not silently discard the diagnostic either — the
+    operator needs it (see `fleet_status`'s use of `_last_fleet_error`).
+    """
+    other_channel = "77770000-0000-4000-8000-000000000000"
+    runner = FakeRunner()
+    runner.channels = [
+        {"channel_id": FLEET, "name": "fleet", "about": _record_about(), "archived": False},
+        {"channel_id": other_channel, "name": "fleet", "about": _record_about(), "archived": False},
+    ]
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+
+    assert manager.ensure_fleet_record() is None
+    assert manager._last_fleet_error is not None
+    assert "more than one channel carries a fleet record" in manager._last_fleet_error
+    assert FLEET in manager._last_fleet_error and other_channel in manager._last_fleet_error
+    manager.ensure_runtime_ready()  # must complete, not raise, even for this case
+
+
+def test_init_fleet_channel_names_orphaned_channel_when_about_write_fails(tmp_path: Path, monkeypatch) -> None:
+    """If `write_channel_about` fails after `create_channel` already
+    succeeded, the new channel exists on the relay with no fleet record —
+    invisible to future discovery — so a blind retry of this create-once
+    operation would create a SECOND channel. The error must name the
+    orphaned id so the operator can adopt it with `--channel` instead.
+    """
+
+    class _FailingAboutRunner(FakeRunner):
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ["buzz-fleet-signer", "write-channel-about"]:
+                self.calls.append(args)
+                return subprocess.CompletedProcess(args, 1, stdout=json.dumps({"ok": False, "error": "relay timeout"}), stderr="")
+            return super().run(args)
+
+    runner = _FailingAboutRunner()
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+
+    with pytest.raises(RuntimeError, match=f"channel '{FLEET}' was created") as exc_info:
+        manager.init_fleet_channel(existing=None, host="vps")
+    assert "--channel" in str(exc_info.value) and FLEET in str(exc_info.value)

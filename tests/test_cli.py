@@ -554,10 +554,37 @@ def test_fleet_init_prints_channel_and_record(monkeypatch) -> None:
     from buzz_fleet.orchestration.record import FleetRecord
 
     class FakeManager:
+        def __init__(self) -> None:
+            self._last_retrieval_secret: str | None = None
+
         def init_fleet_channel(self, existing, host):
+            self._last_retrieval_secret = "nsec1thesecretkeynevergetsstoredanywhere"
             return "6f1c0000-0000-4000-8000-000000000000", FleetRecord(retrieval_key="r" * 64, created_at=1)
 
     monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
     result = runner_cli.invoke(app, ["fleet", "init", "--community", "e"])
     assert result.exit_code == 0, result.output
     assert "6f1c0000-0000-4000-8000-000000000000" in result.output and "r" * 64 in result.output
+    # The retrieval secret is the entire security-relevant output of `fleet
+    # init` — nothing stores it and nothing can regenerate it — so the CLI
+    # must actually print it, not just the channel id and public key.
+    assert "nsec1thesecretkeynevergetsstoredanywhere" in result.output
+
+
+def test_fleet_status_reports_duplicate_record_error_instead_of_generic_message(monkeypatch) -> None:
+    class FakeManager:
+        def __init__(self) -> None:
+            self._last_fleet_error = (
+                "more than one channel carries a fleet record: chan-a, chan-b; archive all but one"
+            )
+
+        def ensure_fleet_record(self):
+            return None
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "status", "--community", "e"])
+    assert result.exit_code == 1
+    # Must surface the real problem, not the generic "run fleet init"
+    # message — running fleet init again here would create a THIRD channel.
+    assert "more than one channel carries a fleet record" in result.output
+    assert "Run `buzz-fleet fleet init`" not in result.output

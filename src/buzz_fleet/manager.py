@@ -82,6 +82,20 @@ class AgentManager:
     def __init__(self, runner: CommandRunner, community: Community) -> None:
         self._runner = runner
         self._community = community
+        # Set only by init_fleet_channel: the fleet's retrieval secret,
+        # which nothing stores and nothing can regenerate (spec 5.1) — the
+        # CLI's `fleet init` prints it once, immediately after the call
+        # that mints it, and it is never returned from init_fleet_channel
+        # itself (which must keep the brief's tuple[str, FleetRecord]
+        # signature) nor persisted anywhere.
+        self._last_retrieval_secret: str | None = None
+        # Set only by ensure_fleet_record on failure: the swallowed reason
+        # (e.g. more than one channel carrying a fleet record), so `fleet
+        # status` can tell the operator the real problem instead of the
+        # generic "no fleet record" message — which, for the duplicate
+        # case, is actively wrong advice (running `fleet init` again would
+        # create a third channel).
+        self._last_fleet_error: str | None = None
 
     def list_agents(self) -> list[Agent]:
         return state.load_agents(self._community.id)
@@ -141,7 +155,22 @@ class AgentManager:
         else:
             channel_id = signer_client.create_channel(self._runner, self._community.relay_url, self._owner_nsec(),
                                                       FLEET_CHANNEL_NAME, about=None)
-        signer_client.write_channel_about(self._runner, self._community.relay_url, self._owner_nsec(), channel_id, encode_about(rec))
+        # create_channel and write_channel_about are two separate publishes.
+        # If the second one fails, the channel already exists on the relay
+        # but carries no fleet record — invisible to _find_fleet_record's
+        # discovery (it only recognizes ABOUT_HEADER), so a blind retry of
+        # this create-once operation would create a SECOND channel and
+        # leave the first as permanent debris on the owner's relay. Name
+        # the orphaned id in the re-raised error so the operator can adopt
+        # it with `--channel` instead.
+        try:
+            signer_client.write_channel_about(self._runner, self._community.relay_url, self._owner_nsec(),
+                                              channel_id, encode_about(rec))
+        except (RuntimeError, OSError) as e:
+            raise RuntimeError(
+                f"channel {channel_id!r} was created but writing its fleet record failed: {e}; "
+                f"rerun with `--channel {channel_id}` to adopt it instead of creating a new one"
+            ) from e
         self._save_fleet(channel_id, rec)
         # The retrieval secret is deliberately not stored: nothing ever signs
         # with it (spec 5.1). Returned once so the owner can archive it.
@@ -149,14 +178,34 @@ class AgentManager:
         return channel_id, rec
 
     def ensure_fleet_record(self) -> FleetRecord | None:
+        """Discover and cache the fleet record. Never raises: called from
+
+        `ensure_runtime_ready` on every machine, and a relay hiccup — or a
+        community with no fleet channel yet — must not break agent
+        management. On a genuine problem (most notably: more than one
+        channel carries a fleet record, which two racing `fleet init` runs
+        would produce), the reason is stashed on `_last_fleet_error` rather
+        than raised, so `fleet status` can tell the operator the truth
+        instead of the generic "run fleet init" message, which for that
+        case is actively wrong advice.
+        """
         if self._community.fleet_record:
             return self._community.fleet_record
         try:
             found = self._find_fleet_record()
-        except (RuntimeError, json.JSONDecodeError, KeyError, OSError):
+        except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
+            self._last_fleet_error = str(e)
             return None
+        self._last_fleet_error = None
         if found:
-            self._save_fleet(*found)
+            try:
+                self._save_fleet(*found)
+            except OSError:
+                # Caching locally failed (e.g. a read-only/full-disk home),
+                # but the record itself was found and is perfectly usable
+                # for this call — don't let a caching failure masquerade as
+                # "no fleet record exists".
+                pass
             return found[1]
         return None
 

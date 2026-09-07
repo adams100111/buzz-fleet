@@ -35,13 +35,8 @@ def fleet_init(
         raise typer.Exit(code=1) from e
     typer.echo(f"Fleet channel: {channel_id}")
     typer.echo(f"Retrieval key: {rec.retrieval_key}")
-    # getattr, not a direct attribute access: real AgentManager always sets
-    # this before init_fleet_channel returns, but any other object
-    # implementing the same interface (e.g. a test double) may not.
-    secret = getattr(manager, "_last_retrieval_secret", None)
-    if secret:
-        typer.echo("Retrieval secret (archive it; nothing signs with it and buzz-fleet does not store it):")
-        typer.echo(secret)
+    typer.echo("Retrieval secret (archive it; nothing signs with it and buzz-fleet does not store it):")
+    typer.echo(manager._last_retrieval_secret)
     typer.echo("Agents on every machine join the channel on their next buzz-fleet command.")
     typer.echo("Prerequisite per machine: SSH access to every repository your pipelines name.")
 
@@ -51,7 +46,13 @@ def fleet_status(community: Annotated[str, typer.Option()]) -> None:
     manager = _load_manager(community)
     rec = manager.ensure_fleet_record()
     if rec is None:
-        typer.echo("No fleet record found. Run `buzz-fleet fleet init` once on the conductor host.")
+        if manager._last_fleet_error:
+            # e.g. more than one channel carries a fleet record (two racing
+            # `fleet init` runs) — telling the operator to run `fleet init`
+            # again here would create a THIRD one. Show the real reason.
+            typer.echo(f"Could not determine the fleet record: {manager._last_fleet_error}", err=True)
+        else:
+            typer.echo("No fleet record found. Run `buzz-fleet fleet init` once on the conductor host.")
         raise typer.Exit(code=1)
     typer.echo(f"Channel: {manager._community.fleet_channel_id}")
     typer.echo(f"Retrieval key: {rec.retrieval_key}")
