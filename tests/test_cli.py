@@ -523,3 +523,28 @@ def test_agent_list_shows_visibility_status(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "agent-unmanaged\tUnmanaged\tclaude\t—" in result.output
     assert "agent-synced\tSynced\tclaude\tsynced" in result.output
+
+
+def test_agent_create_passes_session_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, [
+        "agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+        "--prompt-file", "/dev/null", "--session-policy", "channel", "--max-turns-per-session", "7",
+        "--heartbeat-interval-seconds", "0",
+    ])
+    assert result.exit_code == 0, result.output
+    assert (captured["session_policy"], captured["max_turns_per_session"], captured["heartbeat_interval_seconds"]) == ("channel", 7, 0)
+
+
+def test_agent_create_rejects_bad_session_policy(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X",
+                                     "--harness", "claude", "--prompt-file", "/dev/null", "--session-policy", "bogus"])
+    assert result.exit_code == 1 and "thread, channel" in result.output

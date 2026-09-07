@@ -201,6 +201,11 @@ def write_agent_files(
         lines.append(env_line("BUZZ_ACP_IDLE_TIMEOUT", str(agent.idle_timeout_seconds)))
     if agent.max_turn_duration_seconds is not None:
         lines.append(env_line("BUZZ_ACP_MAX_TURN_DURATION", str(agent.max_turn_duration_seconds)))
+    lines.append(env_line("BUZZ_ACP_SESSION_POLICY", agent.session_policy or "thread"))
+    lines.append(env_line("BUZZ_ACP_MAX_TURNS_PER_SESSION",
+                          str(40 if agent.max_turns_per_session is None else agent.max_turns_per_session)))
+    lines.append(env_line("BUZZ_ACP_HEARTBEAT_INTERVAL",
+                          str(900 if agent.heartbeat_interval_seconds is None else agent.heartbeat_interval_seconds)))
     if agent.respond_to_allowlist:
         # buzz-acp only consults the allowlist when respond_to == "allowlist"
         # (BUZZ_ACP_RESPOND_TO, default "owner-only") — set both together so

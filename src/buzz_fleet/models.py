@@ -59,6 +59,17 @@ class Agent(BaseModel):
     idle_timeout_seconds: int | None = None
     max_turn_duration_seconds: int | None = None
     respond_to_allowlist: list[str] | None = None
+    # buzz-acp session scoping (spec 5.8): `thread` (default) isolates each
+    # channel thread into its own provider session so a run is a shared,
+    # memory-keeping session while the owner can DM the agent in parallel.
+    # `channel` is buzz-acp's legacy one-session-per-channel, the rollback.
+    session_policy: Literal["thread", "channel"] | None = None
+    # Rotate an *active* session after N turns. Dormant sessions are handled
+    # by the recycle timer (plan 2), not by this cap.
+    max_turns_per_session: int | None = None
+    # Seconds between buzz-acp heartbeat prompts; the agent-side delivery
+    # recovery path (spec fact 6). 0 disables.
+    heartbeat_interval_seconds: int | None = None
     channel_ids: list[str] | None = None
     channel_add_policy: Literal["anyone", "owner_only", "nobody"] | None = None
     visibility_managed: bool = False

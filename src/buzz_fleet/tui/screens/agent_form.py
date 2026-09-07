@@ -142,6 +142,35 @@ class AgentFormScreen(Screen):
                 placeholder="Max turn duration seconds (optional)",
                 id="max-turn-duration-input",
             )
+            yield Input(
+                value=(
+                    str(self._agent.max_turns_per_session)
+                    if self._agent and self._agent.max_turns_per_session is not None
+                    else ""
+                ),
+                placeholder="Max turns per session (default 40)",
+                id="max-turns-per-session-input",
+            )
+            yield Input(
+                value=(
+                    str(self._agent.heartbeat_interval_seconds)
+                    if self._agent and self._agent.heartbeat_interval_seconds is not None
+                    else ""
+                ),
+                placeholder="Heartbeat interval seconds (default 900)",
+                id="heartbeat-interval-input",
+            )
+            yield Static("Session policy:")
+            yield Select(
+                [("thread (default)", "thread"), ("channel", "channel")],
+                value=(
+                    self._agent.session_policy
+                    if self._agent and self._agent.session_policy
+                    else "thread"
+                ),
+                allow_blank=False,
+                id="session-policy-select",
+            )
 
         with _section("Access"):
             yield Input(
@@ -227,16 +256,19 @@ class AgentFormScreen(Screen):
             parallelism = self._parse_optional_int("#parallelism-input")
             idle_timeout_seconds = self._parse_optional_int("#idle-timeout-input")
             max_turn_duration_seconds = self._parse_optional_int("#max-turn-duration-input")
+            max_turns_per_session = self._parse_optional_int("#max-turns-per-session-input")
+            heartbeat_interval_seconds = self._parse_optional_int("#heartbeat-interval-input")
             channel_ids = self._parse_optional_uuid_list("#channel-ids-input")
         except ValueError:
             self.notify(
-                "Parallelism, idle timeout, max turn duration must be whole numbers, "
-                "and channel IDs must be valid UUIDs.",
+                "Parallelism, idle timeout, max turn duration, max turns per session, "
+                "heartbeat interval must be whole numbers, and channel IDs must be valid UUIDs.",
                 severity="error",
             )
             return
 
         channel_add_policy = self.query_one("#channel-add-policy-select", Select).value
+        session_policy = self.query_one("#session-policy-select", Select).value
 
         try:
             if self._agent is not None:
@@ -249,6 +281,9 @@ class AgentFormScreen(Screen):
                     "idle_timeout_seconds": idle_timeout_seconds,
                     "max_turn_duration_seconds": max_turn_duration_seconds,
                     "respond_to_allowlist": respond_to_allowlist,
+                    "session_policy": session_policy,
+                    "max_turns_per_session": max_turns_per_session,
+                    "heartbeat_interval_seconds": heartbeat_interval_seconds,
                     "channel_ids": channel_ids,
                     "channel_add_policy": channel_add_policy,
                 }
@@ -275,6 +310,9 @@ class AgentFormScreen(Screen):
                     idle_timeout_seconds=idle_timeout_seconds,
                     max_turn_duration_seconds=max_turn_duration_seconds,
                     respond_to_allowlist=respond_to_allowlist,
+                    session_policy=session_policy,
+                    max_turns_per_session=max_turns_per_session,
+                    heartbeat_interval_seconds=heartbeat_interval_seconds,
                     channel_ids=channel_ids,
                     channel_add_policy=channel_add_policy,
                 )

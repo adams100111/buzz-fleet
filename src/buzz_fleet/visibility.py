@@ -7,6 +7,7 @@ and status-column rules this implements.
 
 from __future__ import annotations
 
+import socket
 from typing import Literal
 
 from buzz_fleet import systemd
@@ -54,6 +55,7 @@ def managed_agent_content(agent: Agent) -> dict:
         "parallelism": agent.parallelism if agent.parallelism is not None else 1,
         "respond_to": "allowlist" if agent.respond_to_allowlist else "owner-only",
         "respond_to_allowlist": agent.respond_to_allowlist or [],
+        "host": socket.gethostname(),
     }
 
 

@@ -291,6 +291,31 @@ def test_write_agent_files_sets_respond_to_allowlist_mode_when_list_non_empty(
     assert "BUZZ_ACP_RESPOND_TO=allowlist" in env_content
 
 
+def test_write_agent_files_session_and_heartbeat_defaults(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+
+    write_agent_files(_agent(), _community(), None, None)
+
+    env = agent_env_path("laravel-backend-dev").read_text()
+    for line in ("BUZZ_ACP_SESSION_POLICY=thread\n", "BUZZ_ACP_MAX_TURNS_PER_SESSION=40\n", "BUZZ_ACP_HEARTBEAT_INTERVAL=900\n"):
+        assert line in env
+
+
+def test_write_agent_files_session_overrides(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    agent = _agent().model_copy(update={"session_policy": "channel", "max_turns_per_session": 5, "heartbeat_interval_seconds": 0})
+
+    write_agent_files(agent, _community(), None, None)
+
+    env = agent_env_path("laravel-backend-dev").read_text()
+    for line in ("BUZZ_ACP_SESSION_POLICY=channel\n", "BUZZ_ACP_MAX_TURNS_PER_SESSION=5\n", "BUZZ_ACP_HEARTBEAT_INTERVAL=0\n"):
+        assert line in env
+
+
 def test_template_unit_sets_path_and_workdir() -> None:
     from buzz_fleet.buzz_acp import BUZZ_ACP_DIR
     from buzz_fleet.systemd import WORK_DIR

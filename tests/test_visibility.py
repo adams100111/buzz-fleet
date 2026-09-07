@@ -89,6 +89,12 @@ def test_managed_agent_content_prepends_team_instructions() -> None:
     assert content["system_prompt"] == "Test-first. Strict typing.\n\nYou are a test agent."
 
 
+def test_managed_agent_content_includes_host(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.visibility.socket.gethostname", lambda: "mod-sol")
+    content = managed_agent_content(_agent())
+    assert content["host"] == "mod-sol"
+
+
 def test_visibility_status_text_old_agent_shows_dash() -> None:
     assert visibility_status_text(_agent()) == "—"
 

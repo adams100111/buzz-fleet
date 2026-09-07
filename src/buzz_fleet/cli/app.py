@@ -93,6 +93,15 @@ def agent_create(
     respond_to_allowlist: Annotated[
         str | None, typer.Option(help="Comma-separated pubkeys")
     ] = None,
+    session_policy: Annotated[
+        str | None, typer.Option(help="buzz-acp session scoping: thread (default) or channel")
+    ] = None,
+    max_turns_per_session: Annotated[
+        int | None, typer.Option(help="Rotate an active session after N turns (default 40)")
+    ] = None,
+    heartbeat_interval_seconds: Annotated[
+        int | None, typer.Option(help="Heartbeat prompt interval (default 900, 0 disables)")
+    ] = None,
     channel_ids: Annotated[
         str | None, typer.Option(help="Comma-separated NIP-29 channel UUIDs to join")
     ] = None,
@@ -104,6 +113,9 @@ def agent_create(
     parsed_channel_ids = _parse_channel_ids(channel_ids)
     if channel_add_policy is not None and channel_add_policy not in ("anyone", "owner_only", "nobody"):
         typer.echo("--channel-add-policy must be one of: anyone, owner_only, nobody", err=True)
+        raise typer.Exit(code=1)
+    if session_policy is not None and session_policy not in ("thread", "channel"):
+        typer.echo("--session-policy must be one of: thread, channel", err=True)
         raise typer.Exit(code=1)
     try:
         agent = manager.create_agent(
@@ -120,6 +132,9 @@ def agent_create(
                 if respond_to_allowlist
                 else None
             ),
+            session_policy=session_policy,
+            max_turns_per_session=max_turns_per_session,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
             channel_ids=parsed_channel_ids,
             channel_add_policy=channel_add_policy,
         )
@@ -164,6 +179,15 @@ def agent_update(
     respond_to_allowlist: Annotated[
         str | None, typer.Option(help="Comma-separated pubkeys")
     ] = None,
+    session_policy: Annotated[
+        str | None, typer.Option(help="buzz-acp session scoping: thread (default) or channel")
+    ] = None,
+    max_turns_per_session: Annotated[
+        int | None, typer.Option(help="Rotate an active session after N turns (default 40)")
+    ] = None,
+    heartbeat_interval_seconds: Annotated[
+        int | None, typer.Option(help="Heartbeat prompt interval (default 900, 0 disables)")
+    ] = None,
     channel_ids: Annotated[
         str | None, typer.Option(help="Comma-separated NIP-29 channel UUIDs to join")
     ] = None,
@@ -193,6 +217,15 @@ def agent_update(
             if respond_to_allowlist
             else None
         )
+    if session_policy is not None:
+        if session_policy not in ("thread", "channel"):
+            typer.echo("--session-policy must be one of: thread, channel", err=True)
+            raise typer.Exit(code=1)
+        changes["session_policy"] = session_policy
+    if max_turns_per_session is not None:
+        changes["max_turns_per_session"] = max_turns_per_session
+    if heartbeat_interval_seconds is not None:
+        changes["heartbeat_interval_seconds"] = heartbeat_interval_seconds
     if channel_ids is not None:
         changes["channel_ids"] = _parse_channel_ids(channel_ids)
     if channel_add_policy is not None:

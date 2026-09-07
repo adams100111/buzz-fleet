@@ -67,3 +67,12 @@ def test_visibility_state_tracks_channel_outcomes_independently() -> None:
     state = AgentVisibilityState(channels={"c1": "joined", "c2": "error"}, channel_errors={"c2": "invalid: channel not found"})
     assert state.channels["c1"] == "joined"
     assert state.channel_errors["c2"] == "invalid: channel not found"
+
+
+def test_session_fields_default_none_and_round_trip() -> None:
+    agent = Agent(**_base_kwargs())
+    assert (agent.session_policy, agent.max_turns_per_session, agent.heartbeat_interval_seconds) == (None, None, None)
+    again = Agent.model_validate_json(
+        Agent(**_base_kwargs(), session_policy="channel", max_turns_per_session=12, heartbeat_interval_seconds=300).model_dump_json()
+    )
+    assert (again.session_policy, again.max_turns_per_session, again.heartbeat_interval_seconds) == ("channel", 12, 300)
