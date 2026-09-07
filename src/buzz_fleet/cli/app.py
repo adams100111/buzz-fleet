@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 
 from buzz_fleet import __version__, harnesses, state
-from buzz_fleet.cli.fleet_commands import fleet_app
+from buzz_fleet.cli.fleet_commands import fleet_app, task_app
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import SystemPromptSource
@@ -35,6 +35,7 @@ app.add_typer(agent_app, name="agent")
 harness_app = typer.Typer(help="Detect and install harness adapters")
 app.add_typer(harness_app, name="harness")
 app.add_typer(fleet_app, name="fleet")
+app.add_typer(task_app, name="task")
 
 
 def _version_callback(show_version: bool) -> None:
