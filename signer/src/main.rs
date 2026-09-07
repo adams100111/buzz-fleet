@@ -1,5 +1,6 @@
 mod agent_events;
 mod events;
+mod fleet;
 
 use clap::{Parser, Subcommand};
 use nostr::Keys;
@@ -133,6 +134,20 @@ enum Command {
         reason: String,
         #[arg(long)]
         auth_tag: String,
+    },
+    /// Publish one kind 9 channel message with mentions, thread markers, and extra tags.
+    PostMessage {
+        #[arg(long)] relay: String,
+        #[arg(long)] nsec: String,
+        #[arg(long)] auth_tag: Option<String>,
+        #[arg(long)] channel: String,
+        /// Message text; `-` reads stdin.
+        #[arg(long)] content: String,
+        #[arg(long = "mention")] mentions: Vec<String>,
+        #[arg(long)] root: Option<String>,
+        #[arg(long)] parent: Option<String>,
+        /// Extra tag as name=value (repeatable; value may contain '=').
+        #[arg(long = "tag")] tags: Vec<String>,
     },
 }
 
@@ -289,6 +304,17 @@ async fn main() {
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
+        Command::PostMessage { relay, nsec, auth_tag, channel, content, mentions, root, parent, tags } => {
+            let result = async {
+                let channel = uuid::Uuid::parse_str(&channel).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?;
+                let content = read_content_arg(&content)?;
+                let extra = parse_tag_args(&tags)?;
+                let builder = fleet::build_fleet_message(channel, &content, &mentions, root.as_deref(), parent.as_deref(), &extra);
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                run_publish_id(&relay, &nsec, builder, tag.as_ref()).await
+            }.await;
+            match result { Ok(id) => ok_json(json!({"ok": true, "event_id": id})), Err(e) => err_json(e, 1) }
+        }
     };
     std::process::exit(code);
 }
@@ -329,6 +355,47 @@ async fn run_publish(
     }
     Ok(())
 }
+
+async fn run_publish_id(
+    relay: &str, signer_nsec: &str, builder: anyhow::Result<nostr::EventBuilder>, auth_tag: Option<&nostr::Tag>,
+) -> anyhow::Result<String> {
+    let keys = Keys::parse(signer_nsec)?;
+    let event = builder?.sign_with_keys(&keys)?;
+    let id = event.id.to_hex();
+    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, auth_tag).await?;
+    let response = conn.send_event(event).await?;
+    conn.disconnect().await?;
+    if !response.accepted {
+        anyhow::bail!("relay rejected event: {}", response.message);
+    }
+    Ok(id)
+}
+
+fn parse_optional_auth_tag(auth_tag: Option<&str>) -> anyhow::Result<Option<nostr::Tag>> {
+    match auth_tag {
+        None => Ok(None),
+        Some(s) => buzz_sdk::nip_oa::parse_auth_tag(s).map(Some).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}")),
+    }
+}
+
+fn read_content_arg(content: &str) -> anyhow::Result<String> {
+    if content != "-" {
+        return Ok(content.to_string());
+    }
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+    Ok(s)
+}
+
+fn parse_tag_args(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    raw.iter().map(|s| {
+        s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))
+            .ok_or_else(|| anyhow::anyhow!("invalid --tag {s:?}: expected name=value"))
+    }).collect()
+}
+
+fn ok_json(value: serde_json::Value) -> i32 { println!("{value}"); 0 }
+fn err_json(e: anyhow::Error, code: i32) -> i32 { println!("{}", json!({"ok": false, "error": e.to_string()})); code }
 
 #[cfg(test)]
 mod tests {
@@ -402,5 +469,13 @@ mod tests {
         // string directly, not a parsed `Tag`, and returns the owner's pubkey on success).
         let verified_owner = buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent.public_key()).unwrap();
         assert_eq!(verified_owner, owner.public_key());
+    }
+
+    #[test]
+    fn parse_tag_args_splits_on_first_equals_only() {
+        let parsed = parse_tag_args(&["t=fleet".into(), "fleet={\"a\":\"b=c\"}".into()]).unwrap();
+        assert_eq!(parsed[0], ("t".into(), "fleet".into()));
+        assert_eq!(parsed[1], ("fleet".into(), "{\"a\":\"b=c\"}".into()));
+        assert!(parse_tag_args(&["novalue".into()]).is_err());
     }
 }
