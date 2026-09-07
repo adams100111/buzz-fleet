@@ -4,6 +4,7 @@ mod fleet;
 
 use clap::{Parser, Subcommand};
 use nostr::Keys;
+use nostr::JsonUtil;
 use nostr::nips::nip19::ToBech32;
 use buzz_ws_client::connection::NostrWsConnection;
 use serde_json::json;
@@ -149,6 +150,8 @@ enum Command {
         /// Extra tag as name=value (repeatable; value may contain '=').
         #[arg(long = "tag")] tags: Vec<String>,
     },
+    /// One-shot REQ; prints each event as a JSON line and exits at EOSE.
+    Query { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] filter: String },
 }
 
 #[tokio::main]
@@ -314,6 +317,17 @@ async fn main() {
                 run_publish_id(&relay, &nsec, builder, tag.as_ref()).await
             }.await;
             match result { Ok(id) => ok_json(json!({"ok": true, "event_id": id})), Err(e) => err_json(e, 1) }
+        }
+        Command::Query { relay, nsec, auth_tag, filter } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let filter = fleet::parse_filter(&filter)?;
+                fleet::run_query(&relay, &nsec, tag.as_ref(), filter).await
+            }.await;
+            match result {
+                Ok(events) => { for e in events { println!("{}", e.as_json()); } 0 }
+                Err(e) => err_json(e, 2),
+            }
         }
     };
     std::process::exit(code);
