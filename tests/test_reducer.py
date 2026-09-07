@@ -176,3 +176,95 @@ def test_reduce_is_idempotent() -> None:
     state2 = reduce(events, REC)
     assert state1.tasks == state2.tasks
     assert state1.seen_cmds == state2.seen_cmds
+
+
+# --- Review round 2: mutation-demonstrated gaps (see task-12 fix report). ---
+
+
+def test_stranger_cannot_add_a_new_attempt_to_someone_elses_task() -> None:
+    # Finding 1: deleting the `_apply_delegate` authorization block left all tests green.
+    # A stranger (neither conductor nor requester) publishing a delegate with a *new* attempt
+    # id for an existing live task must not reassign it -- the original attempt must stay open.
+    hijack = _delegate("2", created_at=150, attempt=AT2, frm="e" * 64, to="e" * 64)
+    t = reduce([_delegate(), hijack], REC).tasks[T1]
+    assert len(t.attempts) == 1
+    assert t.attempts[0].attempt_id == AT1 and t.attempts[0].status == "open" and t.assignee == B
+    assert any("ignored new attempt" in n for n in t.notes)
+
+
+def test_requester_can_add_a_new_attempt_without_being_the_conductor() -> None:
+    # Finding 1: the accept arm of that same boundary (requester, not just conductor, may add a
+    # new attempt) was equally untested -- narrowing the rule to conductor-only would also have
+    # gone unnoticed.
+    fallback = _delegate("2", created_at=150, attempt=AT2, frm=A, to="d" * 64)
+    t = reduce([_delegate(), fallback], REC).tasks[T1]
+    assert t.attempts[0].status == "superseded"
+    assert t.current.attempt_id == AT2 and t.current.assignee == "d" * 64 and t.status == "open"
+
+
+def test_cancel_by_requester_on_a_live_task_is_applied() -> None:
+    # Finding 2: narrowing `{task.requester, owner_pubkey}` to `{owner_pubkey}` at reducer.py:136
+    # passed all 16 original tests because the only requester-issued cancel in the suite
+    # (test_cancel_authorization) lands on an already-terminal task. This exercises a
+    # requester's cancel on a still-live task.
+    by_requester = _ev("2", A, 150, {"type": "cancel-task", "task": T1, "reason": "changed my mind"})
+    assert reduce([_delegate(), by_requester], REC).tasks[T1].status == "cancelled"
+
+
+def test_redelivered_counter_is_idempotent_under_event_redelivery() -> None:
+    # Finding 2: deleting the top-level `ev.id in seen` guard at reducer.py:108 passed all 16
+    # original tests. That guard is what keeps counters like `redelivered` correct when the
+    # same relay event is read twice -- the brief's own "events arrive again on every re-read"
+    # determinism property.
+    redeliver = _ev("2", COND, 200, {"type": "redeliver", "task": T1, "attempt": AT1})
+    t = reduce([_delegate(), redeliver, redeliver], REC).tasks[T1]
+    assert t.redelivered == 1
+
+
+def test_delegate_without_to_is_refused_not_assigned_to_a_mention_tag() -> None:
+    # Promoted minor: a delegate payload with no "to" must never fall back to the first "p"
+    # mention tag. In the wire tag layout that tag is the retrieval key (see `_ev`'s fixed
+    # `["p", RK]` tag) -- a keypair nobody holds -- which would silently assign the task to
+    # nobody and leave it un-ackable forever. It must be refused instead.
+    bad = _ev("1", A, 100, {"type": "delegate", "task": T1, "attempt": AT1, "deadline": 1000,
+                            "required": True, "acceptance": []})  # no "to", no extra mentions
+    assert reduce([bad], REC).tasks == {}
+
+
+def test_delegate_with_non_numeric_deadline_does_not_crash() -> None:
+    # Finding 3: a hand-built delegate with `deadline: "soon"` raised ValueError out of
+    # `int(...)`, killing `reduce` for every reader on a single hostile event. Must degrade to
+    # "refuse this event", never abort. No task can be created without a valid deadline, so
+    # (as with the missing-`to` case above) there is nothing to note it against.
+    hostile = _delegate(deadline="soon")
+    assert reduce([hostile], REC).tasks == {}
+
+
+def test_delegate_with_non_list_acceptance_does_not_crash() -> None:
+    # Finding 3: `acceptance: 5` raised TypeError out of `list(5)` ("int object is not
+    # iterable"). Same fix and same "nothing to note against" reasoning as above.
+    hostile = _delegate(acceptance=5)
+    assert reduce([hostile], REC).tasks == {}
+
+
+def test_delegate_with_non_string_cmd_does_not_crash_and_is_not_recorded() -> None:
+    # Finding 3: `cmd: ["a"]` raised TypeError out of `set.add(["a"])` (a list is unhashable).
+    # Unlike deadline/acceptance, a malformed `cmd` is unrelated to whether the delegate itself
+    # is valid, so the delegate still applies -- only the bookkeeping `cmd` field is dropped.
+    hostile = _delegate(cmd=["a"])
+    state = reduce([hostile], REC)
+    assert state.tasks[T1].status == "open"
+    assert state.seen_cmds == set()
+
+
+def test_unauthorized_conductor_event_cmd_is_not_recorded() -> None:
+    # Finding 4 (ruled deviation from the brief's literal text -- see fix report): a `cmd` must
+    # be recorded only for events that pass authorization. Otherwise any fleet member can forge
+    # `{"type": "nudge", "cmd": "nudge:<task>:<attempt>"}` from a non-conductor key -- the nudge
+    # itself is correctly ignored, but without this fix the cmd would still land in seen_cmds,
+    # making the real conductor skip that nudge forever.
+    forged_cmd = f"nudge:{T1}:{AT1}"
+    forged = _ev("2", "e" * 64, 1100, {"type": "nudge", "task": T1, "attempt": AT1, "cmd": forged_cmd})
+    state = reduce([_delegate(), forged], REC)
+    assert forged_cmd not in state.seen_cmds
+    assert len(state.tasks[T1].notes) == 1

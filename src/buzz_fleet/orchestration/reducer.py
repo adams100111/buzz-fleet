@@ -99,6 +99,57 @@ class State:
         return depth
 
 
+def _record_cmd(state: State, p: dict) -> None:
+    """Record an authorized event's `cmd` for the conductor's own dedup (spec 5.4).
+
+    Called only from branches that actually *apply* an event. An event rejected on
+    authorization grounds must not be able to plant a `cmd` in `seen_cmds` anyway --
+    otherwise any fleet member could forge a conductor `cmd` id (e.g. from a fake
+    `nudge`) that the real conductor would then treat as already-done and skip forever.
+    This deviates from the brief's literal "every payload's cmd, when present, goes
+    into seen_cmds" -- see the task-12 fix report for why.
+
+    Also guards against a malformed `cmd` (e.g. a list, where the brief's original
+    unconditional `state.seen_cmds.add(cmd)` would raise TypeError on the unhashable
+    value): a non-empty string is required, anything else is silently dropped rather
+    than recorded or raised.
+    """
+    cmd = p.get("cmd")
+    if isinstance(cmd, str) and cmd:
+        state.seen_cmds.add(cmd)
+
+
+def _safe_int(value: object, default: int) -> int | None:
+    """Coerce a payload field to int, defensively.
+
+    Returns `default` when the field is absent, the coerced int when the value is a
+    genuine number (or numeric string), or None when it is present but not usable
+    (e.g. "soon", a list, a bool) -- callers must treat None as "refuse this event",
+    never silently fall back to a default, so a malformed field can't be quietly
+    smuggled through with fabricated data.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, str, float)):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _safe_acceptance(value: object) -> list[str] | None:
+    """Validate the `acceptance` field. None (absent) becomes []; anything that isn't
+    a list of strings is refused (e.g. `list(5)` in the original code raised TypeError)."""
+    if value is None:
+        return []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    return None
+
+
 def reduce(events: Iterable[FleetEvent], record: FleetRecord | None, *, owner_pubkey: str | None = None,
            deleted_ids: set[str] | frozenset[str] = frozenset()) -> State:
     state = State()
@@ -109,8 +160,6 @@ def reduce(events: Iterable[FleetEvent], record: FleetRecord | None, *, owner_pu
             continue
         seen.add(ev.id)
         p = ev.payload
-        if cmd := p.get("cmd"):
-            state.seen_cmds.add(cmd)
         kind = p.get("type")
         task_id = p.get("task") or ev.task_id
         if kind == "delegate" and task_id:
@@ -129,12 +178,14 @@ def reduce(events: Iterable[FleetEvent], record: FleetRecord | None, *, owner_pu
                 task.nudged_at = ev.created_at
             elif kind == "escalate":
                 task.escalated_at = ev.created_at
+            _record_cmd(state, p)
             continue
         if kind in ("ack", "report"):
-            _apply_assignee_event(task, ev, kind)
+            _apply_assignee_event(state, task, ev, kind)
         elif kind == "cancel-task":
             if ev.pubkey in {task.requester, owner_pubkey} and task.is_live:
                 task.current.status = "cancelled"
+                _record_cmd(state, p)
             else:
                 task.notes.append(f"ignored cancel {ev.id[:8]} from {ev.pubkey[:8]}")
     return state
@@ -142,33 +193,56 @@ def reduce(events: Iterable[FleetEvent], record: FleetRecord | None, *, owner_pu
 
 def _apply_delegate(state: State, ev: FleetEvent, task_id: str, conductors: set[str]) -> None:
     p = ev.payload or {}
-    attempt_id = p.get("attempt") or ev.id
-    to = p.get("to") or (ev.mentions[0] if ev.mentions else "")
     existing = state.tasks.get(task_id)
+    attempt_id = p.get("attempt") or ev.id
+
     if existing is None:
+        # A missing/invalid `to` must never fall back to a mention tag -- in the wire
+        # layout the first `p` tag is the retrieval key, a keypair nobody holds, which
+        # would silently assign the task to nobody and leave it un-ackable forever.
+        to = p.get("to")
+        if not isinstance(to, str) or not to:
+            return  # nothing to note against yet -- no task exists to record it on
+        deadline = _safe_int(p.get("deadline"), default=0)
+        if deadline is None:
+            return
+        acceptance = _safe_acceptance(p.get("acceptance"))
+        if acceptance is None:
+            return
         state.tasks[task_id] = Task(
             task_id=task_id, requester=ev.pubkey, run_id=p.get("run") or ev.run_id, step=p.get("step"),
             parent_task=p.get("parent_task"), required=bool(p.get("required", True)), rework_target=p.get("rework_target"),
-            artifact=p.get("artifact"), acceptance=list(p.get("acceptance") or []), deadline=int(p.get("deadline") or 0),
+            artifact=p.get("artifact"), acceptance=acceptance, deadline=deadline,
             created_at=ev.created_at, channel_id=ev.channel_id, root_event_id=ev.root or ev.id, delegate_event_id=ev.id,
             brief=ev.content, attempts=[Attempt(attempt_id, to, ev.created_at)],
         )
+        _record_cmd(state, p)
         return
+
     if any(a.attempt_id == attempt_id for a in existing.attempts):
         existing.notes.append(f"duplicate delegate {ev.id[:8]} ignored")
         return
     if ev.pubkey not in conductors and ev.pubkey != existing.requester:
         existing.notes.append(f"ignored new attempt {ev.id[:8]} from {ev.pubkey[:8]}")
         return
+    to = p.get("to")
+    if not isinstance(to, str) or not to:
+        existing.notes.append(f"ignored delegate {ev.id[:8]}: missing or invalid 'to'")
+        return
+    deadline = _safe_int(p.get("deadline"), default=existing.deadline)
+    if deadline is None:
+        existing.notes.append(f"ignored delegate {ev.id[:8]}: malformed deadline")
+        return
     if existing.is_live:
         existing.current.status = "superseded"
     existing.attempts.append(Attempt(attempt_id, to, ev.created_at))
-    existing.deadline = int(p.get("deadline") or existing.deadline)
+    existing.deadline = deadline
     existing.nudged_at = existing.escalated_at = None
     existing.redelivered = 0
+    _record_cmd(state, p)
 
 
-def _apply_assignee_event(task: Task, ev: FleetEvent, kind: str) -> None:
+def _apply_assignee_event(state: State, task: Task, ev: FleetEvent, kind: str) -> None:
     p = ev.payload or {}
     attempt = next((a for a in task.attempts if a.attempt_id == p.get("attempt")), None)
     if attempt is None or ev.pubkey != attempt.assignee:
@@ -180,6 +254,7 @@ def _apply_assignee_event(task: Task, ev: FleetEvent, kind: str) -> None:
     if kind == "ack":
         attempt.acked_at = attempt.acked_at or ev.created_at
         attempt.status = "acked"
+        _record_cmd(state, p)
         return
     status = p.get("status")
     if status not in ("done", "blocked", "failed"):
@@ -188,3 +263,4 @@ def _apply_assignee_event(task: Task, ev: FleetEvent, kind: str) -> None:
     attempt.status = status
     attempt.report = {**p, "content": ev.content}
     attempt.reported_at = ev.created_at
+    _record_cmd(state, p)
