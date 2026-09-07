@@ -95,7 +95,12 @@ class State:
         while cur is not None and cur.task_id not in seen:
             seen.add(cur.task_id)
             depth += 1
-            cur = self.tasks.get(cur.parent_task) if cur.parent_task else None
+            parent = cur.parent_task
+            # `parent_task` is validated to `str | None` at task-creation time (see
+            # `_safe_task_id` in `_apply_delegate`), so this dict.get is always given a
+            # hashable key -- an unvalidated `dict.get(<list>)` here would be the same
+            # "unhashable key" TypeError as the top-level `task` field in `reduce`.
+            cur = self.tasks.get(parent) if isinstance(parent, str) and parent else None
         return depth
 
 
@@ -150,6 +155,23 @@ def _safe_acceptance(value: object) -> list[str] | None:
     return None
 
 
+def _safe_task_id(value: object) -> str | None:
+    """Validate a payload's `task` (or `parent_task`) field.
+
+    Returns the id when it is a non-empty string, else None -- callers must treat
+    None as "malformed, refuse" rather than falling back to a default. Unlike
+    `_safe_int`, there is no sensible default for a task id: `p.get("task")` being a
+    list or dict (e.g. `{"task": []}`) previously reached `state.tasks.get(task_id)`
+    unvalidated, raising "unhashable type" and killing `reduce` for every reader on a
+    single hostile event -- exactly the bug `_safe_int`/`_safe_acceptance` closed for
+    `deadline`/`acceptance`, left open here because `task` is the first field the
+    reducer touches, before those checks ever run.
+    """
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
 def reduce(events: Iterable[FleetEvent], record: FleetRecord | None, *, owner_pubkey: str | None = None,
            deleted_ids: set[str] | frozenset[str] = frozenset()) -> State:
     state = State()
@@ -161,7 +183,14 @@ def reduce(events: Iterable[FleetEvent], record: FleetRecord | None, *, owner_pu
         seen.add(ev.id)
         p = ev.payload
         kind = p.get("type")
-        task_id = p.get("task") or ev.task_id
+        raw_task = p.get("task")
+        # A malformed `task` (e.g. `[]` or `{}` -- present but not a string) must be
+        # refused outright, not fall back to `ev.task_id`: falling back would mask the
+        # hostile payload rather than reject it, and using it unvalidated as a dict key
+        # below is what broke every reader on one bad event (see `_safe_task_id`).
+        if raw_task is not None and _safe_task_id(raw_task) is None:
+            continue
+        task_id = raw_task or ev.task_id
         if kind == "delegate" and task_id:
             _apply_delegate(state, ev, task_id, conductors)
             continue
@@ -209,9 +238,17 @@ def _apply_delegate(state: State, ev: FleetEvent, task_id: str, conductors: set[
         acceptance = _safe_acceptance(p.get("acceptance"))
         if acceptance is None:
             return
+        raw_parent = p.get("parent_task")
+        # A malformed `parent_task` (present but not a string, e.g. a list/dict) must
+        # be refused rather than stored: `State.chain_depth` does an unvalidated
+        # `dict.get(cur.parent_task)` on every task in the chain, so a bad value stored
+        # here would raise "unhashable type" for every future chain-depth check, not
+        # just this delegate.
+        if raw_parent is not None and _safe_task_id(raw_parent) is None:
+            return
         state.tasks[task_id] = Task(
             task_id=task_id, requester=ev.pubkey, run_id=p.get("run") or ev.run_id, step=p.get("step"),
-            parent_task=p.get("parent_task"), required=bool(p.get("required", True)), rework_target=p.get("rework_target"),
+            parent_task=raw_parent, required=bool(p.get("required", True)), rework_target=p.get("rework_target"),
             artifact=p.get("artifact"), acceptance=acceptance, deadline=deadline,
             created_at=ev.created_at, channel_id=ev.channel_id, root_event_id=ev.root or ev.id, delegate_event_id=ev.id,
             brief=ev.content, attempts=[Attempt(attempt_id, to, ev.created_at)],

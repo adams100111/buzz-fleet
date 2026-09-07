@@ -1,5 +1,9 @@
 import json
+import time
 
+import pytest
+
+from buzz_fleet.cli import fleet_commands as fc
 from buzz_fleet.orchestration.protocol import parse_event
 from buzz_fleet.orchestration.record import ConductorEntry, FleetRecord
 from buzz_fleet.orchestration.reducer import reduce
@@ -268,3 +272,47 @@ def test_unauthorized_conductor_event_cmd_is_not_recorded() -> None:
     state = reduce([_delegate(), forged], REC)
     assert forged_cmd not in state.seen_cmds
     assert len(state.tasks[T1].notes) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("task", ["boom"]),
+    ("task", {"a": 1}),
+    ("parent_task", ["boom"]),
+    ("parent_task", {"a": 1}),
+], ids=["task-list", "task-dict", "parent_task-list", "parent_task-dict"])
+def test_hostile_task_and_parent_task_fields_do_not_crash_reduce_render_or_json(field, value) -> None:
+    # Finding 1 (final review): an earlier ruling hardened `deadline`, `acceptance`,
+    # `to`, and `cmd` against malformed-but-parseable payloads -- it left `task` (the
+    # *first* payload field the reducer touches, before any of those checks run) and
+    # `parent_task` (read unvalidated by `State.chain_depth`) open. A single kind-9
+    # event with `"task": []` from any fleet-channel member broke
+    # `state.tasks.get(task_id)` with "unhashable type: 'list'", killing `reduce` --
+    # and therefore `tasks`, `task show`, `task delegate`, `task ack`, `task report`,
+    # and `fleet agents`, on every machine, for every reader -- with no recovery
+    # surface in this plan (`deleted_ids` has no CLI, `run purge` is a later plan).
+    hostile = _delegate(**{field: value})
+    state = reduce([hostile], REC)
+    # The point: this must not raise. A malformed task/parent_task can't be attached
+    # to a task record it might not even identify, so the event is refused outright.
+    assert state.tasks == {}
+    # And the downstream views every reader actually calls must survive too.
+    now = int(time.time())
+    assert fc.render_tasks(list(state.tasks.values()), now) is not None
+    assert [fc.task_to_json(t) for t in state.tasks.values()] == []
+
+
+def test_hostile_empty_content_does_not_crash_render_tasks() -> None:
+    # Finding 1 (final review): unlike deadline/acceptance/to/cmd, empty `content`
+    # doesn't stop a task from being created -- so it has to be handled by every
+    # downstream reader instead. `"".splitlines()` is `[]`, not `[""]`, so
+    # `render_tasks`'s `summary.splitlines()[0]` raised IndexError on a delegate
+    # posted with `content=""`, refusing the whole `tasks`/`task show` table for
+    # every reader, not just whoever sent the empty-content delegate.
+    hostile = _ev("1", A, 100, {"type": "delegate", "task": T1, "attempt": AT1, "to": B, "deadline": 1000,
+                                "required": True, "acceptance": []}, mentions=[B], content="")
+    state = reduce([hostile], REC)
+    assert state.tasks[T1].brief == ""
+    now = int(time.time())
+    table = fc.render_tasks(list(state.tasks.values()), now)
+    assert table is not None
+    assert fc.task_to_json(state.tasks[T1])["brief"] == ""

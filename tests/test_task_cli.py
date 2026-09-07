@@ -45,10 +45,14 @@ class FakeRunner:
         return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
 
 
-def _delegate_event(task=T1, attempt=AT1, requester=A, assignee=B, run=None, parent=None, event_id=None) -> dict:
+_DEFAULT_ARTIFACT = {"repo": "git@x:o/r.git", "commit": "c" * 40, "branch": None, "base": None}
+
+
+def _delegate_event(task=T1, attempt=AT1, requester=A, assignee=B, run=None, parent=None, event_id=None,
+                    artifact=_DEFAULT_ARTIFACT) -> dict:
     payload = {"v": 1, "type": "delegate", "task": task, "attempt": attempt, "run": run, "step": None, "parent_task": parent,
                "required": True, "from": requester, "to": assignee, "deadline": 1000, "rework_target": None,
-               "artifact": {"repo": "git@x:o/r.git", "commit": "c" * 40, "branch": None, "base": None}, "acceptance": []}
+               "artifact": artifact, "acceptance": []}
     # event_id defaults to task[:8] * 8 (the brief's own fixture derivation) -- but two
     # tasks sharing an 8-char task-id prefix would then collide on event id too, and the
     # reducer's own event-level dedup (reduce()'s `seen` set) would silently drop the
@@ -135,6 +139,18 @@ def test_report_refusals() -> None:
     with pytest.raises(RuntimeError, match="unknown id"):
         fc.report_task(runner, REVIEWER, task_ref="zzzzzzzz", status="done", summary="x", next_task="default",
                        input_commit=None, output_commit=None, evidence=[], channel=None)
+
+
+def test_report_with_non_dict_artifact_does_not_crash() -> None:
+    # Finding 1 (final review): `task.artifact` comes straight from a peer's delegate
+    # payload via the reducer, stored as-is with no type check. `(task.artifact or
+    # {}).get("commit")` raised AttributeError ('str' object has no attribute 'get')
+    # on `artifact: "not-a-dict"`, refusing `report` outright for every reader of that
+    # task -- not just whoever sent the hostile delegate.
+    runner = FakeRunner(events=[_delegate_event(artifact="not-a-dict")])
+    out = fc.report_task(runner, REVIEWER, task_ref=T1, status="done", summary="ok", next_task="default",
+                         input_commit=None, output_commit=None, evidence=[], channel=None)
+    assert out["task"] == T1
 
 
 def test_ambiguous_task_prefix_raises_and_lists_candidates() -> None:

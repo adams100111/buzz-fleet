@@ -221,7 +221,11 @@ def report_task(runner: CommandRunner, ident: Identity, *, task_ref: str, status
         raise RuntimeError(f"task {ids.short(task.task_id)} is assigned to {task.assignee[:12]}…, not to you ({ident.pubkey[:12]}…)")
     if not task.is_live:
         raise RuntimeError(f"task {ids.short(task.task_id)} is {task.status}; nothing to report")
-    expected = (task.artifact or {}).get("commit")
+    # `task.artifact` comes straight from a peer's payload via the reducer (`reduce`
+    # stores `p.get("artifact")` as-is); a hostile delegate with `artifact: "str"`
+    # would otherwise raise AttributeError here (`str` has no `.get`) and refuse this
+    # command for every reader, not just the sender of the bad event.
+    expected = task.artifact.get("commit") if isinstance(task.artifact, dict) else None
     if expected and input_commit != expected:
         raise RuntimeError(f"--input-commit must be {expected} (the commit you were given); got {input_commit!r}")
     assert ident.retrieval_key
@@ -380,8 +384,12 @@ def render_tasks(tasks: list[Task], now: int) -> Table:
         remaining = t.deadline - now
         deadline = (f"in {_age(remaining)}" if remaining > 0 else f"{_age(-remaining)} overdue") if t.is_live else "-"
         summary = (t.current.report or {}).get("content") or t.brief
+        # `"".splitlines()` is `[]`, not `[""]` -- a delegate posted with empty content
+        # (e.g. `content=""`) made `summary.splitlines()[0]` raise IndexError and refuse
+        # this whole table for every reader. `or [""]` restores the empty-line fallback.
+        summary_line = (summary.splitlines() or [""])[0]
         table.add_row(ids.short(t.task_id), ids.short(t.run_id) if t.run_id else "-", t.status, t.assignee[:8],
-                      t.requester[:8], _age(now - t.created_at), deadline, str(len(t.attempts)), summary.splitlines()[0][:60])
+                      t.requester[:8], _age(now - t.created_at), deadline, str(len(t.attempts)), summary_line[:60])
     return table
 
 
