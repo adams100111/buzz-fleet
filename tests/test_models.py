@@ -78,6 +78,23 @@ def test_session_fields_default_none_and_round_trip() -> None:
     assert (again.session_policy, again.max_turns_per_session, again.heartbeat_interval_seconds) == ("channel", 12, 300)
 
 
+def test_directory_fields_round_trip() -> None:
+    agent = Agent(
+        **_base_kwargs(), role="reviewer", capabilities=["laravel", "security-review"], description="Reviews PHP."
+    )
+    again = Agent.model_validate_json(agent.model_dump_json())
+    assert (again.role, again.capabilities, again.description) == (
+        "reviewer",
+        ["laravel", "security-review"],
+        "Reviews PHP.",
+    )
+
+
+def test_directory_fields_default_to_none() -> None:
+    agent = _agent()
+    assert (agent.role, agent.capabilities, agent.description) == (None, None, None)
+
+
 def test_community_fleet_fields_default_none() -> None:
     from buzz_fleet.models import Community
 

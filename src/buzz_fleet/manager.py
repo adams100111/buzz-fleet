@@ -429,6 +429,9 @@ class AgentManager:
         session_policy: str | None = None,
         max_turns_per_session: int | None = None,
         heartbeat_interval_seconds: int | None = None,
+        role: str | None = None,
+        capabilities: list[str] | None = None,
+        description: str | None = None,
         channel_ids: list[str] | None = None,
         channel_add_policy: str | None = None,
         anthropic_api_key: str | None = None,
@@ -460,6 +463,9 @@ class AgentManager:
             session_policy=session_policy,  # type: ignore[arg-type]
             max_turns_per_session=max_turns_per_session,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
+            role=role,
+            capabilities=capabilities,
+            description=description,
             channel_ids=channel_ids,
             channel_add_policy=channel_add_policy,
             visibility_managed=True,
@@ -521,6 +527,9 @@ class AgentManager:
                 "model",
                 "parallelism",
                 "respond_to_allowlist",
+                "role",
+                "capabilities",
+                "description",
             }
             vs = updated.visibility_state.model_copy(deep=True)
             if any(f in changes and getattr(updated, f) != getattr(current, f) for f in content_fields):

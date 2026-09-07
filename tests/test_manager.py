@@ -688,6 +688,74 @@ def test_update_agent_republishes_managed_agent_on_display_name_change(tmp_path:
     assert "publish-managed-agent" in subcommands
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("role", "reviewer"), ("capabilities", ["laravel"]), ("description", "Reviews PHP.")],
+)
+def test_update_agent_republishes_managed_agent_on_directory_field_change(
+    field: str, value: object, tmp_path: Path, monkeypatch
+) -> None:
+    """Discriminating test for the content_fields republish trigger: role,
+    capabilities, and description are directory fields published in the
+    managed-agent record (kind:30177) — a change to any of them that fails
+    to republish would leave every other machine reading stale directory
+    data indefinitely, since nothing else re-triggers the publish.
+    """
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Directory Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    assert agent.visibility_state.managed_agent_published is True
+    runner.calls.clear()
+
+    updated = manager.update_agent(agent.id, **{field: value})
+
+    assert getattr(updated, field) == value
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert "publish-managed-agent" in subcommands
+    assert updated.visibility_state.managed_agent_published is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("role", "reviewer"), ("capabilities", ["laravel"]), ("description", "Reviews PHP.")],
+)
+def test_update_agent_with_unchanged_directory_field_does_not_republish(
+    field: str, value: object, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Directory Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    assert agent.visibility_state.managed_agent_published is True
+    # Set the field's starting value directly on the saved record (rather than
+    # through create_agent's keyword-only params) so this test doesn't need a
+    # dynamic **{field: value} call into a strictly-typed signature.
+    from buzz_fleet import state as state_module
+
+    pre_set = agent.model_copy(update={field: value})
+    state_module.save_agent(pre_set)
+    runner.calls.clear()
+
+    updated = manager.update_agent(agent.id, **{field: value})
+
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert "publish-managed-agent" not in subcommands
+    assert updated.visibility_state.managed_agent_published is True
+
+
 def test_update_agent_joins_new_channel_and_leaves_removed_one(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")

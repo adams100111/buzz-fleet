@@ -550,6 +550,53 @@ def test_agent_create_rejects_bad_session_policy(monkeypatch) -> None:
     assert result.exit_code == 1 and "thread, channel" in result.output
 
 
+def test_agent_create_passes_directory_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--role", "reviewer", "--capability", "laravel",
+                                     "--capability", "docker-build", "--description", "Reviews."])
+    assert result.exit_code == 0, result.output
+    assert (captured["role"], captured["capabilities"], captured["description"]) == ("reviewer", ["laravel", "docker-build"], "Reviews.")
+
+
+def test_agent_create_defaults_directory_fields_to_none(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null"])
+    assert result.exit_code == 0, result.output
+    assert (captured["role"], captured["capabilities"], captured["description"]) == (None, None, None)
+
+
+def test_agent_update_passes_directory_flags(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeManager:
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1", "--role", "reviewer",
+                                     "--capability", "laravel", "--capability", "docker-build",
+                                     "--description", "Reviews."])
+    assert result.exit_code == 0, result.output
+    assert calls["changes"] == {"role": "reviewer", "capabilities": ["laravel", "docker-build"], "description": "Reviews."}
+
+
 def test_fleet_init_prints_channel_and_record(monkeypatch) -> None:
     from buzz_fleet.orchestration.record import FleetRecord
 

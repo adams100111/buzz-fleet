@@ -57,6 +57,33 @@ def test_parse_persona_md_extracts_fields(tmp_path: Path) -> None:
     assert template.parallelism is None
 
 
+def test_parse_persona_md_extracts_description(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.persona.md"
+    path.write_text(
+        "---\n"
+        "display_name: Laravel Backend Dev\n"
+        "runtime: claude\n"
+        "description: Laravel/PHP backend specialist.\n"
+        "---\n"
+        "You are the Laravel dev.\n"
+    )
+
+    template = parse_persona_md(path)
+
+    assert template is not None
+    assert template.description == "Laravel/PHP backend specialist."
+
+
+def test_parse_persona_md_description_is_none_without_frontmatter_key(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.persona.md"
+    path.write_text("---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nPrompt body.\n")
+
+    template = parse_persona_md(path)
+
+    assert template is not None
+    assert template.description is None
+
+
 def test_parse_persona_md_reads_sibling_pack_instructions(tmp_path: Path) -> None:
     (tmp_path / "pack_instructions.md").write_text("Test-first. Strict typing.\n")
     path = tmp_path / "laravel.persona.md"
@@ -106,8 +133,19 @@ def test_parse_agent_json_extracts_fields_and_drops_unwired_ones(tmp_path: Path)
     assert template.parallelism == 2
     assert template.idle_timeout_seconds == 90
     assert template.max_turn_duration_seconds == 300
+    assert template.description == "Laravel expert"
     # respondToAllowlist must never be carried into the template at all.
     assert not hasattr(template, "respond_to_allowlist")
+
+
+def test_parse_agent_json_description_is_none_without_about(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.agent.json"
+    _write_agent_json(path, profile={"displayName": "Laravel Backend Dev", "about": None})
+
+    template = parse_agent_json(path)
+
+    assert template is not None
+    assert template.description is None
 
 
 def test_parse_agent_json_returns_none_for_wrong_format(tmp_path: Path) -> None:

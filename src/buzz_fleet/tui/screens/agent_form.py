@@ -102,6 +102,25 @@ class AgentFormScreen(Screen):
                 id="harness-select",
             )
             yield install_button
+            yield Input(
+                value=self._agent.role if self._agent and self._agent.role else "",
+                placeholder="Role (optional, e.g. reviewer)",
+                id="role-input",
+            )
+            yield Input(
+                value=(
+                    ", ".join(self._agent.capabilities)
+                    if self._agent and self._agent.capabilities
+                    else ""
+                ),
+                placeholder="Capabilities, comma-separated (optional)",
+                id="capabilities-input",
+            )
+            yield Input(
+                value=self._agent.description if self._agent and self._agent.description else "",
+                placeholder="Description (optional)",
+                id="description-input",
+            )
 
         with _section("Behavior"):
             yield TextArea(text=prompt_text, placeholder="System prompt", id="prompt-input")
@@ -231,8 +250,10 @@ class AgentFormScreen(Screen):
             if template.max_turn_duration_seconds is not None
             else ""
         )
+        self.query_one("#description-input", Input).value = template.description or ""
         # respond_to_allowlist is deliberately never pre-filled from a
-        # template — see the design spec.
+        # template — see the design spec. role/capabilities have no template
+        # source (no persona format carries either) so they're left alone.
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "install-adapter-button":
@@ -245,6 +266,12 @@ class AgentFormScreen(Screen):
         harness = self.query_one("#harness-select", Select).value
         team_instructions = self.query_one("#team-instructions-input", TextArea).text.strip() or None
         model = self.query_one("#model-input", Input).value.strip() or None
+        role = self.query_one("#role-input", Input).value.strip() or None
+        capabilities_raw = self.query_one("#capabilities-input", Input).value.strip()
+        capabilities = (
+            [cap.strip() for cap in capabilities_raw.split(",") if cap.strip()] if capabilities_raw else None
+        )
+        description = self.query_one("#description-input", Input).value.strip() or None
         respond_to_raw = self.query_one("#respond-to-allowlist-input", Input).value.strip()
         respond_to_allowlist = (
             [key.strip() for key in respond_to_raw.split(",") if key.strip()]
@@ -288,6 +315,9 @@ class AgentFormScreen(Screen):
                     "session_policy": session_policy,
                     "max_turns_per_session": max_turns_per_session,
                     "heartbeat_interval_seconds": heartbeat_interval_seconds,
+                    "role": role,
+                    "capabilities": capabilities,
+                    "description": description,
                     "channel_ids": channel_ids,
                     "channel_add_policy": channel_add_policy,
                 }
@@ -317,6 +347,9 @@ class AgentFormScreen(Screen):
                     session_policy=session_policy,
                     max_turns_per_session=max_turns_per_session,
                     heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    role=role,
+                    capabilities=capabilities,
+                    description=description,
                     channel_ids=channel_ids,
                     channel_add_policy=channel_add_policy,
                 )

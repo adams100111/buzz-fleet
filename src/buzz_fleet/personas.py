@@ -41,6 +41,7 @@ class PersonaTemplate(BaseModel):
     idle_timeout_seconds: int | None = None
     max_turn_duration_seconds: int | None = None
     team_instructions: str | None = None
+    description: str | None = None
 
 
 def _sibling_pack_instructions(path: Path) -> str | None:
@@ -82,6 +83,7 @@ def parse_persona_md(path: Path) -> PersonaTemplate | None:
             prompt_body=body,
             source_path=path,
             team_instructions=_sibling_pack_instructions(path),
+            description=frontmatter.get("description"),
         )
     except ValidationError:
         return None
@@ -113,6 +115,7 @@ def parse_agent_json(path: Path) -> PersonaTemplate | None:
             parallelism=definition.get("parallelism"),
             idle_timeout_seconds=definition.get("idleTimeoutSeconds"),
             max_turn_duration_seconds=definition.get("maxTurnDurationSeconds"),
+            description=profile.get("about"),
         )
     except ValidationError:
         return None

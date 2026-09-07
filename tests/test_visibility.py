@@ -95,6 +95,16 @@ def test_managed_agent_content_includes_host(monkeypatch) -> None:
     assert content["host"] == "mod-sol"
 
 
+def test_managed_agent_content_includes_directory_fields() -> None:
+    agent = _agent().model_copy(
+        update={"role": "reviewer", "capabilities": ["laravel"], "description": "Reviews."}
+    )
+    content = managed_agent_content(agent)
+    assert content["role"] == "reviewer" and content["capabilities"] == ["laravel"] and content["description"] == "Reviews."
+    empty = managed_agent_content(_agent())
+    assert empty["role"] is None and empty["capabilities"] == [] and empty["description"] is None
+
+
 def test_visibility_status_text_old_agent_shows_dash() -> None:
     assert visibility_status_text(_agent()) == "—"
 

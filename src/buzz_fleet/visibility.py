@@ -56,6 +56,9 @@ def managed_agent_content(agent: Agent) -> dict:
         "respond_to": "allowlist" if agent.respond_to_allowlist else "owner-only",
         "respond_to_allowlist": agent.respond_to_allowlist or [],
         "host": socket.gethostname(),
+        "role": agent.role,
+        "capabilities": list(agent.capabilities or []),
+        "description": agent.description,
     }
 
 

@@ -77,6 +77,11 @@ class Agent(BaseModel):
     # Seconds between buzz-acp heartbeat prompts; the agent-side delivery
     # recovery path (spec fact 6). 0 disables.
     heartbeat_interval_seconds: int | None = None
+    # Agent directory (spec 5.10): published in the managed-agent record so
+    # every machine and every agent can choose agents by role and capability.
+    role: str | None = None
+    capabilities: list[str] | None = None
+    description: str | None = None
     channel_ids: list[str] | None = None
     channel_add_policy: Literal["anyone", "owner_only", "nobody"] | None = None
     visibility_managed: bool = False

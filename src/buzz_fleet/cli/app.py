@@ -106,6 +106,11 @@ def agent_create(
     heartbeat_interval_seconds: Annotated[
         int | None, typer.Option(help="Heartbeat prompt interval (default 900, 0 disables)")
     ] = None,
+    role: Annotated[str | None, typer.Option(help="This agent's role in the fleet, e.g. 'reviewer'")] = None,
+    capability: Annotated[
+        list[str] | None, typer.Option("--capability", help="A capability this agent has (repeatable)")
+    ] = None,
+    description: Annotated[str | None, typer.Option(help="Free-text description of this agent")] = None,
     channel_ids: Annotated[
         str | None, typer.Option(help="Comma-separated NIP-29 channel UUIDs to join")
     ] = None,
@@ -142,6 +147,9 @@ def agent_create(
             session_policy=session_policy,
             max_turns_per_session=max_turns_per_session,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
+            role=role,
+            capabilities=capability or None,
+            description=description,
             channel_ids=parsed_channel_ids,
             channel_add_policy=channel_add_policy,
             force=force,
@@ -196,6 +204,11 @@ def agent_update(
     heartbeat_interval_seconds: Annotated[
         int | None, typer.Option(help="Heartbeat prompt interval (default 900, 0 disables)")
     ] = None,
+    role: Annotated[str | None, typer.Option(help="This agent's role in the fleet, e.g. 'reviewer'")] = None,
+    capability: Annotated[
+        list[str] | None, typer.Option("--capability", help="A capability this agent has (repeatable)")
+    ] = None,
+    description: Annotated[str | None, typer.Option(help="Free-text description of this agent")] = None,
     channel_ids: Annotated[
         str | None, typer.Option(help="Comma-separated NIP-29 channel UUIDs to join")
     ] = None,
@@ -234,6 +247,12 @@ def agent_update(
         changes["max_turns_per_session"] = max_turns_per_session
     if heartbeat_interval_seconds is not None:
         changes["heartbeat_interval_seconds"] = heartbeat_interval_seconds
+    if role is not None:
+        changes["role"] = role
+    if capability is not None:
+        changes["capabilities"] = capability or None
+    if description is not None:
+        changes["description"] = description
     if channel_ids is not None:
         changes["channel_ids"] = _parse_channel_ids(channel_ids)
     if channel_add_policy is not None:
