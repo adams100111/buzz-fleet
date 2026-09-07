@@ -317,6 +317,40 @@ def test_load_persona_template_dispatches_agent_json_by_extension(tmp_path: Path
     assert template.display_name == "Laravel Backend Dev"
 
 
+def test_persona_with_unsafe_mcp_server_name_is_refused(tmp_path: Path) -> None:
+    """Same refusal path as the "more than one MCP server" case: an unsafe
+    name (would become a filesystem path segment, systemd.py's
+    `mcp-<name>.sh` wrapper) raises out of `_build_mcp_server`'s McpServer
+    construction, surfacing here exactly like the too-many-servers refusal
+    does, rather than crashing or silently accepting it. A `.persona.md`
+    pack is not necessarily authored by the operator, so this must be
+    caught the same way regardless of who wrote the file.
+    """
+    path = tmp_path / "unsafe.persona.md"
+    path.write_text(
+        "---\ndisplay_name: Unsafe\nruntime: claude\nmcp_servers:\n  - {name: '../../../pwned', command: a}\n---\nbody\n"
+    )
+    with pytest.raises(ValueError, match="not a safe filesystem path segment"):
+        load_persona_template(path)
+
+
+def test_discover_personas_with_unsafe_mcp_server_name_counts_as_skipped_not_a_crash(tmp_path: Path) -> None:
+    """The directory-scan equivalent of the test above: one persona with an
+    unsafe MCP server name must not take down the whole scan.
+    """
+    root = tmp_path / "personas"
+    root.mkdir(parents=True)
+    (root / "ok.persona.md").write_text("---\ndisplay_name: OK\nruntime: claude\n---\nbody\n")
+    (root / "unsafe.persona.md").write_text(
+        "---\ndisplay_name: Unsafe\nruntime: claude\nmcp_servers:\n  - {name: '../evil', command: a}\n---\nbody\n"
+    )
+
+    templates, skipped = discover_personas(root)
+
+    assert [t.display_name for t in templates] == ["OK"]
+    assert skipped == 1
+
+
 def test_discover_personas_with_two_mcp_servers_counts_as_skipped_not_a_crash(tmp_path: Path) -> None:
     """A persona pack with one broken file (declaring two MCP servers, which
     buzz-acp cannot support) must not take down the whole directory scan —

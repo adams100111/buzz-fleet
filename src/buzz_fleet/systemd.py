@@ -17,7 +17,7 @@ from buzz_fleet.harnesses import (
     PI_MCP_ADAPTER_VERSION,
     resolve_adapter_command,
 )
-from buzz_fleet.models import Agent, Community
+from buzz_fleet.models import MCP_SERVER_NAME_RE, Agent, Community
 from buzz_fleet.orchestration.instructions import apply_coordination_block
 
 if TYPE_CHECKING:
@@ -163,6 +163,15 @@ def _secret_value(value: str | SecretStr) -> str:
 
 
 def _mcp_wrapper_path(agent_id: str, name: str) -> Path:
+    # Defense in depth: `McpServer.name` is already validated at the model
+    # level (see `models.MCP_SERVER_NAME_RE`'s docstring for why), but this
+    # builds a filesystem path from it directly — assert again here so a
+    # future code path that ever bypasses model validation (e.g.
+    # `model_construct`, or a direct attribute assignment after
+    # construction) cannot turn an unsafe name into a write outside this
+    # agent's own directory.
+    if not MCP_SERVER_NAME_RE.match(name):
+        raise ValueError(f"unsafe MCP server name {name!r} — refusing to build a wrapper path from it")
     return WORK_DIR / agent_id / f"mcp-{name}.sh"
 
 
@@ -179,10 +188,13 @@ def _quote(value: str) -> str:
 
 def write_mcp_wrapper(agent: Agent) -> Path | None:
     """Generate the wrapper script buzz-acp actually execs for `agent`'s MCP
-    server, or None if the agent has none. buzz-acp itself only ever passes
-    a bare command with no args and no env — when either is needed, this
-    wrapper is what supplies them (exported, then exec'd into the real
-    command), and its path is what's handed to buzz-acp instead.
+    server, or None if the agent has none, or if it needs no wrapper at
+    all. buzz-acp itself only ever passes a bare command with no args and
+    no env — the wrapper exists *because* of that limitation, purely to
+    supply args/env buzz-acp itself cannot pass (exported, then exec'd into
+    the real command). A bare command with empty `args` and `env` needs
+    none of that: `BUZZ_ACP_MCP_COMMAND` can point straight at `m.command`,
+    so no wrapper is written for it (see `write_agent_files`'s fallback).
 
     0700, not 0600: it must remain executable, and it holds the same class
     of secret (an MCP server's own env vars, e.g. an API token) as the
@@ -191,6 +203,8 @@ def write_mcp_wrapper(agent: Agent) -> Path | None:
     if agent.mcp_server is None:
         return None
     m = agent.mcp_server
+    if not (m.args or m.env):
+        return None
     lines = ["#!/bin/sh"] + [f"export {k}={_quote(_secret_value(v))}" for k, v in m.env.items()]
     lines.append("exec " + " ".join(_quote(x) for x in [m.command, *m.args]))
     path = _mcp_wrapper_path(agent.id, m.name)
@@ -336,9 +350,14 @@ def write_agent_files(
     for key, value in (agent.env or {}).items():
         lines.append(env_line(key, _secret_value(value)))
 
-    wrapper_path = write_mcp_wrapper(agent)
-    if wrapper_path is not None:
-        lines.append(env_line("BUZZ_ACP_MCP_COMMAND", str(wrapper_path)))
+    if agent.mcp_server is not None:
+        wrapper_path = write_mcp_wrapper(agent)
+        if wrapper_path is not None:
+            lines.append(env_line("BUZZ_ACP_MCP_COMMAND", str(wrapper_path)))
+        else:
+            # A bare command with no args/env needs no wrapper — buzz-acp
+            # can run it directly.
+            lines.append(env_line("BUZZ_ACP_MCP_COMMAND", agent.mcp_server.command))
 
     if agent.harness == "pi":
         pi_dir = _write_pi_agent_dir(agent)

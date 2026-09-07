@@ -11,6 +11,7 @@ from buzz_fleet.systemd import (
     ensure_linger_enabled,
     ensure_template_unit_installed,
     write_agent_files,
+    write_mcp_wrapper,
 )
 
 
@@ -416,6 +417,80 @@ def test_write_agent_files_env_and_mcp_wrapper(tmp_path: Path, monkeypatch) -> N
     assert "export TOKEN='t'" in body and "exec 'php' 'artisan' 'boost:mcp'" in body
 
 
+def test_write_agent_files_bare_mcp_server_writes_no_wrapper(tmp_path: Path, monkeypatch) -> None:
+    """A bare command with empty args and env needs no wrapper at all — the
+    wrapper exists only because buzz-acp itself cannot pass args/env, so
+    when neither is needed BUZZ_ACP_MCP_COMMAND must point straight at the
+    command, not at a wrapper script that does nothing but exec it.
+    """
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    agent = _agent().model_copy(update={"mcp_server": McpServer(name="boost", command="php")})
+
+    write_agent_files(agent, _community(), None, None)
+
+    env = agent_env_path(agent.id).read_text()
+    assert "BUZZ_ACP_MCP_COMMAND=php\n" in env
+    assert write_mcp_wrapper(agent) is None
+    assert not (tmp_path / "work" / agent.id / "mcp-boost.sh").exists()
+
+
+def test_write_mcp_wrapper_returns_none_for_bare_command() -> None:
+    from buzz_fleet.models import McpServer
+
+    agent = _agent().model_copy(update={"mcp_server": McpServer(name="boost", command="php")})
+
+    assert write_mcp_wrapper(agent) is None
+
+
+def test_write_mcp_wrapper_writes_when_only_args_are_set(tmp_path: Path, monkeypatch) -> None:
+    """Args alone (no env) still need the wrapper — buzz-acp cannot pass
+    them either.
+    """
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    agent = _agent().model_copy(update={"mcp_server": McpServer(name="boost", command="php", args=["artisan"])})
+
+    path = write_mcp_wrapper(agent)
+
+    assert path is not None and path.exists()
+
+
+def test_write_mcp_wrapper_defends_against_traversal_even_if_validation_is_bypassed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`McpServer.name` is validated at construction time (see
+    test_models.py), so this can no longer happen through normal
+    construction — this test demonstrates the second, independent guard in
+    `_mcp_wrapper_path` itself, for a future code path that bypasses model
+    validation (e.g. `model_construct`, or a direct attribute assignment
+    after construction — pydantic does not re-validate on assignment by
+    default). Confirms the traversal attempt fails loudly rather than
+    silently writing outside the agent's own directory.
+    """
+    import pytest
+
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    # Non-empty args so this actually reaches wrapper-path construction
+    # rather than short-circuiting via the "bare command" fast path.
+    bypassed = McpServer.model_construct(name="../../../pwned", command="php", args=["artisan"], env={})
+    agent = _agent().model_copy(update={"mcp_server": bypassed})
+
+    with pytest.raises(ValueError, match="unsafe MCP server name"):
+        write_mcp_wrapper(agent)
+
+    # And no file was written anywhere outside (or inside) the work dir.
+    assert not (tmp_path / "pwned.sh").exists()
+    work_dir = tmp_path / "work"
+    assert not work_dir.exists() or not any(work_dir.rglob("*.sh"))
+
+
 def test_write_agent_files_pi_gets_private_agent_dir_and_mcp_json(tmp_path: Path, monkeypatch) -> None:
     import json as _json
 
@@ -424,6 +499,11 @@ def test_write_agent_files_pi_gets_private_agent_dir_and_mcp_json(tmp_path: Path
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
+    # Isolate from the real ~/.local/share/buzz-fleet/pi-agent-template/ —
+    # without this, _write_pi_agent_dir stats the real host's shared
+    # template dir, which is harmless while empty but host-dependent the
+    # moment `harness install pi` has ever actually been run there.
+    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", tmp_path / "pi-template-unused")
     agent = _agent().model_copy(update={"harness": "pi", "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"])})
 
     write_agent_files(agent, _community(), None, None)
@@ -472,6 +552,9 @@ def test_write_agent_files_pi_without_mcp_server_writes_no_mcp_json(tmp_path: Pa
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
+    # See the sibling test above for why this must not touch the real host's
+    # shared template dir.
+    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", tmp_path / "pi-template-unused")
     agent = _agent().model_copy(update={"harness": "pi"})
 
     write_agent_files(agent, _community(), None, None)

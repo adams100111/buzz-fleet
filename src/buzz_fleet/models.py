@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from buzz_fleet.orchestration.record import FleetRecord
+
+# `McpServer.name` becomes a filesystem path segment (systemd.py's
+# `mcp-<name>.sh` wrapper, and the key under `.pi-agent/mcp.json`'s
+# `mcpServers`) — restricted to a conservative safe set (no `/`, `\`, `.`,
+# or anything else that could traverse out of the agent's own directory)
+# rather than merely blocking `..`, since the name is attacker-influenceable
+# through an imported `.persona.md` pack the operator did not necessarily
+# author, the CLI's `--mcp-name`, and the TUI's MCP-name input alike.
+MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class Community(BaseModel):
@@ -46,6 +56,16 @@ class McpServer(BaseModel):
     command: str
     args: list[str] = Field(default_factory=list)
     env: dict[str, SecretStr] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def _name_is_a_safe_path_segment(cls, value: str) -> str:
+        if not MCP_SERVER_NAME_RE.match(value):
+            raise ValueError(
+                f"MCP server name {value!r} is not a safe filesystem path segment — "
+                "only letters, digits, '-', and '_' are allowed"
+            )
+        return value
 
 
 class AgentVisibilityState(BaseModel):

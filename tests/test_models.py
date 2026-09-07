@@ -121,3 +121,52 @@ def test_env_and_mcp_round_trip_with_secrets(tmp_path, monkeypatch) -> None:
     assert again.env["DATABASE_URL"].get_secret_value() == "postgres://x"
     assert again.mcp_server is not None
     assert again.mcp_server.env["TOKEN"].get_secret_value() == "t" and again.mcp_server.args == ["artisan", "boost:mcp"]
+
+
+def test_mcp_server_name_rejects_path_traversal() -> None:
+    """Real defect this guards: McpServer.name becomes a filesystem path
+    segment (systemd's `mcp-<name>.sh` wrapper) built directly from this
+    field. Before this validator, name="../../../pwned" wrote a real,
+    executable, secret-bearing file outside the agent's own directory
+    entirely.
+    """
+    import pytest
+
+    from buzz_fleet.models import McpServer
+
+    with pytest.raises(ValueError, match="not a safe filesystem path segment"):
+        McpServer(name="../../../pwned", command="php")
+
+
+def test_mcp_server_name_rejects_slash() -> None:
+    import pytest
+
+    from buzz_fleet.models import McpServer
+
+    with pytest.raises(ValueError, match="not a safe filesystem path segment"):
+        McpServer(name="a/b", command="php")
+
+
+def test_mcp_server_name_rejects_leading_dot() -> None:
+    import pytest
+
+    from buzz_fleet.models import McpServer
+
+    with pytest.raises(ValueError, match="not a safe filesystem path segment"):
+        McpServer(name=".hidden", command="php")
+
+
+def test_mcp_server_name_rejects_empty_string() -> None:
+    import pytest
+
+    from buzz_fleet.models import McpServer
+
+    with pytest.raises(ValueError, match="not a safe filesystem path segment"):
+        McpServer(name="", command="php")
+
+
+def test_mcp_server_name_accepts_safe_characters() -> None:
+    from buzz_fleet.models import McpServer
+
+    server = McpServer(name="boost-server_2", command="php")
+    assert server.name == "boost-server_2"
