@@ -152,6 +152,14 @@ enum Command {
     },
     /// One-shot REQ; prints each event as a JSON line and exits at EOSE.
     Query { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] filter: String },
+    /// List a channel's members with display names.
+    ChannelMembers { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] channel: String },
+    /// Create a channel (owner-signed) and print its id.
+    CreateChannel { #[arg(long)] relay: String, #[arg(long)] owner_nsec: String, #[arg(long)] name: String, #[arg(long)] about: Option<String> },
+    /// Read kind 39000 metadata for one channel or every accessible channel.
+    ReadChannelMeta { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] channel: Option<String> },
+    /// Owner-signed update of a channel's about text (`-` reads stdin).
+    WriteChannelAbout { #[arg(long)] relay: String, #[arg(long)] owner_nsec: String, #[arg(long)] channel: String, #[arg(long)] about: String },
 }
 
 #[tokio::main]
@@ -328,6 +336,45 @@ async fn main() {
                 Ok(events) => { for e in events { println!("{}", e.as_json()); } 0 }
                 Err(e) => err_json(e, 2),
             }
+        }
+        Command::ChannelMembers { relay, nsec, auth_tag, channel } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let channel = uuid::Uuid::parse_str(&channel).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?;
+                fleet::run_channel_members(&relay, &nsec, tag.as_ref(), channel).await
+            }.await;
+            match result {
+                Ok(members) => ok_json(json!({"ok": true, "members": members.into_iter()
+                    .map(|(pubkey, display_name)| json!({"pubkey": pubkey, "display_name": display_name})).collect::<Vec<_>>()})),
+                Err(e) => err_json(e, 1),
+            }
+        }
+        Command::CreateChannel { relay, owner_nsec, name, about } => {
+            let result = async {
+                let (id, builder) = fleet::build_create_channel(&name, about.as_deref())?;
+                run_publish(&relay, &owner_nsec, Ok(builder), None).await?;
+                Ok::<_, anyhow::Error>(id)
+            }.await;
+            match result { Ok(id) => ok_json(json!({"ok": true, "channel_id": id.to_string()})), Err(e) => err_json(e, 1) }
+        }
+        Command::ReadChannelMeta { relay, nsec, auth_tag, channel } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let channel = match channel {
+                    Some(c) => Some(uuid::Uuid::parse_str(&c).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?),
+                    None => None,
+                };
+                fleet::run_read_channel_meta(&relay, &nsec, tag.as_ref(), channel).await
+            }.await;
+            match result { Ok(metas) => ok_json(json!({"ok": true, "channels": metas})), Err(e) => err_json(e, 1) }
+        }
+        Command::WriteChannelAbout { relay, owner_nsec, channel, about } => {
+            let result = async {
+                let channel = uuid::Uuid::parse_str(&channel).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?;
+                let about = read_content_arg(&about)?;
+                run_publish(&relay, &owner_nsec, fleet::build_write_about(channel, &about), None).await
+            }.await;
+            match result { Ok(()) => ok_json(json!({"ok": true})), Err(e) => err_json(e, 1) }
         }
     };
     std::process::exit(code);
