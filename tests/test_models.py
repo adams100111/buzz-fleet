@@ -117,5 +117,7 @@ def test_env_and_mcp_round_trip_with_secrets(tmp_path, monkeypatch) -> None:
                   mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"}))
     state.save_agent(agent)
     again = state.load_agents("eltahir")[0]
+    assert again.env is not None
     assert again.env["DATABASE_URL"].get_secret_value() == "postgres://x"
+    assert again.mcp_server is not None
     assert again.mcp_server.env["TOKEN"].get_secret_value() == "t" and again.mcp_server.args == ["artisan", "boost:mcp"]

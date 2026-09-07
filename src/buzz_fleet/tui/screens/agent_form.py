@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -11,11 +11,58 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Select, Static, TextArea
 
 from buzz_fleet import harnesses, personas
-from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Agent, McpServer, SystemPromptSource
 from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.tui.theme import SECTION_CSS
 from buzz_fleet.tui.theme import section as _section
+
+
+class _AgentCreator(Protocol):
+    """Structural type for the only two things this screen actually calls
+    on its manager. Narrower than the concrete `AgentManager` on purpose:
+    a test double only needs to implement `create_agent`/`update_agent` to
+    stand in for one here, rather than needing an is-a relationship with
+    the real class (which requires a `CommandRunner` and a `Community`,
+    both irrelevant to what this screen exercises).
+
+    `create_agent`'s parameter list mirrors `AgentManager.create_agent`'s
+    real signature exactly (rather than a generic `**kwargs: object`) so
+    the real class still satisfies this protocol — a protocol method typed
+    `**kwargs: object` is a poor match for a concrete method with specific
+    keyword-only parameters; mypy does not consider the latter a subtype of
+    the former. A test double's own `**kwargs`-typed method remains
+    compatible with a protocol requiring specific keywords, since it
+    genuinely accepts a superset of what's required here.
+    """
+
+    def create_agent(
+        self,
+        *,
+        display_name: str,
+        harness: str,
+        system_prompt_source: SystemPromptSource,
+        team_instructions: str | None = None,
+        model: str | None = None,
+        parallelism: int | None = None,
+        idle_timeout_seconds: int | None = None,
+        max_turn_duration_seconds: int | None = None,
+        respond_to_allowlist: list[str] | None = None,
+        session_policy: str | None = None,
+        max_turns_per_session: int | None = None,
+        heartbeat_interval_seconds: int | None = None,
+        role: str | None = None,
+        capabilities: list[str] | None = None,
+        description: str | None = None,
+        channel_ids: list[str] | None = None,
+        channel_add_policy: str | None = None,
+        anthropic_api_key: str | None = None,
+        openai_api_key: str | None = None,
+        env: dict[str, str] | None = None,
+        mcp_server: McpServer | None = None,
+        force: bool = False,
+    ) -> Agent: ...
+
+    def update_agent(self, agent_id: str, **changes: object) -> Agent: ...
 
 
 class AgentFormScreen(Screen):
@@ -37,7 +84,7 @@ class AgentFormScreen(Screen):
         Binding("escape", "cancel", "Cancel"),
     ]
 
-    def __init__(self, manager: AgentManager, agent: Agent | None = None) -> None:
+    def __init__(self, manager: _AgentCreator, agent: Agent | None = None) -> None:
         super().__init__()
         self._manager = manager
         self._agent = agent
