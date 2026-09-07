@@ -23,15 +23,31 @@ def fleet_filter(channel_id: str, retrieval_key: str, *, until: int | None = Non
 
 def fetch_all(runner: CommandRunner, ident: Identity, filter: dict) -> list[dict]:
     """Page by `until` until a page adds no new ids. `until` is inclusive, so the
-    boundary second is re-fetched and de-duplicated rather than lost."""
+    boundary second is re-fetched and de-duplicated rather than lost.
+
+    A *full* page (exactly `limit` rows) that adds nothing new means more events
+    share that boundary `created_at` than fit in one page: an inclusive `until`
+    cannot advance past it, so there is no way to page further without silently
+    returning partial history. That is refused with a RuntimeError rather than
+    treated as "done" -- a caller reconstructing state from a truncated read would
+    have no way to tell it apart from a genuinely complete one.
+    """
     seen: dict[str, dict] = {}
     f = dict(filter)
     while True:
         page = signer_client.query(runner, ident.relay_url, ident.nsec, f, auth_tag=ident.auth_tag)
+        limit = f.get("limit", PAGE)
         new = [e for e in page if e["id"] not in seen]
+        if not new:
+            if len(page) >= limit:
+                raise RuntimeError(
+                    f"the relay returned a full page of {len(page)} events all sharing "
+                    f"created_at {f.get('until')}; history cannot be paged past it"
+                )
+            break
         for e in new:
             seen[e["id"]] = e
-        if not new or len(page) < f.get("limit", PAGE):
+        if len(page) < limit:
             break
         f["until"] = min(int(e["created_at"]) for e in page)
     return list(seen.values())

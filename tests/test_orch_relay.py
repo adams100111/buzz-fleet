@@ -118,20 +118,17 @@ def test_fetch_all_boundary_tie_at_an_exact_page_cut_is_not_lost() -> None:
     assert {e["id"] for e in got} == {e["id"] for e in events}
     assert len([c for c in runner.calls if c[1] == "query"]) >= 3
 
-    # Same fixture, but paging with the buggy exclusive cursor: must lose event 3.
-    seen: dict[str, dict] = {}
-    f: dict = {"kinds": [9], "#h": [CH], "#p": [RK], "limit": 3}
-    while True:
-        page = runner.run(["buzz-fleet-signer", "query", "--relay", "wss://r", "--nsec", "n",
-                           "--filter", json.dumps(f)])
-        page_events = [json.loads(line) for line in page.stdout.splitlines() if line.strip()]
-        new = [e for e in page_events if e["id"] not in seen]
-        for e in new:
-            seen[e["id"]] = e
-        if not new or len(page_events) < f["limit"]:
-            break
-        f["until"] = min(int(e["created_at"]) for e in page_events) - 1  # the bug under test
-    assert {"0" * 63 + "3"} == {e["id"] for e in events} - set(seen)
+
+def test_fetch_all_raises_when_more_events_share_a_second_than_fit_a_page() -> None:
+    """1,500 events share one `created_at`, one full page over the 1,000-row clamp.
+    An inclusive `until` can never advance past that second, so continuing to page
+    would just re-fetch the identical first 1,000 forever. Silently returning those
+    1,000 as "complete" would violate spec 8's identical-reconstruction guarantee
+    with no signal to the caller -- this must raise instead."""
+    events = [_event(i, 1000) for i in range(1500)] + [_event(i, 900) for i in range(1500, 1505)]
+    runner = PagingRunner(events)
+    with pytest.raises(RuntimeError, match="cannot be paged past"):
+        relay.fetch_all(runner, IDENT, relay.fleet_filter(CH, RK))
 
 
 def test_fetch_deleted_ids_returns_empty_without_querying_when_no_owner() -> None:
