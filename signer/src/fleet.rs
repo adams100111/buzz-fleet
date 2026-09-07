@@ -1,16 +1,6 @@
 //! Builders and relay helpers for the orchestration subcommands.
 
-// Tasks 5, 6, and 18 add relay-reading subcommands to this file (channel
-// meta and message history) that need these; Task 4 only writes, so they
-// are unused for now. Suppressed here rather than dropped so this file's
-// shared header doesn't have to be re-added by each of those tasks.
-#![allow(unused_imports)]
-
-use std::time::Duration;
-
-use buzz_ws_client::connection::NostrWsConnection;
-use buzz_ws_client::message::RelayMessage;
-use nostr::{EventBuilder, JsonUtil};
+use nostr::EventBuilder;
 use uuid::Uuid;
 
 /// A kind 9 channel message with optional NIP-10 thread markers, `p`

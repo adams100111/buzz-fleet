@@ -345,17 +345,13 @@ async fn run_publish(
     builder: anyhow::Result<nostr::EventBuilder>,
     auth_tag: Option<&nostr::Tag>,
 ) -> anyhow::Result<()> {
-    let keys = Keys::parse(signer_nsec)?;
-    let event = builder?.sign_with_keys(&keys)?;
-    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, auth_tag).await?;
-    let response = conn.send_event(event).await?;
-    conn.disconnect().await?;
-    if !response.accepted {
-        anyhow::bail!("relay rejected event: {}", response.message);
-    }
+    run_publish_id(relay, signer_nsec, builder, auth_tag).await?;
     Ok(())
 }
 
+/// Same connect/send/disconnect/accepted-check sequence as `run_publish`,
+/// but returns the signed event's id — needed by subcommands (like
+/// `post-message`) whose success payload includes `event_id`.
 async fn run_publish_id(
     relay: &str, signer_nsec: &str, builder: anyhow::Result<nostr::EventBuilder>, auth_tag: Option<&nostr::Tag>,
 ) -> anyhow::Result<String> {
