@@ -268,7 +268,11 @@ class AgentFormScreen(Screen):
             return
 
         channel_add_policy = self.query_one("#channel-add-policy-select", Select).value
-        session_policy = self.query_one("#session-policy-select", Select).value
+        session_policy_value = self.query_one("#session-policy-select", Select).value
+        # allow_blank=False on this select means Select.BLANK (NoSelection)
+        # can never actually reach here — narrow to str so create_agent's
+        # str | None parameter is satisfied without a type: ignore.
+        session_policy = session_policy_value if isinstance(session_policy_value, str) else None
 
         try:
             if self._agent is not None:
