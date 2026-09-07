@@ -34,6 +34,20 @@ class SystemPromptSource(BaseModel):
     path: Path | None = None
 
 
+class McpServer(BaseModel):
+    """A single stdio MCP server to attach to this agent. buzz-acp only
+    accepts one MCP server (a bare command, no args/env) — when args or env
+    are needed, `systemd.write_mcp_wrapper` generates a small shell wrapper
+    script that exports `env` and execs `command`/`args`, and that wrapper's
+    path is what's actually handed to buzz-acp via `BUZZ_ACP_MCP_COMMAND`.
+    """
+
+    name: str
+    command: str
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, SecretStr] = Field(default_factory=dict)
+
+
 class AgentVisibilityState(BaseModel):
     """Per-sub-publish status for the Desktop-visibility feature, tracked so
     `AgentManager._sync_visibility` retries only what's actually missing/
@@ -86,4 +100,14 @@ class Agent(BaseModel):
     channel_add_policy: Literal["anyone", "owner_only", "nobody"] | None = None
     visibility_managed: bool = False
     visibility_state: AgentVisibilityState = Field(default_factory=AgentVisibilityState)
+    # Generic per-agent env-var passthrough (spec 5.13) — a registry token, a
+    # deploy key, a database URL, or a harness-specific provider selector
+    # (e.g. GOOSE_PROVIDER) with nowhere else to live. Written into the
+    # agent's env file (systemd.write_agent_files) after the API keys. Never
+    # published anywhere — see manager.py's content_fields for why.
+    env: dict[str, SecretStr] | None = None
+    # buzz-acp accepts exactly one stdio MCP server. Pi has no MCP support
+    # of its own and gets it through the pi-mcp-adapter extension instead
+    # (systemd.write_agent_files' Pi-specific handling).
+    mcp_server: McpServer | None = None
     created_at: datetime

@@ -8,6 +8,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import SecretStr
+
 from buzz_fleet import (
     __version__,
     buzz_acp,
@@ -18,7 +20,7 @@ from buzz_fleet import (
     systemd,
     visibility,
 )
-from buzz_fleet.models import Agent, Community, SystemPromptSource
+from buzz_fleet.models import Agent, Community, McpServer, SystemPromptSource
 from buzz_fleet.orchestration import instructions
 from buzz_fleet.orchestration.record import FleetRecord, decode_about, encode_about
 from buzz_fleet.proc import CommandRunner
@@ -149,7 +151,12 @@ class AgentManager:
         retrieval_pub, retrieval_secret = signer_client.generate_key(self._runner)
         rec = FleetRecord(
             retrieval_key=retrieval_pub, conductors={},
-            versions={"buzz-fleet": __version__}, created_at=int(time.time()),
+            # pi-mcp-adapter's pinned version travels in the fleet record
+            # alongside buzz-fleet's own — every machine (and Desktop/mobile,
+            # which reads this record) can see what's actually pinned for
+            # Pi's MCP support without SSHing in to check harnesses.py.
+            versions={"buzz-fleet": __version__, "pi-mcp-adapter": harnesses.PI_MCP_ADAPTER_VERSION},
+            created_at=int(time.time()),
         )
         if existing:
             channel_id = existing
@@ -436,6 +443,8 @@ class AgentManager:
         channel_add_policy: str | None = None,
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
+        env: dict[str, str] | None = None,
+        mcp_server: McpServer | None = None,
         force: bool = False,
     ) -> Agent:
         self.ensure_runtime_ready()
@@ -468,6 +477,8 @@ class AgentManager:
             description=description,
             channel_ids=channel_ids,
             channel_add_policy=channel_add_policy,
+            env=env,  # type: ignore[arg-type]
+            mcp_server=mcp_server,
             visibility_managed=True,
             created_at=datetime.now(UTC),
         )
@@ -514,12 +525,42 @@ class AgentManager:
         # (rather than honoring it or erroring) so it can never be overridden
         # through this path even by a future/careless caller.
         changes = {k: v for k, v in changes.items() if k != "visibility_managed"}
+        if "env" in changes and changes["env"] is not None:
+            # model_copy(update=...) below does NOT run field validation, so
+            # a plain dict[str, str] (what the CLI/TUI actually pass — env
+            # is the one place a caller of this generic, untyped **changes
+            # signature supplies raw dict values, unlike mcp_server which
+            # callers always build via the McpServer constructor, and so is
+            # already fully validated by the time it gets here) would
+            # otherwise be assigned directly into a field typed
+            # dict[str, SecretStr] without ever becoming SecretStr — which
+            # blows up the next time this agent is serialized (state.py's
+            # SecretStr serializer expects an actual SecretStr instance).
+            # Coerce explicitly rather than relying on validate-on-copy.
+            raw_env = changes["env"]
+            assert isinstance(raw_env, dict)
+            changes = {**changes, "env": {k: v if isinstance(v, SecretStr) else SecretStr(v) for k, v in raw_env.items()}}
         self._ensure_owner_pubkey()
         agents = {a.id: a for a in self.list_agents()}
         current = agents[agent_id]
         updated = current.model_copy(update=changes)
 
         if current.visibility_managed:
+            # `env` and `mcp_server` are deliberately NOT in this set.
+            # visibility.managed_agent_content() never reads either field —
+            # so today, changing one is simply a no-op for this trigger, not
+            # a leak. But content_fields' whole job is "does this field
+            # affect the publicly-published record," and these two hold
+            # secrets published to nothing else in this codebase: keeping
+            # them out here is a second, independent guard against them ever
+            # reaching the relay, so a future edit to managed_agent_content
+            # that starts including one (say, to advertise `mcp_server.name`
+            # for discovery) doesn't silently also start publishing its
+            # `env` dict the very next time this set is naively "kept in
+            # sync." A change to either still takes effect immediately —
+            # write_agent_files reads them straight off `updated` below,
+            # unconditionally, on every update — it just never republishes
+            # the relay-facing managed-agent record for it.
             content_fields = {
                 "display_name",
                 "system_prompt_source",

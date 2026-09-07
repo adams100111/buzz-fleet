@@ -395,3 +395,108 @@ def test_write_agent_files_exports_fleet_env_when_known(tmp_path: Path, monkeypa
     env = agent_env_path("laravel-backend-dev").read_text()
     assert "BUZZ_FLEET_CHANNEL=6f1c0000-0000-4000-8000-000000000000\n" in env
     assert f"BUZZ_FLEET_RETRIEVAL_KEY={'r' * 64}\n" in env
+
+
+def test_write_agent_files_env_and_mcp_wrapper(tmp_path: Path, monkeypatch) -> None:
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+    agent = _agent().model_copy(update={"env": {"DATABASE_URL": "postgres://x"},
+                                        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})})
+
+    write_agent_files(agent, _community(), None, None)
+
+    env = agent_env_path(agent.id).read_text()
+    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    assert "DATABASE_URL=postgres://x\n" in env and f"BUZZ_ACP_MCP_COMMAND={wrapper}\n" in env
+    assert wrapper.stat().st_mode & 0o777 == 0o700
+    body = wrapper.read_text()
+    assert "export TOKEN='t'" in body and "exec 'php' 'artisan' 'boost:mcp'" in body
+
+
+def test_write_agent_files_pi_gets_private_agent_dir_and_mcp_json(tmp_path: Path, monkeypatch) -> None:
+    import json as _json
+
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
+    agent = _agent().model_copy(update={"harness": "pi", "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"])})
+
+    write_agent_files(agent, _community(), None, None)
+
+    pi_dir = tmp_path / "work" / agent.id / ".pi-agent"
+    assert f"PI_CODING_AGENT_DIR={pi_dir}\n" in agent_env_path(agent.id).read_text()
+    settings = _json.loads((pi_dir / "settings.json").read_text())
+    assert settings["defaultProjectTrust"] == "always" and settings["packages"][0].startswith("npm:pi-mcp-adapter@")
+    assert _json.loads((pi_dir / "mcp.json").read_text())["mcpServers"]["boost"]["args"] == ["artisan", "boost:mcp"]
+
+
+def test_write_mcp_wrapper_quotes_values_with_spaces(tmp_path: Path, monkeypatch) -> None:
+    """Discriminating test for the `shlex.quote` requirement: an unquoted
+    value containing a space would silently split into two shell words,
+    corrupting the exported env var or the exec'd command line.
+    """
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    agent = _agent().model_copy(update={
+        "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"NOTE": "has space"})
+    })
+
+    from buzz_fleet.systemd import write_mcp_wrapper
+
+    path = write_mcp_wrapper(agent)
+
+    assert path is not None
+    body = path.read_text()
+    assert "export NOTE='has space'" in body
+
+
+def test_write_agent_files_no_mcp_server_writes_no_wrapper_or_mcp_command(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
+
+    write_agent_files(_agent(), _community(), None, None)
+
+    env = agent_env_path("laravel-backend-dev").read_text()
+    assert "BUZZ_ACP_MCP_COMMAND" not in env
+    assert not (tmp_path / "work" / "laravel-backend-dev" / "mcp-boost.sh").exists()
+
+
+def test_write_agent_files_pi_without_mcp_server_writes_no_mcp_json(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
+    agent = _agent().model_copy(update={"harness": "pi"})
+
+    write_agent_files(agent, _community(), None, None)
+
+    pi_dir = tmp_path / "work" / agent.id / ".pi-agent"
+    assert pi_dir.is_dir()
+    assert not (pi_dir / "mcp.json").exists()
+
+
+def test_write_agent_files_pi_copies_shared_template_npm_dir(tmp_path: Path, monkeypatch) -> None:
+    """The whole point of the shared template dir (harnesses.install_adapter)
+    is that a brand-new Pi agent's first turn needs no network — verify the
+    template's npm/ payload actually lands inside the agent's own
+    .pi-agent/npm/ rather than being left behind.
+    """
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
+    template_dir = tmp_path / "pi-template"
+    (template_dir / "npm" / "pi-mcp-adapter").mkdir(parents=True)
+    (template_dir / "npm" / "pi-mcp-adapter" / "package.json").write_text("{}")
+    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", template_dir)
+    agent = _agent().model_copy(update={"harness": "pi"})
+
+    write_agent_files(agent, _community(), None, None)
+
+    copied = tmp_path / "work" / agent.id / ".pi-agent" / "npm" / "pi-mcp-adapter" / "package.json"
+    assert copied.is_file()

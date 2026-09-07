@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from buzz_fleet import harnesses
@@ -107,7 +109,46 @@ def test_install_adapter_runs_all_commands_in_order() -> None:
     assert runner.calls == [
         ["npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"],
         ["npm", "install", "-g", "pi-acp"],
+        ["pi", "install", f"npm:pi-mcp-adapter@{harnesses.PI_MCP_ADAPTER_VERSION}"],
     ]
+
+
+def test_install_adapter_for_pi_points_pi_install_at_shared_template_dir(monkeypatch) -> None:
+    """Pi has no MCP support of its own — pi-mcp-adapter must be installed
+    into the shared, one-per-host template dir (not wherever the owner's own
+    Pi setup happens to point), so every new agent's `.pi-agent/` can copy
+    it in without touching the network. Regression guard: install_adapter
+    must restore any PI_CODING_AGENT_DIR that was already set in the
+    environment, rather than leaking its own value into it permanently.
+    """
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", "/some/other/dir")
+    seen_env: dict[str, str | None] = {}
+
+    class EnvCapturingRunner(FakeRunner):
+        def run(self, args: list[str]):
+            if args[:2] == ["pi", "install"]:
+                seen_env["PI_CODING_AGENT_DIR"] = os.environ.get("PI_CODING_AGENT_DIR")
+            return super().run(args)
+
+    runner = EnvCapturingRunner()
+
+    harnesses.install_adapter(runner, "pi")
+
+    assert seen_env["PI_CODING_AGENT_DIR"] == str(harnesses.PI_AGENT_TEMPLATE_DIR)
+    assert os.environ["PI_CODING_AGENT_DIR"] == "/some/other/dir"
+
+
+def test_install_adapter_raises_when_pi_mcp_adapter_install_fails() -> None:
+    import subprocess
+
+    class FailLastRunner(FakeRunner):
+        def run(self, args: list[str]):
+            if args[:2] == ["pi", "install"]:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="npm error")
+            return super().run(args)
+
+    with pytest.raises(RuntimeError, match="npm error"):
+        harnesses.install_adapter(FailLastRunner(), "pi")
 
 
 def test_install_adapter_raises_on_command_failure() -> None:

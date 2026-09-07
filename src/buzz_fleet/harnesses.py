@@ -22,7 +22,9 @@ inside the unit file.
 
 from __future__ import annotations
 
+import os
 import shutil
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -31,6 +33,22 @@ if TYPE_CHECKING:
 HarnessAvailability = Literal["available", "adapter_missing", "not_installed"]
 
 HARNESSES = ["claude", "codex", "pi", "goose"]
+
+# Pi has no MCP support of its own — it gets it through this extension
+# instead (spec fact 17, 5.13). Pinned to an exact version (not "latest")
+# for the same reason codex-acp is pinned to 1.x below: an unpinned install
+# can silently resolve a different version on a different machine. Current
+# as of implementation time (`npm view pi-mcp-adapter version`) — bump
+# deliberately, not automatically.
+PI_MCP_ADAPTER_VERSION = "2.32.1"
+
+# Shared, one-per-host template Pi agent directory: `install_adapter("pi")`
+# installs pi-mcp-adapter into it once (so it's already on disk with no
+# network needed), and `systemd.write_agent_files` copies its `npm/` into
+# every new Pi agent's own private `.pi-agent/` dir. Never pointed at
+# directly by a running agent — each agent gets its own copy so agents
+# can't see or interfere with each other's (or the owner's own) Pi setup.
+PI_AGENT_TEMPLATE_DIR = Path.home() / ".local" / "share" / "buzz-fleet" / "pi-agent-template"
 
 _ADAPTER_COMMANDS: dict[str, list[str]] = {
     "claude": ["claude-agent-acp", "claude-code-acp"],
@@ -97,7 +115,13 @@ def install_commands(harness: str) -> list[list[str]] | None:
 
 
 def install_adapter(runner: CommandRunner, harness: str) -> None:
-    """Run `harness`'s install command(s) in order. Raises RuntimeError on any failure."""
+    """Run `harness`'s install command(s) in order. Raises RuntimeError on any failure.
+
+    For `pi` specifically, also installs `pi-mcp-adapter` into the shared
+    `PI_AGENT_TEMPLATE_DIR` (pointed at via `PI_CODING_AGENT_DIR`, the same
+    env var pi-mcp-adapter itself reads) so every new Pi agent's first turn
+    can copy it in locally instead of needing network access.
+    """
     commands = install_commands(harness)
     if commands is None:
         raise RuntimeError(
@@ -111,6 +135,21 @@ def install_adapter(runner: CommandRunner, harness: str) -> None:
             raise RuntimeError(
                 f"Installing {harness}'s adapter failed (`{' '.join(command)}`): "
                 f"{result.stderr.strip()}"
+            )
+    if harness == "pi":
+        PI_AGENT_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+        previous = os.environ.get("PI_CODING_AGENT_DIR")
+        os.environ["PI_CODING_AGENT_DIR"] = str(PI_AGENT_TEMPLATE_DIR)
+        try:
+            result = runner.run(["pi", "install", f"npm:pi-mcp-adapter@{PI_MCP_ADAPTER_VERSION}"])
+        finally:
+            if previous is None:
+                os.environ.pop("PI_CODING_AGENT_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_DIR"] = previous
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Installing pi-mcp-adapter into the shared template failed: {result.stderr.strip()}"
             )
 
 

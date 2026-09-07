@@ -100,3 +100,22 @@ def test_community_fleet_fields_default_none() -> None:
 
     c = Community(id="e", relay_url="wss://r", relay_admin_nsec="nsec1a")
     assert c.fleet_channel_id is None and c.fleet_record is None
+
+
+def test_env_and_mcp_default_to_none() -> None:
+    agent = _agent()
+    assert agent.env is None
+    assert agent.mcp_server is None
+
+
+def test_env_and_mcp_round_trip_with_secrets(tmp_path, monkeypatch) -> None:
+    from buzz_fleet import state
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path)
+    agent = Agent(**_base_kwargs(), env={"DATABASE_URL": "postgres://x"},
+                  mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"}))
+    state.save_agent(agent)
+    again = state.load_agents("eltahir")[0]
+    assert again.env["DATABASE_URL"].get_secret_value() == "postgres://x"
+    assert again.mcp_server.env["TOKEN"].get_secret_value() == "t" and again.mcp_server.args == ["artisan", "boost:mcp"]

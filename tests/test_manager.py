@@ -112,6 +112,81 @@ def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch
     assert manager.list_agents() == [agent]
 
 
+def test_create_agent_writes_env_and_mcp_server_into_agent_files(tmp_path: Path, monkeypatch) -> None:
+    """End-to-end (through the manager, not systemd directly): env/mcp_server
+    passed to create_agent must reach the written .env file with real
+    secret values, and the MCP wrapper must exist.
+    """
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+
+    agent = manager.create_agent(
+        display_name="Laravel Backend Dev",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="You are the dev."),
+        env={"DATABASE_URL": "postgres://x"},
+        mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"]),
+    )
+
+    env_text = agent_env_path(agent.id).read_text()
+    assert "DATABASE_URL=postgres://x\n" in env_text
+    assert "BUZZ_ACP_MCP_COMMAND=" in env_text
+    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    assert wrapper.is_file()
+    # And it round-tripped through state as a real SecretStr, not the
+    # masked literal "**********".
+    reloaded = manager.list_agents()[0]
+    assert reloaded.env is not None
+    assert reloaded.env["DATABASE_URL"].get_secret_value() == "postgres://x"
+
+
+@pytest.mark.parametrize("field", ["env", "mcp_server"])
+def test_update_agent_env_or_mcp_server_change_does_not_republish_managed_agent(
+    field: str, tmp_path: Path, monkeypatch
+) -> None:
+    """content_fields deliberately excludes env/mcp_server: they hold
+    secrets and are never read by visibility.managed_agent_content, so
+    republishing the relay-facing managed-agent record for either would be
+    a wasted round trip today, and — more importantly — this is a second,
+    independent guard against a secret field ever being folded into that
+    published record by a future change to content_fields alone.
+    """
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Secret Agent",
+        harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="x"),
+    )
+    assert agent.visibility_state.managed_agent_published is True
+    runner.calls.clear()
+
+    value: object = {"TOKEN": "shh"} if field == "env" else McpServer(name="boost", command="php")
+    updated = manager.update_agent(agent.id, **{field: value})
+
+    subcommands = [c[1] for c in runner.calls if c[0] == "buzz-fleet-signer"]
+    assert "publish-managed-agent" not in subcommands
+    # But the change itself still lands on the agent and its env file —
+    # content_fields only governs the relay republish, not whether the
+    # change actually takes effect.
+    assert getattr(updated, field) is not None
+    env_text = agent_env_path(agent.id).read_text()
+    if field == "env":
+        assert "TOKEN=shh\n" in env_text
+    else:
+        assert "BUZZ_ACP_MCP_COMMAND=" in env_text
+
+
 def test_create_agent_publishes_profile_and_add_policy_with_connection_auth_tag(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1168,6 +1243,21 @@ def test_init_fleet_channel_creates_writes_record_and_persists(tmp_path: Path, m
     assert saved.fleet_record is not None and saved.fleet_record.retrieval_key == rec.retrieval_key
     about_call = next(a for a in runner.calls if a[1] == "write-channel-about")
     assert about_call[about_call.index("--about") + 1].startswith(ABOUT_HEADER)
+
+
+def test_init_fleet_channel_records_pi_mcp_adapter_version(tmp_path: Path, monkeypatch) -> None:
+    """The pinned pi-mcp-adapter version travels in the fleet record
+    alongside buzz-fleet's own, so every machine (and Desktop/mobile, which
+    reads this record) can see what's pinned without SSHing in.
+    """
+    from buzz_fleet import harnesses
+
+    runner = FakeRunner()
+    manager = _fresh_manager(tmp_path, monkeypatch, runner)
+
+    _, rec = manager.init_fleet_channel(existing=None, host="vps")
+
+    assert rec.versions["pi-mcp-adapter"] == harnesses.PI_MCP_ADAPTER_VERSION
 
 
 def test_init_fleet_channel_refuses_when_record_exists(tmp_path: Path, monkeypatch) -> None:

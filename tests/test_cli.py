@@ -597,6 +597,103 @@ def test_agent_update_passes_directory_flags(monkeypatch) -> None:
     assert calls["changes"] == {"role": "reviewer", "capabilities": ["laravel", "docker-build"], "description": "Reviews."}
 
 
+def test_agent_create_env_and_mcp_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--env", "A=1", "--env", "B=2",
+                                     "--mcp-name", "boost", "--mcp-command", "php", "--mcp-arg", "artisan", "--mcp-arg", "boost:mcp"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"] == {"A": "1", "B": "2"}
+    assert captured["mcp_server"].command == "php" and captured["mcp_server"].args == ["artisan", "boost:mcp"]
+
+
+def test_agent_create_env_file_is_overridden_by_repeated_env_flag(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    env_file = tmp_path / "agent.env"
+    env_file.write_text("A=from-file\nC=only-in-file\n")
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--env-file", str(env_file), "--env", "A=1"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"] == {"A": "1", "C": "only-in-file"}
+
+
+def test_agent_create_rejects_env_without_equals(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--env", "NOTKEYVALUE"])
+    assert result.exit_code == 1
+    assert "KEY=VALUE" in result.output
+
+
+def test_agent_create_rejects_mcp_command_without_mcp_name(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--mcp-command", "php"])
+    assert result.exit_code == 1
+    assert "--mcp-name and --mcp-command" in result.output
+
+
+def test_agent_create_without_env_or_mcp_flags_passes_none(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"] is None
+    assert captured["mcp_server"] is None
+
+
+def test_agent_update_env_and_mcp_flags(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeManager:
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1",
+                                     "--env", "A=1", "--mcp-name", "boost", "--mcp-command", "php"])
+    assert result.exit_code == 0, result.output
+    changes = calls["changes"]
+    assert changes["env"] == {"A": "1"}
+    assert changes["mcp_server"].name == "boost" and changes["mcp_server"].command == "php"
+
+
+def test_agent_update_without_env_or_mcp_flags_omits_them(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeManager:
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1", "--role", "reviewer"])
+    assert result.exit_code == 0, result.output
+    assert "env" not in calls["changes"] and "mcp_server" not in calls["changes"]
+
+
 def test_fleet_init_prints_channel_and_record(monkeypatch) -> None:
     from buzz_fleet.orchestration.record import FleetRecord
 

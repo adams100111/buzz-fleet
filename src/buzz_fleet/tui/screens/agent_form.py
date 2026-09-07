@@ -12,7 +12,7 @@ from textual.widgets import Button, Footer, Header, Input, Select, Static, TextA
 
 from buzz_fleet import harnesses, personas
 from buzz_fleet.manager import AgentManager
-from buzz_fleet.models import Agent, SystemPromptSource
+from buzz_fleet.models import Agent, McpServer, SystemPromptSource
 from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.tui.theme import SECTION_CSS
 from buzz_fleet.tui.theme import section as _section
@@ -218,6 +218,35 @@ class AgentFormScreen(Screen):
                 id="channel-add-policy-select",
             )
 
+        with _section("Integrations"):
+            # Secrets are masked, never shown in the clear: an existing env
+            # var is pre-filled as KEY=******** and only replaced if the
+            # user actually types a new value for that key (see
+            # _resolve_env, called from on_button_pressed) — the same
+            # masking discipline as the CLI/TUI's other secret-bearing fields.
+            env_text = ""
+            if self._agent and self._agent.env:
+                env_text = "\n".join(f"{key}=********" for key in self._agent.env)
+            yield TextArea(text=env_text, placeholder="KEY=VALUE per line (optional)", id="env-input")
+
+            yield Static("MCP server (optional, buzz-acp supports one):")
+            mcp_server = self._agent.mcp_server if self._agent else None
+            yield Input(
+                value=mcp_server.name if mcp_server else "",
+                placeholder="MCP server name",
+                id="mcp-name-input",
+            )
+            yield Input(
+                value=mcp_server.command if mcp_server else "",
+                placeholder="MCP server command",
+                id="mcp-command-input",
+            )
+            yield Input(
+                value=", ".join(mcp_server.args) if mcp_server else "",
+                placeholder="MCP server args, comma-separated (optional)",
+                id="mcp-args-input",
+            )
+
         yield Button("Update" if self._agent else "Create", id="submit-button", variant="primary")
         yield Footer()
 
@@ -254,6 +283,20 @@ class AgentFormScreen(Screen):
         # respond_to_allowlist is deliberately never pre-filled from a
         # template — see the design spec. role/capabilities have no template
         # source (no persona format carries either) so they're left alone.
+        # env is plain text here (never masked) — this is create mode, so
+        # there is no existing secret to protect yet.
+        self.query_one("#env-input", TextArea).text = (
+            "\n".join(f"{k}={v}" for k, v in template.env.items()) if template.env else ""
+        )
+        self.query_one("#mcp-name-input", Input).value = (
+            template.mcp_server.name if template.mcp_server else ""
+        )
+        self.query_one("#mcp-command-input", Input).value = (
+            template.mcp_server.command if template.mcp_server else ""
+        )
+        self.query_one("#mcp-args-input", Input).value = (
+            ", ".join(template.mcp_server.args) if template.mcp_server else ""
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "install-adapter-button":
@@ -294,6 +337,13 @@ class AgentFormScreen(Screen):
             )
             return
 
+        try:
+            env = self._resolve_env()
+            mcp_server = self._resolve_mcp_server()
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
+
         channel_add_policy = self.query_one("#channel-add-policy-select", Select).value
         session_policy_value = self.query_one("#session-policy-select", Select).value
         # allow_blank=False on this select means Select.BLANK (NoSelection)
@@ -320,6 +370,8 @@ class AgentFormScreen(Screen):
                     "description": description,
                     "channel_ids": channel_ids,
                     "channel_add_policy": channel_add_policy,
+                    "env": env,
+                    "mcp_server": mcp_server,
                 }
                 # Only touch system_prompt_source if the user actually edited the
                 # prompt field. This is the fix for the v1 bug where editing only
@@ -352,6 +404,8 @@ class AgentFormScreen(Screen):
                     description=description,
                     channel_ids=channel_ids,
                     channel_add_policy=channel_add_policy,
+                    env=env,
+                    mcp_server=mcp_server,
                 )
         except ValueError as e:
             # e.g. a blank/punctuation-only display name (agent_slug raises)
@@ -375,6 +429,49 @@ class AgentFormScreen(Screen):
         for entry in ids:
             uuid.UUID(entry)  # raises ValueError on malformed input
         return ids or None
+
+    def _resolve_env(self) -> dict[str, str] | None:
+        """Parse the env TextArea's KEY=VALUE lines, un-masking any line
+        whose value is still the literal `********` placeholder back to the
+        real secret it displayed for — only a line the user actually
+        changed carries a new value through. A key with no prior value
+        (create mode, or a key the user just added) keeps whatever they
+        typed, masked-looking or not — there is nothing to un-mask it from.
+        """
+        raw = self.query_one("#env-input", TextArea).text
+        original = self._agent.env if self._agent else None
+        resolved: dict[str, str] = {}
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "=" not in stripped:
+                raise ValueError(f"Invalid env line {stripped!r} — expected KEY=VALUE.")
+            key, value = stripped.split("=", 1)
+            if value == "********" and original and key in original:
+                value = original[key].get_secret_value()
+            resolved[key] = value
+        return resolved or None
+
+    def _resolve_mcp_server(self) -> McpServer | None:
+        """Build the MCP server from the three plain inputs, or None if all
+        three are blank. The TUI has no field for the MCP server's own env
+        vars (CLI-only, via --mcp-env) — an existing one is carried forward
+        unedited rather than silently dropped just because the user changed
+        something else on the form and resubmitted.
+        """
+        name = self.query_one("#mcp-name-input", Input).value.strip() or None
+        command = self.query_one("#mcp-command-input", Input).value.strip() or None
+        args_raw = self.query_one("#mcp-args-input", Input).value.strip()
+        args = [arg.strip() for arg in args_raw.split(",") if arg.strip()] if args_raw else []
+        if name is None and command is None and not args:
+            return None
+        if name is None or command is None:
+            raise ValueError("MCP server name and command must both be set (or both left blank).")
+        preserved_env = (
+            self._agent.mcp_server.env if self._agent and self._agent.mcp_server else {}
+        )
+        return McpServer(name=name, command=command, args=args, env=preserved_env)
 
     def _install_selected_harness_adapter(self) -> None:
         harness = self.query_one("#harness-select", Select).value

@@ -12,7 +12,7 @@ from buzz_fleet import __version__, harnesses, state
 from buzz_fleet.cli.fleet_commands import fleet_app, task_app, tasks_command
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
-from buzz_fleet.models import SystemPromptSource
+from buzz_fleet.models import McpServer, SystemPromptSource
 from buzz_fleet.proc import RealCommandRunner
 
 
@@ -27,6 +27,58 @@ def _parse_channel_ids(raw: str | None) -> list[str] | None:
             typer.echo(f"Invalid channel id {entry!r} — must be a UUID.", err=True)
             raise typer.Exit(code=1) from e
     return ids or None
+
+
+def _parse_env_pairs(pairs: list[str] | None, *, flag: str) -> dict[str, str]:
+    """Parse repeated `KEY=VALUE` option values. A value is free to contain
+    its own `=` (split("=", 1)) — only a missing `=` entirely is rejected.
+    """
+    result: dict[str, str] = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            typer.echo(f"Invalid {flag} value {pair!r} — expected KEY=VALUE.", err=True)
+            raise typer.Exit(code=1)
+        key, value = pair.split("=", 1)
+        result[key] = value
+    return result
+
+
+def _parse_env_file(path: Path | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    result: dict[str, str] = {}
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            typer.echo(f"Invalid line in {path} — expected KEY=VALUE: {line!r}", err=True)
+            raise typer.Exit(code=1)
+        key, value = line.split("=", 1)
+        result[key] = value
+    return result
+
+
+def _resolve_env(env: list[str] | None, env_file: Path | None) -> dict[str, str] | None:
+    """`--env-file` first, then `--env` (repeatable) on top so an explicit
+    per-invocation override wins over whatever the file says.
+    """
+    merged = {**_parse_env_file(env_file), **_parse_env_pairs(env, flag="--env")}
+    return merged or None
+
+
+def _resolve_mcp_server(
+    mcp_name: str | None, mcp_command: str | None, mcp_arg: list[str] | None, mcp_env: list[str] | None
+) -> McpServer | None:
+    if mcp_name is None and mcp_command is None and not mcp_arg and not mcp_env:
+        return None
+    if mcp_name is None or mcp_command is None:
+        typer.echo("--mcp-name and --mcp-command must be given together to attach an MCP server.", err=True)
+        raise typer.Exit(code=1)
+    return McpServer(
+        name=mcp_name, command=mcp_command, args=mcp_arg or [],
+        env=_parse_env_pairs(mcp_env, flag="--mcp-env"),  # type: ignore[arg-type]
+    )
 
 
 app = typer.Typer(help="buzz-fleet — manage headless Buzz agents", no_args_is_help=True)
@@ -117,6 +169,20 @@ def agent_create(
     channel_add_policy: Annotated[
         str | None, typer.Option(help="Who may add this agent to a new channel: anyone, owner_only, nobody")
     ] = None,
+    env: Annotated[
+        list[str] | None, typer.Option("--env", help="KEY=VALUE env var for this agent (repeatable)")
+    ] = None,
+    env_file: Annotated[
+        Path | None, typer.Option(help="Path to a file of KEY=VALUE lines to load as env vars")
+    ] = None,
+    mcp_name: Annotated[str | None, typer.Option(help="This agent's MCP server's name")] = None,
+    mcp_command: Annotated[str | None, typer.Option(help="This agent's MCP server's command")] = None,
+    mcp_arg: Annotated[
+        list[str] | None, typer.Option("--mcp-arg", help="An argument to the MCP server command (repeatable)")
+    ] = None,
+    mcp_env: Annotated[
+        list[str] | None, typer.Option("--mcp-env", help="KEY=VALUE env var for the MCP server (repeatable)")
+    ] = None,
     force: Annotated[
         bool, typer.Option(help="Create even if the display name is already used in the fleet channel")
     ] = False,
@@ -129,6 +195,8 @@ def agent_create(
     if session_policy is not None and session_policy not in ("thread", "channel"):
         typer.echo("--session-policy must be one of: thread, channel", err=True)
         raise typer.Exit(code=1)
+    parsed_env = _resolve_env(env, env_file)
+    mcp_server = _resolve_mcp_server(mcp_name, mcp_command, mcp_arg, mcp_env)
     try:
         agent = manager.create_agent(
             display_name=display_name,
@@ -152,6 +220,8 @@ def agent_create(
             description=description,
             channel_ids=parsed_channel_ids,
             channel_add_policy=channel_add_policy,
+            env=parsed_env,
+            mcp_server=mcp_server,
             force=force,
         )
     except ValueError as e:
@@ -215,6 +285,20 @@ def agent_update(
     channel_add_policy: Annotated[
         str | None, typer.Option(help="Who may add this agent to a new channel: anyone, owner_only, nobody")
     ] = None,
+    env: Annotated[
+        list[str] | None, typer.Option("--env", help="KEY=VALUE env var for this agent (repeatable)")
+    ] = None,
+    env_file: Annotated[
+        Path | None, typer.Option(help="Path to a file of KEY=VALUE lines to load as env vars")
+    ] = None,
+    mcp_name: Annotated[str | None, typer.Option(help="This agent's MCP server's name")] = None,
+    mcp_command: Annotated[str | None, typer.Option(help="This agent's MCP server's command")] = None,
+    mcp_arg: Annotated[
+        list[str] | None, typer.Option("--mcp-arg", help="An argument to the MCP server command (repeatable)")
+    ] = None,
+    mcp_env: Annotated[
+        list[str] | None, typer.Option("--mcp-env", help="KEY=VALUE env var for the MCP server (repeatable)")
+    ] = None,
 ) -> None:
     manager = _load_manager(community)
     changes: dict[str, object] = {}
@@ -260,6 +344,11 @@ def agent_update(
             typer.echo("--channel-add-policy must be one of: anyone, owner_only, nobody", err=True)
             raise typer.Exit(code=1)
         changes["channel_add_policy"] = channel_add_policy
+    if env is not None or env_file is not None:
+        changes["env"] = _resolve_env(env, env_file)
+    mcp_server = _resolve_mcp_server(mcp_name, mcp_command, mcp_arg, mcp_env)
+    if mcp_server is not None:
+        changes["mcp_server"] = mcp_server
     if not changes:
         typer.echo("Nothing to update — pass at least one field to change.", err=True)
         raise typer.Exit(code=1)

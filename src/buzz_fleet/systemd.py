@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import getpass
+import json
 import os
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import SecretStr
+
 from buzz_fleet.buzz_acp import BUZZ_ACP_DIR, BUZZ_ACP_PATH
-from buzz_fleet.harnesses import resolve_adapter_command
+from buzz_fleet.harnesses import (
+    PI_AGENT_TEMPLATE_DIR,
+    PI_MCP_ADAPTER_VERSION,
+    resolve_adapter_command,
+)
 from buzz_fleet.models import Agent, Community
 from buzz_fleet.orchestration.instructions import apply_coordination_block
 
@@ -141,6 +149,107 @@ def resolve_prompt_text(agent: Agent) -> str:
     return raw
 
 
+def _secret_value(value: str | SecretStr) -> str:
+    """Unwrap a `dict[str, SecretStr]` entry.
+
+    `Agent.model_copy(update=...)` — used throughout this codebase's own
+    tests, and by TUI/manager code paths that build a changed copy without
+    going through full model construction — does not re-run field
+    validation, so a caller can (and in tests routinely does) hand back a
+    plain `str` in a field typed `SecretStr`. Guard here rather than assume
+    every value has already been coerced.
+    """
+    return value.get_secret_value() if isinstance(value, SecretStr) else value
+
+
+def _mcp_wrapper_path(agent_id: str, name: str) -> Path:
+    return WORK_DIR / agent_id / f"mcp-{name}.sh"
+
+
+def _quote(value: str) -> str:
+    """Always single-quote a shell word, unlike stdlib `shlex.quote` (which
+    only quotes when a character actually requires it, e.g. leaves `boost:mcp`
+    bare). The wrapper holds secrets end to end — every value is quoted
+    unconditionally so its shape never silently depends on what a given
+    secret happens to contain, and a value containing a `'` is escaped the
+    same way `shlex.quote` itself does internally.
+    """
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def write_mcp_wrapper(agent: Agent) -> Path | None:
+    """Generate the wrapper script buzz-acp actually execs for `agent`'s MCP
+    server, or None if the agent has none. buzz-acp itself only ever passes
+    a bare command with no args and no env — when either is needed, this
+    wrapper is what supplies them (exported, then exec'd into the real
+    command), and its path is what's handed to buzz-acp instead.
+
+    0700, not 0600: it must remain executable, and it holds the same class
+    of secret (an MCP server's own env vars, e.g. an API token) as the
+    agent's private key — see `_write_secure`'s 0600 rationale.
+    """
+    if agent.mcp_server is None:
+        return None
+    m = agent.mcp_server
+    lines = ["#!/bin/sh"] + [f"export {k}={_quote(_secret_value(v))}" for k, v in m.env.items()]
+    lines.append("exec " + " ".join(_quote(x) for x in [m.command, *m.args]))
+    path = _mcp_wrapper_path(agent.id, m.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+    try:
+        os.write(fd, ("\n".join(lines) + "\n").encode())
+    finally:
+        os.close(fd)
+    return path
+
+
+def _pi_agent_dir(agent_id: str) -> Path:
+    return WORK_DIR / agent_id / ".pi-agent"
+
+
+def _write_pi_agent_dir(agent: Agent) -> Path:
+    """Pi has no MCP support of its own — it gets it through the
+    `pi-mcp-adapter` extension instead, which reads its own private
+    `PI_CODING_AGENT_DIR` (settings.json + mcp.json + skills/), isolating
+    each Pi agent from the owner's own Pi setup entirely (spec fact 17, 5.13).
+
+    `npm/` is copied in from the shared template dir (populated once by
+    `harnesses.install_adapter("pi")`) so a brand-new agent's first turn
+    doesn't need network access to fetch pi-mcp-adapter itself.
+    """
+    pi_dir = _pi_agent_dir(agent.id)
+    pi_dir.mkdir(parents=True, exist_ok=True)
+    (pi_dir / "skills").mkdir(parents=True, exist_ok=True)
+
+    settings = {
+        "defaultProjectTrust": "always",
+        "packages": [f"npm:pi-mcp-adapter@{PI_MCP_ADAPTER_VERSION}"],
+    }
+    _write_secure(pi_dir / "settings.json", json.dumps(settings))
+
+    mcp_json_path = pi_dir / "mcp.json"
+    if agent.mcp_server is not None:
+        m = agent.mcp_server
+        mcp_json = {
+            "mcpServers": {
+                m.name: {
+                    "command": m.command,
+                    "args": list(m.args),
+                    "env": {k: _secret_value(v) for k, v in m.env.items()},
+                }
+            }
+        }
+        _write_secure(mcp_json_path, json.dumps(mcp_json))
+    else:
+        mcp_json_path.unlink(missing_ok=True)
+
+    template_npm = PI_AGENT_TEMPLATE_DIR / "npm"
+    if template_npm.is_dir():
+        shutil.copytree(template_npm, pi_dir / "npm", dirs_exist_ok=True)
+
+    return pi_dir
+
+
 def env_line(key: str, value: str) -> str:
     """One KEY=value line for a systemd EnvironmentFile.
 
@@ -220,5 +329,19 @@ def write_agent_files(
         lines.append(env_line("ANTHROPIC_API_KEY", anthropic_api_key))
     if openai_api_key:
         lines.append(env_line("OPENAI_API_KEY", openai_api_key))
+
+    # Generic per-agent env-var passthrough (spec 5.13) — written after the
+    # API keys, same as they were, so a persona- or operator-supplied value
+    # can override a preceding one if the keys collide.
+    for key, value in (agent.env or {}).items():
+        lines.append(env_line(key, _secret_value(value)))
+
+    wrapper_path = write_mcp_wrapper(agent)
+    if wrapper_path is not None:
+        lines.append(env_line("BUZZ_ACP_MCP_COMMAND", str(wrapper_path)))
+
+    if agent.harness == "pi":
+        pi_dir = _write_pi_agent_dir(agent)
+        lines.append(env_line("PI_CODING_AGENT_DIR", str(pi_dir)))
 
     _write_secure(agent_env_path(agent.id), "\n".join(lines) + "\n")

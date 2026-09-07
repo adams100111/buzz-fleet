@@ -1,7 +1,18 @@
 import json
 from pathlib import Path
 
-from buzz_fleet.personas import discover_personas, parse_agent_json, parse_persona_md
+import pytest
+
+from buzz_fleet.personas import (
+    discover_personas,
+    load_persona_template,
+    parse_agent_json,
+    parse_persona_md,
+)
+
+LARAVEL_PERSONA_PATH = (
+    Path(__file__).resolve().parent.parent / "personas" / "developers" / "laravel-backend-developer.persona.md"
+)
 
 
 def _write_agent_json(path: Path, **overrides: object) -> None:
@@ -236,3 +247,91 @@ def test_discover_personas_counts_invalid_utf8_files_as_skipped_not_a_crash(tmp_
 
     assert templates == []
     assert skipped == 2
+
+
+def test_persona_imports_env_and_single_mcp_server() -> None:
+    template = load_persona_template(LARAVEL_PERSONA_PATH)   # declares one server: boost
+
+    assert template is not None
+    assert template.mcp_server is not None
+    assert template.mcp_server.name == "boost" and template.mcp_server.command == "php"
+    assert template.mcp_server.args == ["artisan", "boost:mcp"]
+
+
+def test_persona_with_two_mcp_servers_is_refused(tmp_path) -> None:
+    path = tmp_path / "two.persona.md"
+    path.write_text("---\nname: two\ndisplay_name: Two\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n  - {name: b, command: b}\n---\nbody\n")
+    with pytest.raises(ValueError, match="supports one"):
+        load_persona_template(path)
+
+
+def test_persona_with_one_mcp_server_and_no_args_or_env_defaults_empty(tmp_path: Path) -> None:
+    path = tmp_path / "one.persona.md"
+    path.write_text("---\ndisplay_name: One\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.mcp_server is not None
+    assert template.mcp_server.args == []
+    assert template.mcp_server.env == {}
+
+
+def test_persona_without_mcp_servers_key_has_none(tmp_path: Path) -> None:
+    path = tmp_path / "none.persona.md"
+    path.write_text("---\ndisplay_name: None\nruntime: claude\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.mcp_server is None
+
+
+def test_persona_imports_env_block(tmp_path: Path) -> None:
+    path = tmp_path / "env.persona.md"
+    path.write_text("---\ndisplay_name: Env\nruntime: goose\nenv:\n  GOOSE_PROVIDER: databricks\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.env == {"GOOSE_PROVIDER": "databricks"}
+
+
+def test_persona_without_env_key_has_none(tmp_path: Path) -> None:
+    path = tmp_path / "no-env.persona.md"
+    path.write_text("---\ndisplay_name: NoEnv\nruntime: claude\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.env is None
+
+
+def test_load_persona_template_dispatches_agent_json_by_extension(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.agent.json"
+    _write_agent_json(path)
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.display_name == "Laravel Backend Dev"
+
+
+def test_discover_personas_with_two_mcp_servers_counts_as_skipped_not_a_crash(tmp_path: Path) -> None:
+    """A persona pack with one broken file (declaring two MCP servers, which
+    buzz-acp cannot support) must not take down the whole directory scan —
+    AgentFormScreen.compose() calls discover_personas synchronously, so an
+    uncaught ValueError here would crash the entire create-agent screen for
+    every persona in the pack, not just the broken one.
+    """
+    root = tmp_path / "personas"
+    root.mkdir(parents=True)
+    (root / "ok.persona.md").write_text("---\ndisplay_name: OK\nruntime: claude\n---\nbody\n")
+    (root / "broken.persona.md").write_text(
+        "---\ndisplay_name: Broken\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n  - {name: b, command: b}\n---\nbody\n"
+    )
+
+    templates, skipped = discover_personas(root)
+
+    assert [t.display_name for t in templates] == ["OK"]
+    assert skipped == 1
