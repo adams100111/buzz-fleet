@@ -68,6 +68,10 @@ def _buzz_acp_already_installed(tmp_path: Path, monkeypatch) -> None:
     stub.chmod(0o755)
     monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", acp_dir)
     monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", stub)
+    monkeypatch.setattr(buzz_acp, "BUZZ_CLI_PATH", acp_dir / "buzz")
+    # write_agent_files() now also creates WORK_DIR/<agent-id> as the unit's
+    # WorkingDirectory — keep that off the real home directory too.
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
 
 
 def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch) -> None:
@@ -1029,3 +1033,23 @@ def test_update_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -
     manager.update_agent(agent.id, display_name="Renamed")
 
     assert f"BUZZ_AUTH_TAG={_expected_fake_auth_tag()}" in env_path.read_text()
+
+
+def test_template_change_restarts_every_agent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "unit" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.ensure_linger_enabled", lambda runner: None)
+    runner = FakeRunner()
+    manager = AgentManager(runner, _community())
+    agent = manager.create_agent(
+        display_name="Restart Me", harness="claude",
+        system_prompt_source=SystemPromptSource(kind="inline", text="hi"),
+    )
+    (tmp_path / "unit" / "buzz-agent@.service").write_text("[Unit]\nDescription=old\n")
+    runner.calls.clear()
+
+    manager.ensure_runtime_ready()
+
+    assert any(a[:3] == ["systemctl", "--user", "restart"] and agent.id in a[3] for a in runner.calls)

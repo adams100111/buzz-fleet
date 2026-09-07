@@ -119,7 +119,7 @@ class AgentManager:
         and an agent is only rewritten/restarted when something it actually
         needs changed, never on an already-healthy call.
 
-        Heals five distinct, real incidents this way:
+        Heals six distinct, real incidents this way:
 
         1. buzz-fleet never installed buzz-acp (the binary every unit
            execs) at all — a machine that never separately installed it
@@ -147,6 +147,15 @@ class AgentManager:
            published fine — publishing the tag on the agent's kind:0
            profile is a separate, client-side-only verification path that
            never reaches the relay's own ownership record on its own.
+        6. The `buzz` CLI was never on the unit's PATH — `buzz-acp` tells an
+           agent to run `buzz messages send` to reply, not something it
+           posts itself, so an agent woke on a mention and could not answer
+           at all. Fixed by symlinking `buzz` to `buzz-acp` (Sprig's own
+           multicall dispatch) and adding it to the unit's `Environment=
+           PATH=`; since a running `--user` unit only picks up a new
+           `Environment=`/`WorkingDirectory=` line on restart, every agent
+           is restarted whenever `ensure_template_unit_installed` reports
+           the template actually changed.
 
         No step here should ever need a human to run something by hand.
         """
@@ -155,9 +164,10 @@ class AgentManager:
         owner_pubkey_just_backfilled = owner_pubkey_before != self._community.owner_pubkey
 
         systemd.ensure_linger_enabled(self._runner)
-        systemd.ensure_template_unit_installed(self._runner)
+        template_changed = systemd.ensure_template_unit_installed(self._runner)
         buzz_acp_just_installed = buzz_acp.ensure_buzz_acp_installed()
-        needs_full_refresh = buzz_acp_just_installed or owner_pubkey_just_backfilled
+        buzz_acp.ensure_buzz_cli_link()
+        needs_full_refresh = buzz_acp_just_installed or owner_pubkey_just_backfilled or template_changed
 
         for agent in self.list_agents():
             synced = self._sync_visibility(agent)

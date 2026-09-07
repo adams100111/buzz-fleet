@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from buzz_fleet.buzz_acp import BUZZ_ACP_PATH
+from buzz_fleet.buzz_acp import BUZZ_ACP_DIR, BUZZ_ACP_PATH
 from buzz_fleet.harnesses import resolve_adapter_command
 from buzz_fleet.models import Agent, Community
 
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 AGENTS_DIR = Path.home() / ".config" / "buzz-fleet" / "agents"
 TEMPLATE_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / "buzz-agent@.service"
+WORK_DIR = Path.home() / ".local" / "share" / "buzz-fleet" / "work"
 
 # A --user unit, not a system unit — no root anywhere in buzz-fleet (spec Open
 # Question 2, resolved this way): no `User=` line (it always runs as whoever
@@ -41,6 +42,8 @@ After=network-online.target
 
 [Service]
 EnvironmentFile={AGENTS_DIR}/%i.env
+Environment=PATH={BUZZ_ACP_DIR}:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory={WORK_DIR}/%i
 ExecStart={BUZZ_ACP_PATH}
 Restart=on-failure
 RestartSec=5
@@ -54,14 +57,20 @@ def render_template_unit() -> str:
     return TEMPLATE_UNIT
 
 
-def ensure_template_unit_installed(runner: CommandRunner) -> None:
-    """Write the shared buzz-agent@.service template if missing or stale, then daemon-reload."""
+def ensure_template_unit_installed(runner: CommandRunner) -> bool:
+    """Write the shared buzz-agent@.service template if missing or stale, then daemon-reload.
+
+    Returns True when the unit file was actually written — a `--user` unit
+    only picks up a new `Environment=`/`WorkingDirectory=` line on restart,
+    so callers use this to decide whether to restart already-running agents.
+    """
     current = TEMPLATE_UNIT_PATH.read_text() if TEMPLATE_UNIT_PATH.exists() else None
     if current == TEMPLATE_UNIT:
-        return
+        return False
     TEMPLATE_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     TEMPLATE_UNIT_PATH.write_text(TEMPLATE_UNIT)
     runner.run(["systemctl", "--user", "daemon-reload"])
+    return True
 
 
 def ensure_linger_enabled(runner: CommandRunner) -> None:
@@ -138,6 +147,8 @@ def write_agent_files(
     openai_api_key: str | None,
     auth_tag: str | None = None,
 ) -> None:
+    (WORK_DIR / agent.id).mkdir(parents=True, exist_ok=True)
+
     prompt_path = agent_prompt_path(agent.id)
     _write_secure(prompt_path, resolve_prompt_text(agent))
 

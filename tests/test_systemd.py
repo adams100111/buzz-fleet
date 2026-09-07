@@ -35,6 +35,7 @@ def _community() -> Community:
 
 def test_write_agent_files_creates_env_and_prompt(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     # Deterministic regardless of what's actually on this machine's PATH —
     # the absolute-path-resolution behavior itself is covered separately
     # below and in test_harnesses.py.
@@ -65,6 +66,7 @@ def test_write_agent_files_resolves_adapter_command_to_absolute_path_when_on_pat
     sidesteps that entirely.
     """
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     monkeypatch.setattr(
         "buzz_fleet.harnesses.shutil.which",
         lambda cmd: "/home/dev/.local/share/mise/installs/node/22/bin/claude-agent-acp"
@@ -84,6 +86,7 @@ def test_write_agent_files_resolves_adapter_command_to_absolute_path_when_on_pat
 
 def test_env_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     write_agent_files(_agent(), _community(), anthropic_api_key="sk-ant-test", openai_api_key=None)
 
     mode = stat.S_IMODE(agent_env_path("laravel-backend-dev").stat().st_mode)
@@ -205,6 +208,7 @@ def test_resolve_prompt_text_returns_whole_file_when_no_frontmatter(tmp_path: Pa
 
 def test_write_agent_files_emits_model_when_set(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     agent = _agent().model_copy(update={"model": "claude-sonnet-5"})
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
@@ -215,6 +219,7 @@ def test_write_agent_files_emits_model_when_set(tmp_path: Path, monkeypatch) -> 
 
 def test_write_agent_files_omits_optional_fields_when_unset(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     agent = _agent()
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
@@ -245,6 +250,7 @@ def test_write_agent_files_emits_auth_tag_when_given(tmp_path: Path, monkeypatch
     write it into the env file.
     """
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     agent = _agent()
     auth_tag = '["auth","' + "b" * 64 + '","","' + "c" * 128 + '"]'
 
@@ -258,6 +264,7 @@ def test_write_agent_files_emits_parallelism_idle_timeout_max_turn_duration(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     agent = _agent().model_copy(
         update={"parallelism": 3, "idle_timeout_seconds": 120, "max_turn_duration_seconds": 600}
     )
@@ -274,6 +281,7 @@ def test_write_agent_files_sets_respond_to_allowlist_mode_when_list_non_empty(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
     agent = _agent().model_copy(update={"respond_to_allowlist": ["a" * 64, "b" * 64]})
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
@@ -281,3 +289,26 @@ def test_write_agent_files_sets_respond_to_allowlist_mode_when_list_non_empty(
     env_content = agent_env_path(agent.id).read_text()
     assert f"BUZZ_ACP_RESPOND_TO_ALLOWLIST={'a' * 64},{'b' * 64}" in env_content
     assert "BUZZ_ACP_RESPOND_TO=allowlist" in env_content
+
+
+def test_template_unit_sets_path_and_workdir() -> None:
+    from buzz_fleet.buzz_acp import BUZZ_ACP_DIR
+    from buzz_fleet.systemd import WORK_DIR
+
+    assert f"Environment=PATH={BUZZ_ACP_DIR}:/usr/local/bin:/usr/bin:/bin" in TEMPLATE_UNIT
+    assert f"WorkingDirectory={WORK_DIR}/%i" in TEMPLATE_UNIT
+
+
+def test_ensure_template_unit_installed_returns_changed_flag(tmp_path: Path, monkeypatch) -> None:
+    unit_path = tmp_path / "buzz-agent@.service"
+    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    calls: list[list[str]] = []
+
+    class Runner:
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    assert ensure_template_unit_installed(Runner()) is True
+    assert calls == [["systemctl", "--user", "daemon-reload"]]
+    assert ensure_template_unit_installed(Runner()) is False

@@ -114,3 +114,34 @@ def test_raises_on_checksum_mismatch(monkeypatch) -> None:
         buzz_acp.ensure_buzz_acp_installed()
 
     assert not buzz_acp.BUZZ_ACP_PATH.exists()
+
+
+def test_ensure_buzz_cli_link_creates_and_is_idempotent(tmp_path, monkeypatch) -> None:
+    acp_dir = tmp_path / "bin"
+    acp_dir.mkdir()
+    acp = acp_dir / "buzz-acp"
+    acp.write_bytes(b"stub")
+    acp.chmod(0o755)
+    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", acp_dir)
+    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", acp)
+    monkeypatch.setattr(buzz_acp, "BUZZ_CLI_PATH", acp_dir / "buzz")
+
+    assert buzz_acp.ensure_buzz_cli_link() is True
+    assert (acp_dir / "buzz").is_symlink()
+    assert (acp_dir / "buzz").resolve() == acp.resolve()
+    assert buzz_acp.ensure_buzz_cli_link() is False
+
+
+def test_ensure_buzz_cli_link_replaces_dangling_link(tmp_path, monkeypatch) -> None:
+    acp_dir = tmp_path / "bin"
+    acp_dir.mkdir()
+    acp = acp_dir / "buzz-acp"
+    acp.write_bytes(b"stub")
+    link = acp_dir / "buzz"
+    link.symlink_to(acp_dir / "missing")
+    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", acp_dir)
+    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", acp)
+    monkeypatch.setattr(buzz_acp, "BUZZ_CLI_PATH", link)
+
+    assert buzz_acp.ensure_buzz_cli_link() is True
+    assert link.resolve() == acp.resolve()
