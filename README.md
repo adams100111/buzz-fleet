@@ -526,9 +526,12 @@ network access.
 - **An already-published managed-agent record does not refresh
   automatically** when `buzz-fleet` gains new record fields. After
   upgrading, `role`, `capabilities`, `description`, `harness`, and `version`
-  stay empty in `fleet agents` for any agent created before the upgrade,
-  until that agent's record is republished — see "Rolling out a new
-  version" in the release notes/runbook for how.
+  stay empty in `fleet agents` for any agent created before the upgrade.
+  Force a republish by giving that agent an actual (not just repeated)
+  `--role`/`--capability`/`--description` value via `agent update` — the
+  record only republishes when one of those fields genuinely changes, not
+  on every `agent update` call — then run `agent list` (or wait for the TUI
+  dashboard's next refresh) to publish it.
 - **`agent update` has no flag to explicitly clear an `env` entry or
   `mcp_server` once set** — only to replace it with a new non-empty value.
   The TUI can clear both (blank the relevant fields and save); the CLI
