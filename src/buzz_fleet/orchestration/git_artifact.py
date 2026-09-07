@@ -33,9 +33,26 @@ def _sanitize_remote(url: str) -> str:
     return url
 
 
-def detect(cwd: Path, run: Runner) -> Artifact:
+def detect(cwd: Path, run: Runner) -> Artifact | None:
+    """Detect an artifact from `cwd`, or None if there is nothing to attach.
+
+    `cwd` not being a git checkout at all is not a refusal -- it's the ordinary
+    shape of an artifact-less delegation. An agent unit's WorkingDirectory is a
+    plain directory (WORK_DIR/%i), not a checkout, so "not a git checkout" is
+    what *every* non-code delegation issued by a live agent looks like; treating
+    it the same as a dirty/unpushed/no-remote checkout made every such
+    delegation fail outright with "REFUSED: ... is not a git checkout; pass
+    --repo and --commit explicitly", even though spec 5.3 and the README both
+    treat the artifact as optional.
+
+    The other three refusals stay hard failures: a dirty, unpushed, or
+    remote-less checkout means the caller plainly meant to attach a revision a
+    peer could not fetch, which must never be silently dropped to "no
+    artifact" -- that would let a peer act on stale or divergent code without
+    ever being told.
+    """
     if _git(run, cwd, "rev-parse", "--is-inside-work-tree").returncode != 0:
-        raise ValueError(f"{cwd} is not a git checkout; pass --repo and --commit explicitly")
+        return None
     if _git(run, cwd, "status", "--porcelain").stdout.strip():
         raise ValueError("checkout is dirty; commit or stash before delegating so the peer sees the same code")
     head = _git(run, cwd, "rev-parse", "HEAD").stdout.strip()

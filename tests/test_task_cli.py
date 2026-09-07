@@ -26,6 +26,12 @@ class FakeRunner:
 
     def run(self, args):
         self.calls.append(args)
+        if args[0] == "git":
+            # Only ever reached via `git_artifact.detect`'s `rev-parse
+            # --is-inside-work-tree` probe, from `cwd` being a plain
+            # (non-git) directory -- exactly what an agent unit's
+            # WorkingDirectory is. Returncode 1 == "not a git checkout".
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
         sub = args[1]
         if sub == "channel-members":
             out = json.dumps({"ok": True, "members": [{"pubkey": B, "display_name": "Reviewer"},
@@ -184,6 +190,30 @@ def test_cli_delegate_reads_stdin_and_prints_json(monkeypatch) -> None:
                               "--repo", "git@x:o/r.git", "--commit", "c" * 40], input="Review please\n")
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["channel"] == CH
+
+
+def test_cli_delegate_without_repo_flag_succeeds_outside_a_git_checkout(monkeypatch, tmp_path) -> None:
+    # Finding 3 (final review): fleet_commands.py:287 passes cwd=Path.cwd()
+    # whenever --repo/--commit are omitted, and :179-180 then calls
+    # git_artifact.detect unconditionally -- which used to raise on anything
+    # that wasn't a clean, pushed checkout. An agent unit's WorkingDirectory
+    # (WORK_DIR/%i) is a plain directory, not a checkout, so every
+    # non-code delegation issued by a live agent used to fail outright with
+    # "REFUSED: ... is not a git checkout; pass --repo and --commit
+    # explicitly", even though spec 5.3 and the README both treat the
+    # artifact as optional. Exercised through the real CLI command from a
+    # non-git tmp_path -- the exact cwd/git_run combination
+    # `task_delegate` actually produces (`cwd=None if artifact else
+    # Path.cwd()`, `git_run=None if artifact else runner.run`), not
+    # cwd=None, which delegate_task's own unit tests above use but the CLI
+    # itself never passes.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["task", "delegate", "--to", "Reviewer", "--brief", "please look at the staging logs"])
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["channel"] == CH
 
 
 def test_cli_report_rejects_bad_status_and_next() -> None:
