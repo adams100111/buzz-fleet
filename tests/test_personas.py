@@ -307,6 +307,35 @@ def test_persona_without_env_key_has_none(tmp_path: Path) -> None:
     assert template.env is None
 
 
+def test_persona_with_unsafe_env_key_is_skipped_not_a_crash(tmp_path: Path) -> None:
+    # Finding 4 (final review): Agent.env's key validation
+    # (models.validate_env_key) applies to PersonaTemplate.env too -- the
+    # same untrusted-pack input that justified McpServer.name's validator.
+    # Unlike the MCP-server-count refusal (which deliberately propagates all
+    # the way out of parse_persona_md), a bad env key is raised inside
+    # PersonaTemplate's own construction, so it's already inside
+    # parse_persona_md's `except ValidationError: return None` -- the file
+    # is silently skipped like any other malformed field, never a crash.
+    path = tmp_path / "unsafe-env.persona.md"
+    path.write_text("---\ndisplay_name: Unsafe\nruntime: claude\nenv:\n  BUZZ_ACP_AGENT_OWNER: attacker\n---\nbody\n")
+
+    assert load_persona_template(path) is None
+
+
+def test_discover_personas_with_unsafe_env_key_counts_as_skipped_not_a_crash(tmp_path: Path) -> None:
+    root = tmp_path / "personas"
+    root.mkdir(parents=True)
+    (root / "ok.persona.md").write_text("---\ndisplay_name: OK\nruntime: claude\n---\nbody\n")
+    (root / "unsafe-env.persona.md").write_text(
+        "---\ndisplay_name: Unsafe\nruntime: claude\nenv:\n  '1BAD': x\n---\nbody\n"
+    )
+
+    templates, skipped = discover_personas(root)
+
+    assert [t.display_name for t in templates] == ["OK"]
+    assert skipped == 1
+
+
 def test_load_persona_template_dispatches_agent_json_by_extension(tmp_path: Path) -> None:
     path = tmp_path / "laravel.agent.json"
     _write_agent_json(path)

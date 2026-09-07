@@ -170,3 +170,58 @@ def test_mcp_server_name_accepts_safe_characters() -> None:
 
     server = McpServer(name="boost-server_2", command="php")
     assert server.name == "boost-server_2"
+
+
+def test_agent_env_rejects_key_with_embedded_newline() -> None:
+    # Finding 4 (final review): systemd.env_line carefully escapes/quotes
+    # the *value* of a KEY=value line -- the key itself was interpolated
+    # raw. `env_line("GOOD\nBUZZ_ACP_AGENT_OWNER", "deadbeef")` produced two
+    # lines: one bad, one a real assignment systemd reads as genuine. Must
+    # be refused at the model boundary, the earliest point every entry path
+    # (CLI, TUI, persona import) shares.
+    import pytest
+    from pydantic import SecretStr
+
+    with pytest.raises(ValueError, match="not a valid identifier"):
+        Agent(**_base_kwargs(), env={"GOOD\nBUZZ_ACP_AGENT_OWNER": SecretStr("deadbeef")})
+
+
+def test_agent_env_rejects_non_identifier_key() -> None:
+    import pytest
+    from pydantic import SecretStr
+
+    with pytest.raises(ValueError, match="not a valid identifier"):
+        Agent(**_base_kwargs(), env={"has space": SecretStr("x")})
+    with pytest.raises(ValueError, match="not a valid identifier"):
+        Agent(**_base_kwargs(), env={"1STARTS_WITH_DIGIT": SecretStr("x")})
+    with pytest.raises(ValueError, match="not a valid identifier"):
+        Agent(**_base_kwargs(), env={"": SecretStr("x")})
+
+
+def test_agent_env_rejects_buzz_prefix() -> None:
+    # Finding 4 (final review): write_agent_files writes the `env` block
+    # *after* BUZZ_PRIVATE_KEY/BUZZ_ACP_AGENT_OWNER/BUZZ_ACP_RESPOND_TO and
+    # the fleet variables, and systemd lets a later assignment win -- an env
+    # entry could silently re-point the agent's identity, owner, or
+    # respond-to policy. Refusing the whole BUZZ_ prefix closes this
+    # regardless of write order.
+    import pytest
+    from pydantic import SecretStr
+
+    with pytest.raises(ValueError, match="reserved"):
+        Agent(**_base_kwargs(), env={"BUZZ_ACP_AGENT_OWNER": SecretStr("attacker-pubkey")})
+
+
+def test_agent_env_rejects_pi_coding_agent_dir() -> None:
+    import pytest
+    from pydantic import SecretStr
+
+    with pytest.raises(ValueError, match="reserved"):
+        Agent(**_base_kwargs(), env={"PI_CODING_AGENT_DIR": SecretStr("/tmp/evil")})
+
+
+def test_agent_env_accepts_safe_keys() -> None:
+    from pydantic import SecretStr
+
+    agent = Agent(**_base_kwargs(), env={"DATABASE_URL": SecretStr("postgres://x"), "GOOSE_PROVIDER": SecretStr("anthropic")})
+    assert agent.env is not None and set(agent.env) == {"DATABASE_URL", "GOOSE_PROVIDER"}

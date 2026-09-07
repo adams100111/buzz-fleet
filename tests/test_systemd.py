@@ -357,6 +357,16 @@ def test_env_line_quotes_and_escapes_multiline() -> None:
     assert env_line("K", value) == 'K="line one\nsays \\"hi\\" \\\\ back\nline three"'
 
 
+def test_env_line_empty_value() -> None:
+    # Deferred test named in the final review (Finding 4): an empty value
+    # has no newline, so it takes the unquoted fast path -- confirm it comes
+    # out as a bare `K=`, not e.g. `K=""` or a KeyError/IndexError on an
+    # empty string.
+    from buzz_fleet.systemd import env_line
+
+    assert env_line("K", "") == "K="
+
+
 def test_write_agent_files_quotes_multiline_team_instructions(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")

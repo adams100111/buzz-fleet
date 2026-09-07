@@ -20,6 +20,41 @@ from buzz_fleet.orchestration.record import FleetRecord
 # author, the CLI's `--mcp-name`, and the TUI's MCP-name input alike.
 MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# `Agent.env`'s keys (and `PersonaTemplate.env`'s, in personas.py, for the
+# same reason) are interpolated raw into a systemd EnvironmentFile line by
+# systemd.env_line -- that function carefully escapes/quotes the *value*
+# (a real incident: an unescaped newline in a value truncated a live
+# agent's instructions to 47 bytes), but a key was never validated at all.
+# A key containing a newline (e.g. "GOOD\nBUZZ_ACP_AGENT_OWNER") is read by
+# systemd as one bad line plus a real, attacker-chosen assignment; a key
+# that merely collides with one buzz-fleet already writes (BUZZ_PRIVATE_KEY,
+# BUZZ_ACP_AGENT_OWNER, BUZZ_ACP_RESPOND_TO, PI_CODING_AGENT_DIR, ...) wins
+# outright, since systemd lets a later assignment in the same file win and
+# `write_agent_files` always writes the `env` block last -- silently
+# re-pointing the agent's identity, owner, or respond-to policy. The input
+# reaches here from persona frontmatter (an untrusted pack the operator did
+# not necessarily author), the CLI's `--env`/`--env-file`, and the TUI's env
+# textarea alike -- the same three entry paths `MCP_SERVER_NAME_RE` above
+# exists to cover for `McpServer.name`.
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RESERVED_ENV_KEY_EXACT = {"PI_CODING_AGENT_DIR"}
+_RESERVED_ENV_KEY_PREFIX = "BUZZ_"
+
+
+def validate_env_key(key: str) -> None:
+    """Raise ValueError with a clear message if `key` is not safe to write as
+    a systemd EnvironmentFile key. Shared by `Agent.env` and
+    `personas.PersonaTemplate.env` so every entry path is covered by one
+    rule instead of validating (or forgetting to validate) it per call site.
+    """
+    if not ENV_KEY_RE.match(key):
+        raise ValueError(
+            f"env var name {key!r} is not a valid identifier — only letters, digits, and '_' are "
+            "allowed, and it must not start with a digit"
+        )
+    if key in _RESERVED_ENV_KEY_EXACT or key.startswith(_RESERVED_ENV_KEY_PREFIX):
+        raise ValueError(f"env var name {key!r} is reserved for buzz-fleet's own use and cannot be overridden")
+
 
 class Community(BaseModel):
     id: str
@@ -131,3 +166,10 @@ class Agent(BaseModel):
     # (systemd.write_agent_files' Pi-specific handling).
     mcp_server: McpServer | None = None
     created_at: datetime
+
+    @field_validator("env")
+    @classmethod
+    def _env_keys_are_safe(cls, value: dict[str, SecretStr] | None) -> dict[str, SecretStr] | None:
+        for key in value or {}:
+            validate_env_key(key)
+        return value

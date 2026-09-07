@@ -26,9 +26,9 @@ import json
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
-from buzz_fleet.models import McpServer
+from buzz_fleet.models import McpServer, validate_env_key
 
 DEFAULT_PERSONAS_DIR = Path.home() / ".config" / "buzz-fleet" / "personas"
 
@@ -54,6 +54,20 @@ class PersonaTemplate(BaseModel):
     # buzz-acp supports exactly one MCP server — only the first entry of a
     # persona's `mcp_servers:` block is ever imported; see _build_mcp_server.
     mcp_server: McpServer | None = None
+
+    @field_validator("env")
+    @classmethod
+    def _env_keys_are_safe(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        # Same rule as `Agent.env` (models.validate_env_key) -- a persona's
+        # own `env:` frontmatter block is exactly the untrusted-pack input
+        # that rule exists for. Raising here (inside `PersonaTemplate`'s own
+        # construction) means `parse_persona_md`'s existing
+        # `except ValidationError: return None` already surfaces this the
+        # same way it surfaces every other malformed field -- the whole file
+        # is skipped, not counted, never a crash reaching `discover_personas`.
+        for key in value or {}:
+            validate_env_key(key)
+        return value
 
 
 def _build_mcp_server(raw: object) -> McpServer | None:
