@@ -232,3 +232,185 @@ def test_delegate_does_not_swallow_a_non_timeout_publish_failure() -> None:
         fc.delegate_task(runner, AGENT, to="Reviewer", brief="x", wait_seconds=60, acceptance=[], artifact=None, run_id=None,
                          thread_root=None, parent_task=None, required=True, channel=None, cwd=None, git_run=None, now=1)
     assert len([c for c in runner.calls if c[1] == "post-message"]) == 1, "a non-timeout failure must never be retried"
+
+
+# --- Task 15: views (task show, tasks) --------------------------------------------
+
+from buzz_fleet.orchestration.protocol import parse_event
+from buzz_fleet.orchestration.reducer import reduce
+
+T2, AT2 = "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"
+
+
+def _state():
+    return reduce([parse_event(_delegate_event()), parse_event(_delegate_event(task=T2, attempt=AT2, requester=B, assignee=A))], None)
+
+
+def test_task_rows_filters() -> None:
+    s = _state()
+    assert {t.task_id for t in fc.task_rows(s, only_open=True, only_stuck=False, only_unacked=False, mine=None, now=500)} == {T1, T2}
+    assert {t.task_id for t in fc.task_rows(s, only_open=False, only_stuck=True, only_unacked=False, mine=None, now=5000)} == {T1, T2}
+    assert fc.task_rows(s, only_open=False, only_stuck=True, only_unacked=False, mine=None, now=500) == []
+    assert [t.task_id for t in fc.task_rows(s, only_open=False, only_stuck=False, only_unacked=False, mine=A, now=500)] == [T2]
+
+
+def test_cli_tasks_json_and_show(monkeypatch) -> None:
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner(events=[_delegate_event()]))
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["tasks", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)[0]["task_id"] == T1
+    result = cli.invoke(app, ["task", "show", T1[:8]])
+    assert result.exit_code == 0 and "11111111" in result.output and "open" in result.output
+
+
+# --- Tests added beyond the brief (Task 15) ---------------------------------------
+#
+# The brief's own test_task_rows_filters exercises each filter in isolation (and one
+# combination, only_open=False/only_stuck=False/only_unacked=False + mine), but never
+# builds a state with every reachable status side by side and checks each filter --
+# and filter *combination* -- returns exactly the right set. A filter that is too
+# INCLUSIVE (e.g. --stuck matching a `done` task whose deadline has simply passed,
+# because `late()` forgot to gate on `is_live`) would pass every test the brief itself
+# gives but silently make a finished task look like it's rotting. The following builds
+# one task per reachable Task.status ("superseded" is not reachable via the `status`
+# property -- see below) plus distinguishes assignees, and checks every filter and
+# every pairwise combination against an exact expected set, never just a length.
+
+
+def _ack_event(task: str, attempt: str, assignee: str, event_id: str) -> dict:
+    payload = {"v": 1, "type": "ack", "task": task, "attempt": attempt, "from": assignee}
+    return {"id": event_id, "pubkey": assignee, "created_at": 150, "kind": 9, "content": "ack",
+            "tags": [["h", CH], ["p", RK], ["t", "fleet"], ["t", f"fleet:task:{task}"], ["fleet", json.dumps(payload)]]}
+
+
+def _report_event(task: str, attempt: str, assignee: str, status: str, event_id: str) -> dict:
+    payload = {"v": 1, "type": "report", "task": task, "attempt": attempt, "from": assignee, "status": status,
+               "next": "default", "input_commit": None, "output": None, "evidence": [], "run": None}
+    return {"id": event_id, "pubkey": assignee, "created_at": 200, "kind": 9, "content": f"{status} report",
+            "tags": [["h", CH], ["p", RK], ["t", "fleet"], ["t", f"fleet:task:{task}"], ["fleet", json.dumps(payload)]]}
+
+
+def _cancel_event(task: str, requester: str, event_id: str) -> dict:
+    payload = {"v": 1, "type": "cancel-task", "task": task, "from": requester, "reason": "obsolete"}
+    return {"id": event_id, "pubkey": requester, "created_at": 200, "kind": 9, "content": "cancelled",
+            "tags": [["h", CH], ["p", RK], ["t", "fleet"], ["t", f"fleet:task:{task}"], ["fleet", json.dumps(payload)]]}
+
+
+def _task_id(n: int) -> str:
+    return f"7{n}000000-0000-4000-8000-000000000000"
+
+
+def _attempt_id(n: int) -> str:
+    return f"7{n}000000-1111-4111-8111-000000000000"
+
+
+# One task per status Task.status can actually report. "superseded" is deliberately
+# excluded: _apply_delegate only ever marks the *previous* attempt superseded, and
+# Task.status/assignee always read the newest attempt (`current` = attempts[-1]) --
+# so a task's overall `.status` can never observably be "superseded", only an
+# individual (non-current) Attempt's `.status` field, which task_rows/render_tasks
+# never look at directly. Confirmed by reading reducer._apply_delegate.
+T_OPEN, T_ACKED, T_DONE, T_BLOCKED, T_FAILED, T_CANCELLED = (_task_id(i) for i in range(6))
+
+
+def _all_statuses_state():
+    events = [
+        _delegate_event(task=T_OPEN, attempt=_attempt_id(0), requester=A, assignee=B, event_id="ev0"),
+        _delegate_event(task=T_ACKED, attempt=_attempt_id(1), requester=B, assignee=A, event_id="ev1"),
+        _ack_event(T_ACKED, _attempt_id(1), A, "ev1a"),
+        _delegate_event(task=T_DONE, attempt=_attempt_id(2), requester=A, assignee=B, event_id="ev2"),
+        _ack_event(T_DONE, _attempt_id(2), B, "ev2a"),
+        _report_event(T_DONE, _attempt_id(2), B, "done", "ev2r"),
+        _delegate_event(task=T_BLOCKED, attempt=_attempt_id(3), requester=A, assignee=B, event_id="ev3"),
+        _ack_event(T_BLOCKED, _attempt_id(3), B, "ev3a"),
+        _report_event(T_BLOCKED, _attempt_id(3), B, "blocked", "ev3r"),
+        _delegate_event(task=T_FAILED, attempt=_attempt_id(4), requester=A, assignee=B, event_id="ev4"),
+        _ack_event(T_FAILED, _attempt_id(4), B, "ev4a"),
+        _report_event(T_FAILED, _attempt_id(4), B, "failed", "ev4r"),
+        _delegate_event(task=T_CANCELLED, attempt=_attempt_id(5), requester=A, assignee=B, event_id="ev5"),
+        _cancel_event(T_CANCELLED, A, "ev5c"),
+    ]
+    return reduce([parse_event(e) for e in events], None)
+
+
+def test_task_rows_exact_sets_per_status_and_combination() -> None:
+    s = _all_statuses_state()
+    assert {t.task_id: t.status for t in s.tasks.values()} == {
+        T_OPEN: "open", T_ACKED: "acked", T_DONE: "done", T_BLOCKED: "blocked",
+        T_FAILED: "failed", T_CANCELLED: "cancelled",
+    }
+
+    def rows(*, only_open=False, only_stuck=False, only_unacked=False, mine=None):
+        return {t.task_id for t in fc.task_rows(s, only_open=only_open, only_stuck=only_stuck,
+                                                only_unacked=only_unacked, mine=mine, now=5000)}
+
+    # deadline on every fixture is 1000 (the fixture's hardcoded payload), so
+    # now=5000 is "past deadline" for every task -- late() must still gate on
+    # is_live, or a finished task would wrongly show up as --stuck.
+    cases = {
+        # (only_open, only_stuck, only_unacked, mine) -> expected task_id set
+        (True, False, False, None): {T_OPEN, T_ACKED},                     # --open
+        (False, True, False, None): {T_OPEN, T_ACKED},                     # --stuck (only live tasks, even past deadline)
+        (False, False, True, None): {T_OPEN},                              # --unacked (open only, not acked)
+        (False, False, False, A): {T_ACKED},                               # --mine (assignee, not requester)
+        (False, False, False, B): {T_OPEN, T_DONE, T_BLOCKED, T_FAILED, T_CANCELLED},
+        (True, False, True, None): {T_OPEN},                               # --open --unacked
+        (True, False, False, A): {T_ACKED},                                # --open --mine
+        (False, True, False, A): {T_ACKED},                                # --stuck --mine
+        (True, True, False, None): {T_OPEN, T_ACKED},                      # --open --stuck (both live+late here)
+        (False, False, True, A): set(),                                    # --unacked --mine=A: A's task is acked, not open
+        (True, False, True, A): set(),                                     # --open --unacked --mine=A: same, empty
+    }
+    for (only_open, only_stuck, only_unacked, mine), expected in cases.items():
+        got = {t.task_id for t in fc.task_rows(s, only_open=only_open, only_stuck=only_stuck,
+                                               only_unacked=only_unacked, mine=mine, now=5000)}
+        assert got == expected, f"open={only_open} stuck={only_stuck} unacked={only_unacked} mine={mine!r}: got {got}, want {expected}"
+
+    # Terminal tasks are never --stuck even before any deadline math: a task that
+    # finished ahead of its deadline must not be reported as rotting either.
+    assert rows(only_stuck=True) & {T_DONE, T_BLOCKED, T_FAILED, T_CANCELLED} == set()
+    # No filters at all: every task, regardless of status.
+    assert rows() == {T_OPEN, T_ACKED, T_DONE, T_BLOCKED, T_FAILED, T_CANCELLED}
+
+
+def test_task_rows_sorts_newest_first() -> None:
+    # created_at comes from the delegate event's created_at (100 for every
+    # `_delegate_event` fixture) -- give the two tasks distinct created_at via
+    # distinct event ids/timestamps by building the events directly.
+    older = _delegate_event(task=T1, attempt=AT1, event_id="older")
+    newer = dict(_delegate_event(task=T2, attempt=AT2, requester=B, assignee=A, event_id="newer"))
+    newer["created_at"] = 500
+    s = reduce([parse_event(older), parse_event(newer)], None)
+    rows = fc.task_rows(s, only_open=False, only_stuck=False, only_unacked=False, mine=None, now=1000)
+    assert [t.task_id for t in rows] == [T2, T1]
+
+
+def test_task_show_unknown_id_errors_to_stderr_json(monkeypatch) -> None:
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner(events=[_delegate_event()]))
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["task", "show", "deadbeef"])
+    assert result.exit_code == 1
+    assert "unknown id" in json.loads(result.output)["error"]
+
+
+def test_task_show_ambiguous_prefix_lists_candidates(monkeypatch) -> None:
+    prefix = "abcdefgh"
+    task_x, attempt_x = f"{prefix}-1111-4111-8111-111111111111", f"{prefix}-aaaa-4aaa-8aaa-111111111111"
+    task_y, attempt_y = f"{prefix}-2222-4222-8222-222222222222", f"{prefix}-bbbb-4bbb-8bbb-222222222222"
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner(
+        events=[_delegate_event(task=task_x, attempt=attempt_x, event_id="e" * 63 + "1"),
+                _delegate_event(task=task_y, attempt=attempt_y, event_id="e" * 63 + "2")]))
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["task", "show", prefix])
+    assert result.exit_code == 1
+    assert "ambiguous id" in json.loads(result.output)["error"]
+
+
+def test_cli_tasks_empty_state_prints_no_rows(monkeypatch) -> None:
+    monkeypatch.setattr(fc, "RealCommandRunner", lambda: FakeRunner(events=[]))
+    monkeypatch.setattr(fc, "resolve_identity", lambda env, runner, community_id: AGENT)
+    result = cli.invoke(app, ["tasks", "--json"])
+    assert result.exit_code == 0 and json.loads(result.output) == []
+    result = cli.invoke(app, ["tasks"])
+    assert result.exit_code == 0 and "Fleet tasks" in result.output

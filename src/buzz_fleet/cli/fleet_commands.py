@@ -7,10 +7,13 @@ import os
 import socket
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 
 import typer
+from rich.console import Console
+from rich.table import Table
 
 from buzz_fleet import state
 from buzz_fleet.manager import AgentManager
@@ -309,3 +312,90 @@ def task_cancel(task_id: Annotated[str, typer.Argument()], reason: Annotated[str
         _fail(e)
         return
     typer.echo(json.dumps(out))
+
+
+def task_rows(state: State, *, only_open: bool, only_stuck: bool, only_unacked: bool, mine: str | None, now: int) -> list[Task]:
+    rows = list(state.tasks.values())
+    if only_open:
+        rows = [t for t in rows if t.is_live]
+    if only_stuck:
+        rows = [t for t in rows if t.late(now)]
+    if only_unacked:
+        rows = [t for t in rows if t.unacked]
+    if mine:
+        rows = [t for t in rows if t.assignee == mine]
+    return sorted(rows, key=lambda t: t.created_at, reverse=True)
+
+
+def _age(seconds: int) -> str:
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 86400}d"
+
+
+def render_tasks(tasks: list[Task], now: int) -> Table:
+    table = Table(title="Fleet tasks")
+    for col in ("Task", "Run", "Status", "Assignee", "Requester", "Age", "Deadline", "Attempt", "Summary"):
+        table.add_column(col)
+    for t in tasks:
+        remaining = t.deadline - now
+        deadline = (f"in {_age(remaining)}" if remaining > 0 else f"{_age(-remaining)} overdue") if t.is_live else "-"
+        summary = (t.current.report or {}).get("content") or t.brief
+        table.add_row(ids.short(t.task_id), ids.short(t.run_id) if t.run_id else "-", t.status, t.assignee[:8],
+                      t.requester[:8], _age(now - t.created_at), deadline, str(len(t.attempts)), summary.splitlines()[0][:60])
+    return table
+
+
+def task_to_json(task: Task) -> dict:
+    return asdict(task)
+
+
+def tasks_command(
+    open_only: Annotated[bool, typer.Option("--open")] = False,
+    stuck: Annotated[bool, typer.Option("--stuck")] = False,
+    unacked: Annotated[bool, typer.Option("--unacked")] = False,
+    mine: Annotated[bool, typer.Option("--mine")] = False,
+    channel: Annotated[str | None, typer.Option()] = None,
+    community: Annotated[str | None, typer.Option()] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    runner, now = RealCommandRunner(), int(time.time())
+    try:
+        ident = resolve_identity(os.environ, runner, community)
+        state = relay.load_state(runner, ident, channel_id=channel)
+    except _ERRORS as e:
+        _fail(e)
+        return
+    rows = task_rows(state, only_open=open_only, only_stuck=stuck, only_unacked=unacked, mine=ident.pubkey if mine else None, now=now)
+    if as_json:
+        typer.echo(json.dumps([task_to_json(t) for t in rows]))
+        return
+    Console(width=200).print(render_tasks(rows, now))
+
+
+@task_app.command("show")
+def task_show(task_ref: Annotated[str, typer.Argument()], channel: Annotated[str | None, typer.Option()] = None,
+              community: Annotated[str | None, typer.Option()] = None,
+              as_json: Annotated[bool, typer.Option("--json")] = False) -> None:
+    runner, now = RealCommandRunner(), int(time.time())
+    try:
+        ident = resolve_identity(os.environ, runner, community)
+        task, _ = _load_task(runner, ident, task_ref, channel)
+    except _ERRORS as e:
+        _fail(e)
+        return
+    if as_json:
+        typer.echo(json.dumps(task_to_json(task)))
+        return
+    console = Console(width=200)
+    console.print(render_tasks([task], now))
+    console.print(f"[bold]Brief[/bold]\n{task.brief}")
+    for i, a in enumerate(task.attempts, 1):
+        console.print(f"[bold]Attempt {i}[/bold] {a.assignee[:8]} {a.status}"
+                      + (f" acked {_age(now - a.acked_at)} ago" if a.acked_at else " (not acked)"))
+        if a.report:
+            console.print(a.report.get("content", ""))
+    for note in task.notes:
+        console.print(f"[dim]note: {note}[/dim]")
