@@ -140,6 +140,21 @@ def resolve_prompt_text(agent: Agent) -> str:
     return raw
 
 
+def env_line(key: str, value: str) -> str:
+    """One KEY=value line for a systemd EnvironmentFile.
+
+    systemd stops an unquoted value at the first newline (real incident: a
+    multi-paragraph BUZZ_ACP_TEAM_INSTRUCTIONS reached the agent as its first
+    line only, 47 of 3,625 bytes). A double-quoted value may span lines; inside
+    it `\\` escapes `\\` and `"`. Single-line values stay unquoted so existing
+    env files are byte-identical.
+    """
+    if "\n" not in value:
+        return f"{key}={value}"
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{key}="{escaped}"'
+
+
 def write_agent_files(
     agent: Agent,
     community: Community,
@@ -153,10 +168,10 @@ def write_agent_files(
     _write_secure(prompt_path, resolve_prompt_text(agent))
 
     lines = [
-        f"BUZZ_PRIVATE_KEY={agent.private_key.get_secret_value()}",
-        f"BUZZ_RELAY_URL={community.relay_url}",
-        f"BUZZ_ACP_AGENT_COMMAND={resolve_adapter_command(agent.harness)}",
-        f"BUZZ_ACP_SYSTEM_PROMPT_FILE={prompt_path}",
+        env_line("BUZZ_PRIVATE_KEY", agent.private_key.get_secret_value()),
+        env_line("BUZZ_RELAY_URL", community.relay_url),
+        env_line("BUZZ_ACP_AGENT_COMMAND", resolve_adapter_command(agent.harness)),
+        env_line("BUZZ_ACP_SYSTEM_PROMPT_FILE", str(prompt_path)),
     ]
     if auth_tag:
         # buzz-acp reads this and attaches it to its own NIP-42 AUTH event on
@@ -166,7 +181,7 @@ def write_agent_files(
         # profile (see visibility.py) is a *separate*, client-side-only
         # verification path some clients use for their own UI — it never
         # reaches the relay's own ownership record on its own.
-        lines.append(f"BUZZ_AUTH_TAG={auth_tag}")
+        lines.append(env_line("BUZZ_AUTH_TAG", auth_tag))
     if community.owner_pubkey:
         # buzz-acp's own default is respond_to=owner-only — with no owner
         # configured at all, every event is silently dropped forever (a
@@ -175,26 +190,26 @@ def write_agent_files(
         # ensure_runtime_ready() backfills owner_pubkey on communities
         # saved before this field existed, so this is only ever unset for
         # a Community not yet round-tripped through that once.
-        lines.append(f"BUZZ_ACP_AGENT_OWNER={community.owner_pubkey}")
+        lines.append(env_line("BUZZ_ACP_AGENT_OWNER", community.owner_pubkey))
     if agent.team_instructions:
-        lines.append(f"BUZZ_ACP_TEAM_INSTRUCTIONS={agent.team_instructions}")
+        lines.append(env_line("BUZZ_ACP_TEAM_INSTRUCTIONS", agent.team_instructions))
     if agent.model:
-        lines.append(f"BUZZ_ACP_MODEL={agent.model}")
+        lines.append(env_line("BUZZ_ACP_MODEL", agent.model))
     if agent.parallelism is not None:
-        lines.append(f"BUZZ_ACP_AGENTS={agent.parallelism}")
+        lines.append(env_line("BUZZ_ACP_AGENTS", str(agent.parallelism)))
     if agent.idle_timeout_seconds is not None:
-        lines.append(f"BUZZ_ACP_IDLE_TIMEOUT={agent.idle_timeout_seconds}")
+        lines.append(env_line("BUZZ_ACP_IDLE_TIMEOUT", str(agent.idle_timeout_seconds)))
     if agent.max_turn_duration_seconds is not None:
-        lines.append(f"BUZZ_ACP_MAX_TURN_DURATION={agent.max_turn_duration_seconds}")
+        lines.append(env_line("BUZZ_ACP_MAX_TURN_DURATION", str(agent.max_turn_duration_seconds)))
     if agent.respond_to_allowlist:
         # buzz-acp only consults the allowlist when respond_to == "allowlist"
         # (BUZZ_ACP_RESPOND_TO, default "owner-only") — set both together so
         # the allowlist is never silently inert.
-        lines.append("BUZZ_ACP_RESPOND_TO=allowlist")
-        lines.append(f"BUZZ_ACP_RESPOND_TO_ALLOWLIST={','.join(agent.respond_to_allowlist)}")
+        lines.append(env_line("BUZZ_ACP_RESPOND_TO", "allowlist"))
+        lines.append(env_line("BUZZ_ACP_RESPOND_TO_ALLOWLIST", ",".join(agent.respond_to_allowlist)))
     if anthropic_api_key:
-        lines.append(f"ANTHROPIC_API_KEY={anthropic_api_key}")
+        lines.append(env_line("ANTHROPIC_API_KEY", anthropic_api_key))
     if openai_api_key:
-        lines.append(f"OPENAI_API_KEY={openai_api_key}")
+        lines.append(env_line("OPENAI_API_KEY", openai_api_key))
 
     _write_secure(agent_env_path(agent.id), "\n".join(lines) + "\n")

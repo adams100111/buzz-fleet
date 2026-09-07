@@ -312,3 +312,27 @@ def test_ensure_template_unit_installed_returns_changed_flag(tmp_path: Path, mon
     assert ensure_template_unit_installed(Runner()) is True
     assert calls == [["systemctl", "--user", "daemon-reload"]]
     assert ensure_template_unit_installed(Runner()) is False
+
+
+def test_env_line_single_line_unquoted() -> None:
+    from buzz_fleet.systemd import env_line
+
+    assert env_line("BUZZ_RELAY_URL", "wss://buzz.example") == "BUZZ_RELAY_URL=wss://buzz.example"
+
+
+def test_env_line_quotes_and_escapes_multiline() -> None:
+    from buzz_fleet.systemd import env_line
+
+    value = 'line one\nsays "hi" \\ back\nline three'
+    assert env_line("K", value) == 'K="line one\nsays \\"hi\\" \\\\ back\nline three"'
+
+
+def test_write_agent_files_quotes_multiline_team_instructions(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/claude-agent-acp")
+    agent = _agent().model_copy(update={"team_instructions": "# Rules\n\n- one\n- two"})
+
+    write_agent_files(agent, _community(), None, None)
+
+    assert 'BUZZ_ACP_TEAM_INSTRUCTIONS="# Rules\n\n- one\n- two' in agent_env_path(agent.id).read_text()
