@@ -123,6 +123,16 @@ the live checks.
     whole config directory (`~/.pi/agent` by default): settings, trust,
     packages, skills, `mcp.json`. So each Pi agent can get its own Pi
     directory under its workspace, isolated from the owner's interactive Pi.
+18. **Harness plugin hooks that can block a tool call.** Pi extensions
+    receive a `tool_call` event and may return `{block: true, reason}`, and
+    can register typed tools (`pi.registerTool`); packages bundle
+    extensions and skills and load from a local path declared in
+    settings. `claude-agent-acp` 0.74 loads settings from `user`,
+    `project`, and `local` sources and itself relies on a `PreToolUse` hook
+    as "the enforcement boundary" that runs in every permission mode, so a
+    project `.claude/settings.json` hook in the workspace is honoured.
+    Codex has no pre-tool hook; goose's extension model is MCP-based and is
+    not known to intercept tool calls (section 11).
 15. The signer links `buzz-ws-client` and `buzz-sdk`: `build_message`,
     `build_create_channel`, `build_update_channel`, `build_delete_message`,
     authenticated connections, `send_raw`, `next_event`.
@@ -641,6 +651,42 @@ edits without `--force`.
   asked me" for anything that cannot be undone. Personas may add their own
   refusals on top.
 
+### 5.14 Harness plugins: the fleet package and the guard
+
+Skills tell an agent what to do; plugins can make the harness do it. Two
+harnesses expose the hooks (fact 18), so buzz-fleet ships:
+
+- **`pi-fleet`, a Pi package** bundled in this repo and installed into every
+  Pi agent's private Pi directory by local path. It contains the fleet
+  skills, an extension that registers typed tools `fleet_delegate`,
+  `fleet_ack`, `fleet_report`, `fleet_cancel`, `fleet_agents`, and
+  `fleet_task_show` (each shells out to the matching `buzz-fleet` command,
+  so the CLI stays the single implementation and Pi's models stop fighting
+  shell quoting), and the guard extension below.
+- **Claude Code workspace settings**: `.claude/settings.json` with a
+  `PreToolUse` hook on `Bash`, `Edit`, and `Write` that calls the guard, plus
+  the skills already covered by 5.12.
+- **The guard**, one implementation: `buzz-fleet guard check --cwd <dir>
+  --tool <name> --input <json>` reads the fleet record's action vocabulary
+  (patterns per action: `force-push` = `git push` with `--force`/`-f`/`+ref`;
+  `delete-branch` = `git push --delete`, `git branch -D`; `deploy-*`,
+  `migrate-shared-db`, `delete-data` = patterns the owner sets per fleet),
+  resolves the command's working directory to a worktree, looks up that
+  worktree's current task file, and answers `allow` or `block` with the
+  reason. `task ack` writes `work/<agent>/.fleet/<worktree>.json` with the
+  task id and its `allowed_actions`; `task report` and cancel remove it. A
+  destructive action with no task file, or one whose task does not list it,
+  is blocked with a message telling the agent to report `blocked` naming the
+  action. The Pi extension and the Claude hook are thin adapters over this
+  command.
+- **Codex and goose** get the rule by instruction only (5.13) until their
+  adapters expose a hook; `fleet status` shows per agent whether the guard is
+  mechanical or advisory, so the owner can place destructive steps on
+  guarded agents.
+
+Plugins are written by `write_agent_files` like other workspace files, with
+the same hash marker and `--force` rule.
+
 ## 6. Walkthroughs
 
 **Planned by the Fleet PM.** The owner writes in the fleet channel: "@Fleet
@@ -774,6 +820,10 @@ groups; TUI screen; self-update; language validated (section 12).
     `pi-mcp-adapter` and reaches the agent's MCP server in `--mode rpc`
     through `pi-acp`, and loads skills from that directory, with no trust
     prompt.
+15. The guard blocks a `git push --force` from a Pi agent (extension) and
+    from a Claude Code agent (`PreToolUse` hook) whose task does not allow
+    it, and allows it when the task does. goose: check whether any hook can
+    block a tool call; if none, record goose as advisory.
 
 ## 12. Implementation notes (language and seams)
 
@@ -824,3 +874,4 @@ faked by a list of connections. Signer subcommands are I/O only:
 | 29 | One MCP server per agent via a generated wrapper; personas with more are refused |
 | 30 | Recycle timer removes worktrees of runs closed for 7 days (configurable) |
 | 31 | `allowed_actions` on steps; agents refuse unlisted destructive actions and report blocked |
+| 32 | `pi-fleet` Pi package (typed fleet tools, skills, guard extension) and Claude Code `PreToolUse` guard; one `buzz-fleet guard check` implementation; Codex and goose advisory until they expose hooks |

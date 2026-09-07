@@ -134,6 +134,14 @@ _Avoid_: plan, draft run
 A named destructive or externally visible action (force-push, production deploy, shared migration) an agent may take only when its task's delegation lists it.
 _Avoid_: permission, privilege
 
+**Guard**:
+The mechanism that blocks a destructive tool call in a harness unless the agent's current task allows the action; mechanical on Pi and Claude Code, advisory elsewhere.
+_Avoid_: sandbox, firewall, permission mode
+
+**Fleet package**:
+The Pi package buzz-fleet ships into each Pi agent: fleet skills, typed fleet tools, and the guard extension.
+_Avoid_: plugin, bundle
+
 **Workspace files**:
 Skills and rules a persona ships into an agent's working directory so the harness loads them.
 _Avoid_: dotfiles, config
