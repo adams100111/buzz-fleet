@@ -106,10 +106,23 @@ the live checks.
     session (supported); `codex-acp` 1.10 writes them into Codex's
     `mcp_servers` config (supported); `pi-acp` 0.0.33 stores `mcpServers` on
     the session object and never reads it again, and advertises
-    `mcpCapabilities: {http: false, sse: false}` (not supported); goose is the
-    ACP reference buzz-acp was written against and spawns the server per
-    agent (supported per buzz-acp's README; goose is not installed here, so
-    unverified locally, section 11).
+    `mcpCapabilities: {http: false, sse: false}`, so the ACP path does
+    nothing for Pi; goose is the ACP reference buzz-acp was written against
+    and spawns the server per agent (supported per buzz-acp's README; goose
+    is not installed here, so unverified locally, section 11).
+17. **Pi has no MCP by design but supports it through an extension.** Pi
+    0.85's README: "No MCP. Build CLI tools with READMEs, or build an
+    extension that adds MCP support." Two published extensions do exactly
+    that; `pi-mcp-adapter` reads the standard `.mcp.json` / `<agent
+    dir>/mcp.json` files, exposes one lazy proxy tool, and starts servers on
+    first use. Pi loads project-local extensions, skills, and packages only
+    for a *trusted* directory; `pi-acp` runs Pi in `--mode rpc`
+    (non-interactive), where trust comes from `defaultProjectTrust` in the
+    agent-dir settings or a saved `trust.json` decision. `pi-acp` spawns Pi
+    with the inherited environment, and `PI_CODING_AGENT_DIR` overrides Pi's
+    whole config directory (`~/.pi/agent` by default): settings, trust,
+    packages, skills, `mcp.json`. So each Pi agent can get its own Pi
+    directory under its workspace, isolated from the owner's interactive Pi.
 15. The signer links `buzz-ws-client` and `buzz-sdk`: `build_message`,
     `build_create_channel`, `build_update_channel`, `build_delete_message`,
     authenticated connections, `send_raw`, `next_event`.
@@ -584,8 +597,9 @@ paths into the persona pack, that buzz-fleet writes into the agent's
 working directory at create and update time. This is how a persona ships
 harness-native skills and rules without buzz-fleet knowing the harness's
 format: `.claude/skills/<name>/SKILL.md` and `CLAUDE.md` for Claude Code,
-`AGENTS.md` for Codex, `.goosehints` for goose, and whatever Pi reads from
-its working directory (verified in section 11). The `Fleet PM` persona
+`AGENTS.md` for Codex, `.goosehints` for goose, and for Pi `skills/` inside
+the agent's private Pi directory plus `AGENTS.md` in the working directory
+(fact 17). The `Fleet PM` persona
 ships a planning skill this way. Files are written only when missing or
 when the persona's copy changed (hash marker), never over an operator's
 edits without `--force`.
@@ -604,7 +618,18 @@ edits without `--force`.
   persona declaring more than one is refused at import with the reason. When
   args or env are needed, buzz-fleet writes `work/<agent>/mcp-<name>.sh`
   (0700) that execs the command with them, and sets `BUZZ_ACP_MCP_COMMAND` to
-  it. Harness support is a fact per adapter, recorded in section 2.
+  it. Claude Code, Codex, and goose take it through that path (fact 16).
+- **Pi.** For a Pi agent buzz-fleet also writes a private Pi directory,
+  `work/<agent>/.pi-agent/`, and sets `PI_CODING_AGENT_DIR` to it in the env
+  file (fact 17). It contains `settings.json` with `defaultProjectTrust:
+  "always"` and `packages: ["npm:pi-mcp-adapter"]`, `mcp.json` with the
+  agent's one server (`{"mcpServers": {<name>: {command, args, env}}}`), and
+  `skills/` for workspace skills (5.12). `harness install pi` runs `pi
+  install npm:pi-mcp-adapter` once with that directory so the first turn
+  needs no network for it. Pi therefore gets the same one server as the
+  other harnesses, exposed as its lazy `mcp` proxy tool, with no change to
+  `pi-acp` and no effect on the owner's own Pi setup. The version of
+  `pi-mcp-adapter` is pinned in buzz-fleet and recorded in the fleet record.
 - **Allowed actions.** A pipeline step may list `allowed_actions`: names from
   a fleet-wide vocabulary in the fleet record (default: `force-push`,
   `delete-branch`, `migrate-shared-db`, `deploy-staging`, `deploy-production`,
@@ -744,8 +769,11 @@ groups; TUI screen; self-update; language validated (section 12).
 12. The presence snapshot (kind 40902) is readable by the owner and reflects
     a stopped agent within a few minutes.
 13. goose honours `mcpServers` from `session/new` for a buzz-fleet-generated
-    wrapper script; Pi agents get no MCP server and `agent create --harness
-    pi` warns when a persona declares one.
+    wrapper script.
+14. A Pi agent with `PI_CODING_AGENT_DIR` under its workspace loads
+    `pi-mcp-adapter` and reaches the agent's MCP server in `--mode rpc`
+    through `pi-acp`, and loads skills from that directory, with no trust
+    prompt.
 
 ## 12. Implementation notes (language and seams)
 

@@ -3805,7 +3805,8 @@ git add signer/src src/buzz_fleet tests && git commit -m "Add buzz-fleet fleet a
 - `state._serialize_with_secrets` must reveal `SecretStr` values nested in `env` and `mcp_server.env` (today it only patches top-level fields and `system_prompt_source`).
 - `systemd.write_agent_files` writes every `env` entry as `env_line(K, V)` after the API keys, and, when `mcp_server` is set, writes `WORK_DIR/<agent>/mcp-<name>.sh` (0700, `#!/bin/sh`, `export K=V` lines, `exec "<command>" <args...>`) and `BUZZ_ACP_MCP_COMMAND=<that path>`.
 - `personas.py`: import the persona's `env` block; import the first `mcp_servers` entry; raise `ValueError("persona declares N MCP servers; buzz-acp supports one")` for more than one.
-- CLI: `--env KEY=VALUE` (repeatable), `--env-file <path>` (KEY=VALUE lines), `--mcp-command`, `--mcp-arg` (repeatable), `--mcp-name`, `--mcp-env KEY=VALUE` (repeatable) on create and update; `agent create --harness pi` with an MCP server prints a warning that Pi ignores it (spec fact 16).
+- CLI: `--env KEY=VALUE` (repeatable), `--env-file <path>` (KEY=VALUE lines), `--mcp-command`, `--mcp-arg` (repeatable), `--mcp-name`, `--mcp-env KEY=VALUE` (repeatable) on create and update.
+- Pi (spec fact 17, 5.13): for `harness == "pi"`, `write_agent_files` also creates `WORK_DIR/<agent>/.pi-agent/` with `settings.json` = `{"defaultProjectTrust": "always", "packages": ["npm:pi-mcp-adapter@<PINNED>"]}`, `mcp.json` = `{"mcpServers": {<name>: {"command", "args", "env"}}}` when `mcp_server` is set (else no `mcp.json`), and appends `env_line("PI_CODING_AGENT_DIR", <that dir>)`. `harnesses.install_adapter("pi")` additionally runs `pi install npm:pi-mcp-adapter@<PINNED>` with `PI_CODING_AGENT_DIR` pointed at a shared template dir `~/.local/share/buzz-fleet/pi-agent-template/` and `write_agent_files` copies its `npm/` into each new Pi agent dir so the first turn needs no network. `PINNED` lives in `harnesses.py` as `PI_MCP_ADAPTER_VERSION` (set it to the current npm version at implementation time and record it in the fleet record's `versions`).
 - TUI: a multi-line `TextArea` for env (KEY=VALUE per line) and three inputs for the MCP server (name, command, args); secrets are masked in the edit form by showing `KEY=********` for existing values and only replacing a value when the user types a new one.
 
 - [ ] **Step 1: Write the failing tests**
@@ -3856,6 +3857,25 @@ def test_persona_with_two_mcp_servers_is_refused(tmp_path) -> None:
     path.write_text("---\nname: two\ndisplay_name: Two\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n  - {name: b, command: b}\n---\nbody\n")
     with pytest.raises(ValueError, match="supports one"):
         load_persona_template(path)
+
+
+# tests/test_systemd.py
+def test_write_agent_files_pi_gets_private_agent_dir_and_mcp_json(tmp_path: Path, monkeypatch) -> None:
+    import json as _json
+    from buzz_fleet.models import McpServer
+
+    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
+    agent = _agent().model_copy(update={"harness": "pi", "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"])})
+
+    write_agent_files(agent, _community(), None, None)
+
+    pi_dir = tmp_path / "work" / agent.id / ".pi-agent"
+    assert f"PI_CODING_AGENT_DIR={pi_dir}\n" in agent_env_path(agent.id).read_text()
+    settings = _json.loads((pi_dir / "settings.json").read_text())
+    assert settings["defaultProjectTrust"] == "always" and settings["packages"][0].startswith("npm:pi-mcp-adapter@")
+    assert _json.loads((pi_dir / "mcp.json").read_text())["mcpServers"]["boost"]["args"] == ["artisan", "boost:mcp"]
 
 
 # tests/test_cli.py
@@ -3924,6 +3944,7 @@ called from `write_agent_files`, which then appends `env_line("BUZZ_ACP_MCP_COMM
 ```bash
 uv run pytest -q && uv run ruff check . && uv run mypy
 uv run buzz-fleet agent update --community <id> laravel-backend-developer-claude --mcp-name boost --mcp-command php --mcp-arg artisan --mcp-arg boost:mcp
+# Pi: create one Pi agent with the same server, then mention it in the fleet channel and ask it to list its mcp tool (spec live check 14)
 pid=$(systemctl --user show -p MainPID --value buzz-agent@laravel-backend-developer-claude); tr '\0' '\n' < /proc/$pid/environ | grep BUZZ_ACP_MCP_COMMAND
 git add src/buzz_fleet tests && git commit -m "Add per-agent environment secrets and a single MCP server with a generated wrapper"
 ```
