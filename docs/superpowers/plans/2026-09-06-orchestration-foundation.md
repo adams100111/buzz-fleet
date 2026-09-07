@@ -27,10 +27,14 @@
 ## Before starting
 
 ```bash
-cd /home/dev/repos/buzz-fleet && uv sync --group dev && uv run pytest -q && (cd signer && cargo test)
+cd /home/dev/repos/buzz-fleet && cd /home/dev/repos/buzz-fleet && uv sync --reinstall --group dev && uv run pytest -q && (cd signer && cargo test)
 ```
 
-Expected: 196 tests pass; the signer's tests pass (first run compiles the buzz git dependencies, several minutes).
+Expected: 196 tests pass; the signer's tests pass (first run compiles the buzz git dependencies, several minutes). `--reinstall` matters once: the checkout moved from `/home/dev/apps` and the venv's launcher scripts kept the old path (done on 2026-09-07 on `my-brain`; 196 passed).
+
+**Nothing is gathered by hand for the live smoke steps.** Where a step uses `$ADMIN_NSEC`, `$CHANNEL`, or `<id>`, the executor reads them from disk: the community id is the file name under `~/.config/buzz-fleet/communities/` (on `my-brain` the one with agents is `eltahir`), the admin key is its `relay_admin_nsec` field, and a channel id comes from `buzz-fleet-signer read-channel-meta` (Task 6) or the fleet record once Task 9 has run. Never paste secrets into chat or commits.
+
+**Other machines are manual for now.** `my-brain` has no passwordless SSH to the other fleet machines (checked 2026-09-07: host keys unknown, one timeout, one publickey denied), so Task 9's one-time `fleet init` on the VPS and Task 16's rollout are commands the owner runs there, or the owner first sets up SSH keys (or Tailscale SSH) from `my-brain` and the executor runs them. Everything else in this plan runs on this machine.
 
 ## File map
 
