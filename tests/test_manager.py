@@ -1096,7 +1096,8 @@ def test_init_fleet_channel_creates_writes_record_and_persists(tmp_path: Path, m
     assert channel_id == FLEET and len(rec.retrieval_key) == 64
     from buzz_fleet import state
     saved = state.load_community("eltahir")
-    assert saved.fleet_channel_id == FLEET and saved.fleet_record.retrieval_key == rec.retrieval_key
+    assert saved is not None and saved.fleet_channel_id == FLEET
+    assert saved.fleet_record is not None and saved.fleet_record.retrieval_key == rec.retrieval_key
     about_call = next(a for a in runner.calls if a[1] == "write-channel-about")
     assert about_call[about_call.index("--about") + 1].startswith(ABOUT_HEADER)
 
@@ -1130,7 +1131,8 @@ def test_ensure_runtime_ready_discovers_record_joins_and_rewrites_env(tmp_path: 
     manager.ensure_runtime_ready()
 
     from buzz_fleet import state
-    assert state.load_community("eltahir").fleet_channel_id == FLEET
+    saved = state.load_community("eltahir")
+    assert saved is not None and saved.fleet_channel_id == FLEET
     assert len([a for a in runner.calls if a[1] == "join-channel" and FLEET in a]) == 1
     env = agent_env_path(agent.id).read_text()
     assert f"BUZZ_FLEET_CHANNEL={FLEET}\n" in env and f"BUZZ_FLEET_RETRIEVAL_KEY={'r' * 64}\n" in env
