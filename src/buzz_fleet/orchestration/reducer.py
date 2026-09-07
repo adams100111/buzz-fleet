@@ -172,6 +172,24 @@ def _safe_task_id(value: object) -> str | None:
     return None
 
 
+def _safe_run_id(value: object) -> str | None:
+    """Validate a payload's `run` field.
+
+    Returns the id when it is a non-empty string, else None -- same shape as
+    `_safe_task_id`, since a stored `run_id` reaches the same kind of unvalidated
+    downstream use: `fleet_commands.py`'s `ids.short(t.run_id)` does `full[:8]`, so a
+    dict/list/int `run` (e.g. `{"run": {}}`) stored as-is previously raised
+    KeyError/TypeError there, and a list additionally raised `rich.errors.
+    NotRenderableError` when handed to a Rich table cell -- permanently breaking
+    `buzz-fleet tasks`/`task show` for every reader from one hostile event. Unlike
+    `task`/`parent_task`, a malformed `run` must not refuse the whole delegate: `run`
+    is cosmetic (grouping only), so the caller falls back to `ev.run_id` instead.
+    """
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
 def reduce(events: Iterable[FleetEvent], record: FleetRecord | None, *, owner_pubkey: str | None = None,
            deleted_ids: set[str] | frozenset[str] = frozenset()) -> State:
     state = State()
@@ -246,12 +264,23 @@ def _apply_delegate(state: State, ev: FleetEvent, task_id: str, conductors: set[
         # just this delegate.
         if raw_parent is not None and _safe_task_id(raw_parent) is None:
             return
+        raw_run = p.get("run")
+        # A malformed `run` (present but not a string, e.g. a dict/list/int) must be
+        # refused rather than stored: `fleet_commands.py`'s `ids.short(t.run_id)` does
+        # an unvalidated `full[:8]` on it, so a bad value stored here would raise
+        # KeyError/TypeError (or NotRenderableError from Rich) for every future
+        # `tasks`/`task show` render, not just this delegate. Unlike `task`/
+        # `parent_task`, `run` is cosmetic (grouping only) so the delegate itself is
+        # still applied -- just falling back to `ev.run_id` -- with a note recording
+        # the refusal instead of silently dropping it.
+        safe_run = _safe_run_id(raw_run) if raw_run is not None else None
+        notes = [f"ignored malformed 'run' on delegate {ev.id[:8]}"] if raw_run is not None and safe_run is None else []
         state.tasks[task_id] = Task(
-            task_id=task_id, requester=ev.pubkey, run_id=p.get("run") or ev.run_id, step=p.get("step"),
+            task_id=task_id, requester=ev.pubkey, run_id=safe_run or ev.run_id, step=p.get("step"),
             parent_task=raw_parent, required=bool(p.get("required", True)), rework_target=p.get("rework_target"),
             artifact=p.get("artifact"), acceptance=acceptance, deadline=deadline,
             created_at=ev.created_at, channel_id=ev.channel_id, root_event_id=ev.root or ev.id, delegate_event_id=ev.id,
-            brief=ev.content, attempts=[Attempt(attempt_id, to, ev.created_at)],
+            brief=ev.content, attempts=[Attempt(attempt_id, to, ev.created_at)], notes=notes,
         )
         _record_cmd(state, p)
         return

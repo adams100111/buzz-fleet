@@ -302,6 +302,30 @@ def test_hostile_task_and_parent_task_fields_do_not_crash_reduce_render_or_json(
     assert [fc.task_to_json(t) for t in state.tasks.values()] == []
 
 
+@pytest.mark.parametrize("value", [{"a": 1}, ["boom"], 5], ids=["run-dict", "run-list", "run-int"])
+def test_hostile_run_field_does_not_crash_ids_short_or_render(value) -> None:
+    # Residual (final fix pass): the same class of bug closed for `task`/`parent_task`
+    # above was left open for `run`. `reducer.py` stored `p.get("run")` as-is, and
+    # `fleet_commands.py`'s `ids.short(t.run_id)` (`full[:8]`) then broke on it:
+    # `{"a": 1}` raised KeyError (`dict[slice]`), `["boom"]` raised
+    # `rich.errors.NotRenderableError` once handed to a Rich table cell, and `5`
+    # raised TypeError (`int` isn't subscriptable). Unlike `task`/`parent_task`,
+    # `reduce()` itself survived (so `--json`/action verbs/`fleet agents` kept
+    # working) -- but `buzz-fleet tasks` and `task show` were permanently broken for
+    # every reader on one hostile event.
+    hostile = _delegate(run=value)
+    state = reduce([hostile], REC)
+    task = state.tasks[T1]
+    # A malformed `run` must not refuse the whole delegate (unlike `task`/
+    # `parent_task`, it's cosmetic grouping only) -- the task is still created, just
+    # without the bad value, and with a note recording the refusal.
+    assert task.run_id is None
+    assert any("run" in note for note in task.notes)
+    now = int(time.time())
+    assert fc.render_tasks([task], now) is not None
+    assert fc.task_to_json(task)["run_id"] is None
+
+
 def test_hostile_empty_content_does_not_crash_render_tasks() -> None:
     # Finding 1 (final review): unlike deadline/acceptance/to/cmd, empty `content`
     # doesn't stop a task from being created -- so it has to be handled by every
