@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 from pydantic import SecretStr
 
-from buzz_fleet import state
+from buzz_fleet import paths, state
 from buzz_fleet.models import Community
 from buzz_fleet.tui.app import BuzzFleetApp
 from buzz_fleet.tui.screens.community_picker import CommunityPickerScreen
@@ -83,3 +83,51 @@ async def test_escape_cancels_without_changing_anything(monkeypatch, tmp_path) -
         await pilot.press("escape")
         await pilot.pause()
     assert state.load_active_community() == "eltahir"
+
+
+async def test_corrupt_community_state_file_still_appears_and_is_selectable(
+    monkeypatch, tmp_path
+) -> None:
+    # Genuine garbage, not valid JSON with a bad value -- load_community
+    # raises json.JSONDecodeError (a ValueError) before it ever reaches
+    # pydantic. The row must still show up, still be selectable, and
+    # choosing it must still write the pointer -- exactly what a user whose
+    # file got mangled needs in order to switch away from it.
+    _connect(monkeypatch, tmp_path, "eltahir")
+    _connect(monkeypatch, tmp_path, "acme")
+    (paths.state_dir() / "communities" / "acme.json").write_text("not valid json {{{")
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(CommunityPickerScreen("eltahir"))
+        await pilot.pause()
+        table = app.screen.query_one("#community-table")
+        rows = {str(table.get_row_at(r)[1]): r for r in range(table.row_count)}
+        assert rows.keys() == {"eltahir", "acme"}
+        assert str(table.get_row_at(rows["acme"])[2]) == "<unreadable>"
+
+        table.move_cursor(row=rows["acme"])
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert state.load_active_community() == "acme"
+
+
+async def test_corrupt_agent_file_shows_unreadable_agent_count(monkeypatch, tmp_path) -> None:
+    # A corrupt agent file must degrade only its own community's agent
+    # count, not take out the whole picker -- the community's own state is
+    # fine, so its relay URL still renders normally.
+    _connect(monkeypatch, tmp_path, "eltahir")
+    _connect(monkeypatch, tmp_path, "acme")
+    agents_dir = paths.state_dir() / "communities" / "acme" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "broken.json").write_text("not valid json {{{")
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(CommunityPickerScreen("eltahir"))
+        await pilot.pause()
+        table = app.screen.query_one("#community-table")
+        rows = {str(table.get_row_at(r)[1]): r for r in range(table.row_count)}
+        assert str(table.get_row_at(rows["acme"])[2]) == "wss://acme.example"
+        assert str(table.get_row_at(rows["acme"])[3]) == "?"
