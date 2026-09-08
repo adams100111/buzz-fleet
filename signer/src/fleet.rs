@@ -5,6 +5,10 @@ use std::time::Duration;
 use buzz_ws_client::connection::NostrWsConnection;
 use buzz_ws_client::message::RelayMessage;
 use nostr::{EventBuilder, JsonUtil};
+// Brings `sha256::Hash::hash(&[u8])` into scope for `run_query_http`'s NIP-98
+// payload digest -- `nostr::hashes` is the `bitcoin_hashes` crate the `nostr`
+// crate itself depends on and re-exports (see its `nip98` module).
+use nostr::hashes::Hash as _;
 use uuid::Uuid;
 
 /// A kind 9 channel message with optional NIP-10 thread markers, `p`
@@ -263,18 +267,13 @@ pub async fn run_read_managed_agents(
 /// - kind:20001 is itself in the ephemeral range (20000-29999) and is
 ///   explicitly "never stored" (`handlers/event.rs`'s
 ///   `handle_ephemeral_event`).
-/// - The HTTP bridge is a *separate* transport (`reqwest` + a NIP-98-style
+/// - The HTTP bridge is a *separate* transport (`reqwest` + a NIP-98
 ///   signed request, per upstream `buzz-cli`'s `BuzzClient`) from the
 ///   websocket connection every other subcommand in this file uses.
 ///
-/// Confirmed live against wss://buzz.eltahir.me: a `query` for both
-/// kind:40902 and kind:20001 (`authors` = known live agent pubkeys)
-/// returned zero events on this same websocket path, while an equivalent
-/// kind:0 query over the same connection succeeded -- so `read-presence`
-/// will return an empty list against every real relay today. Fixing this
-/// for real needs an HTTP-bridge client or a different design; that is an
-/// architectural decision outside this function's scope -- see
-/// task-18-report.md.
+/// This is why `run_read_presence` below goes over `run_query_http` (the
+/// HTTP bridge) rather than `collect_events` (the plain websocket REQ every
+/// other read in this file uses) -- see `run_query_http`'s own doc comment.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PresenceEntry {
     pub pubkey: String,
@@ -302,19 +301,96 @@ pub fn presence_from_events(events: &[nostr::Event]) -> Vec<PresenceEntry> {
     }).collect()
 }
 
+/// Rewrites a `ws://`/`wss://` relay URL to the `http://`/`https://` base
+/// the relay's HTTP bridge (`/query`, `/count`, `/events`, ...) is served
+/// from -- the inverse of upstream `buzz-cli`'s `to_ws_url`
+/// (`crates/buzz-cli/src/client.rs`), which goes the other way for its own
+/// ephemeral-event websocket fallback. Every `buzz-fleet-signer` caller
+/// hands this function the same `--relay` value already used for the
+/// websocket subcommands in this file, so `read-presence` needs no new CLI
+/// argument.
+fn ws_to_http_url(relay: &str) -> anyhow::Result<String> {
+    let http = if let Some(rest) = relay.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = relay.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        anyhow::bail!("relay URL {relay:?} must start with ws:// or wss://");
+    };
+    Ok(http.trim_end_matches('/').to_string())
+}
+
+/// One-shot `POST {relay}/query` over the relay's HTTP bridge, NIP-98-authed.
+///
+/// This is the transport `presence_from_events`'s doc comment (above)
+/// establishes is required: kind:40902/20001 presence is synthesized only
+/// inside `synthesize_presence` in the relay's HTTP `/query` handler
+/// (`crates/buzz-relay/src/api/bridge.rs`), never reachable over the plain
+/// NIP-01 websocket REQ `collect_events` speaks. Mirrors upstream
+/// `buzz-cli`'s `BuzzClient::query`/`sign_nip98`
+/// (`crates/buzz-cli/src/client.rs`) but built on the `nostr` crate's own
+/// `nip98` feature (`HttpData::to_authorization`) rather than hand-rolling
+/// event construction and base64 encoding a second time.
+///
+/// `filter` is wrapped in a single-element array, matching the bridge's
+/// `Vec<Filter>` request body (a caller ORing multiple filters together
+/// would need `query_multi`'s shape instead; no current subcommand needs
+/// that, so this function only exposes the one-filter case). The response
+/// body is a bare JSON array of Nostr events -- deserialized directly via
+/// `nostr::Event`'s own `Deserialize` impl, the same shape `collect_events`
+/// produces from the websocket path, so callers of either can share
+/// downstream parsing (`presence_from_events`, etc.).
+async fn run_query_http(
+    relay: &str, nsec: &str, auth_tag: Option<&nostr::Tag>, filter: nostr::Filter,
+) -> anyhow::Result<Vec<nostr::Event>> {
+    let keys = nostr::Keys::parse(nsec)?;
+    let base = ws_to_http_url(relay)?;
+    let url = format!("{base}/query");
+    let body = serde_json::to_vec(&[filter])?;
+
+    let http_url = nostr::Url::parse(&url).map_err(|e| anyhow::anyhow!("invalid relay URL {url:?}: {e}"))?;
+    let mut auth_data = nostr::nips::nip98::HttpData::new(http_url, nostr::nips::nip98::HttpMethod::POST);
+    auth_data = auth_data.payload(nostr::hashes::sha256::Hash::hash(&body));
+    let authorization = auth_data
+        .to_authorization(&keys)
+        .await
+        .map_err(|e| anyhow::anyhow!("NIP-98 signing failed: {e}"))?;
+
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(&url)
+        .header("Authorization", authorization)
+        .header("Content-Type", "application/json")
+        .body(body);
+    if let Some(tag) = auth_tag {
+        let tag_json = serde_json::to_string(tag)?;
+        req = req.header("x-auth-tag", tag_json);
+    }
+
+    let resp = req.send().await.map_err(|e| anyhow::anyhow!("query request failed: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| anyhow::anyhow!("failed to read query response: {e}"))?;
+    if !status.is_success() {
+        let message = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").or_else(|| v.get("message")).and_then(|m| m.as_str()).map(str::to_string))
+            .unwrap_or(text);
+        anyhow::bail!("relay query failed ({status}): {message}");
+    }
+    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("failed to parse query response: {e}"))
+}
+
 pub async fn run_read_presence(
     relay: &str, nsec: &str, auth_tag: Option<&nostr::Tag>, pubkeys: Vec<nostr::PublicKey>,
 ) -> anyhow::Result<Vec<PresenceEntry>> {
     // Matches `run_channel_members`'s own guard: an empty `authors` filter
-    // legitimately matches nothing, but there is no reason to open a
-    // connection and round-trip a REQ just to learn that.
+    // legitimately matches nothing, but there is no reason to round-trip a
+    // request just to learn that.
     if pubkeys.is_empty() {
         return Ok(vec![]);
     }
-    let keys = nostr::Keys::parse(nsec)?;
-    let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, auth_tag).await?;
-    let events = collect_events(&mut conn, nostr::Filter::new().kind(nostr::Kind::Custom(40902)).authors(pubkeys)).await?;
-    let _ = conn.disconnect().await;
+    let filter = nostr::Filter::new().kind(nostr::Kind::Custom(40902)).authors(pubkeys);
+    let events = run_query_http(relay, nsec, auth_tag, filter).await?;
     Ok(presence_from_events(&events))
 }
 
@@ -511,5 +587,197 @@ mod tests {
         assert_eq!(entries[0].pubkey, agent.public_key().to_hex());
         assert_eq!(entries[0].status, "online");
         assert_eq!(entries[0].updated_at, 1700);
+    }
+}
+
+#[cfg(test)]
+mod http_query_tests {
+    //! `run_query_http` is the HTTP-bridge transport `read-presence` needs
+    //! (see the doc comment on it below): a one-shot NIP-98-authed
+    //! `POST {relay}/query`, mirroring upstream `buzz-cli`'s
+    //! `BuzzClient::query`/`sign_nip98` (`crates/buzz-cli/src/client.rs`).
+    //! These tests run a real (hand-rolled, single-connection) HTTP/1.1
+    //! server on localhost and drive `run_query_http` against it end to
+    //! end, so they bind the actual production seam rather than a
+    //! test-only stand-in.
+    use super::*;
+    use nostr::Keys;
+    use std::collections::HashMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    /// `main.rs` installs the process-wide rustls `ring` `CryptoProvider`
+    /// exactly once, before the Tokio runtime starts -- `reqwest`'s
+    /// `rustls-no-provider` feature requires one to be installed before any
+    /// `Client` is built, but never installs one itself (see the Cargo.toml
+    /// comment on the `reqwest` dependency). The test binary never runs
+    /// `main()`, so each test that builds a `reqwest::Client` (via
+    /// `run_query_http`) must install it itself; `Once` keeps repeat calls
+    /// across tests in the same process from erroring on an already-set
+    /// provider.
+    fn ensure_crypto_provider() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    fn find_double_crlf(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    /// Binds an ephemeral localhost port, accepts exactly one HTTP/1.1
+    /// request, replies with `response_body` (200, application/json), and
+    /// hands back what it received. `response_body` must outlive the
+    /// spawned task, so callers pass a `'static` string (test fixtures are
+    /// small and short-lived; `Box::leak` is fine here).
+    async fn one_shot_server(
+        response_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<CapturedRequest>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let header_end = loop {
+                let n = socket.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = find_double_crlf(&buf) {
+                    break pos;
+                }
+            };
+            let header_text = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let mut lines = header_text.split("\r\n");
+            let request_line = lines.next().unwrap_or_default();
+            let mut parts = request_line.split_whitespace();
+            let method = parts.next().unwrap_or_default().to_string();
+            let path = parts.next().unwrap_or_default().to_string();
+            let mut headers = HashMap::new();
+            for line in lines {
+                if let Some((k, v)) = line.split_once(": ") {
+                    headers.insert(k.to_ascii_lowercase(), v.to_string());
+                }
+            }
+            let content_length: usize = headers
+                .get("content-length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            while buf.len() < body_start + content_length {
+                let n = socket.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let body = buf[body_start..body_start + content_length].to_vec();
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+
+            CapturedRequest { method, path, headers, body }
+        });
+        (format!("127.0.0.1:{}", addr.port()), handle)
+    }
+
+    #[tokio::test]
+    async fn run_query_http_posts_nip98_authed_query_and_parses_events() {
+        ensure_crypto_provider();
+        let signer_keys = Keys::generate();
+        let relay_keys = Keys::generate();
+        let subject = Keys::generate();
+        let event = EventBuilder::new(nostr::Kind::Custom(40902), "online")
+            .tag(nostr::Tag::parse(["p", &subject.public_key().to_hex()]).unwrap())
+            .custom_created_at(nostr::Timestamp::from(1700))
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+        let response_body: &'static str =
+            Box::leak(serde_json::to_string(&[event.clone()]).unwrap().into_boxed_str());
+
+        let (addr, handle) = one_shot_server(response_body).await;
+        let relay_ws_url = format!("ws://{addr}");
+        let filter = nostr::Filter::new().kind(nostr::Kind::Custom(40902)).authors([subject.public_key()]);
+
+        let events = run_query_http(&relay_ws_url, &signer_keys.secret_key().to_secret_hex(), None, filter)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, event.id);
+        assert_eq!(events[0].pubkey, relay_keys.public_key());
+
+        let req = handle.await.unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.path, "/query");
+        let auth = req.headers.get("authorization").expect("Authorization header present");
+        assert!(auth.starts_with("Nostr "), "auth header should carry a NIP-98 event: {auth}");
+        assert!(!req.headers.contains_key("x-auth-tag"), "no auth tag was passed");
+        let sent: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert!(sent.is_array(), "filter body must be wrapped in an array, matching buzz-cli's /query contract");
+    }
+
+    #[tokio::test]
+    async fn run_query_http_sends_x_auth_tag_header_when_auth_tag_present() {
+        ensure_crypto_provider();
+        let signer_keys = Keys::generate();
+        let response_body: &'static str = "[]";
+        let (addr, handle) = one_shot_server(response_body).await;
+        let relay_ws_url = format!("ws://{addr}");
+        let auth_tag = nostr::Tag::parse(["auth", &"a".repeat(64), "", &"b".repeat(128)]).unwrap();
+        let filter = nostr::Filter::new().kind(nostr::Kind::Custom(40902));
+
+        let events = run_query_http(&relay_ws_url, &signer_keys.secret_key().to_secret_hex(), Some(&auth_tag), filter)
+            .await
+            .unwrap();
+        assert!(events.is_empty());
+
+        let req = handle.await.unwrap();
+        let header = req.headers.get("x-auth-tag").expect("x-auth-tag header present");
+        assert_eq!(header, &serde_json::to_string(&auth_tag).unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_read_presence_uses_the_http_bridge_and_reads_the_p_tag_subject() {
+        ensure_crypto_provider();
+        // End-to-end through the public `read-presence` entry point: this is
+        // the real regression this task exists to fix -- kind:40902 was
+        // never reachable at all over the plain websocket REQ path
+        // `presence_from_events`'s doc comment above documents live evidence
+        // for. `run_read_presence` must now go over HTTP, not the socket.
+        let relay_keys = Keys::generate();
+        let subject = Keys::generate();
+        let event = EventBuilder::new(nostr::Kind::Custom(40902), "away")
+            .tag(nostr::Tag::parse(["p", &subject.public_key().to_hex()]).unwrap())
+            .custom_created_at(nostr::Timestamp::from(4200))
+            .sign_with_keys(&relay_keys)
+            .unwrap();
+        let response_body: &'static str =
+            Box::leak(serde_json::to_string(&[event]).unwrap().into_boxed_str());
+        let (addr, _handle) = one_shot_server(response_body).await;
+        let relay_ws_url = format!("ws://{addr}");
+        let signer_keys = Keys::generate();
+
+        let presence = run_read_presence(
+            &relay_ws_url,
+            &signer_keys.secret_key().to_secret_hex(),
+            None,
+            vec![subject.public_key()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(presence.len(), 1);
+        assert_eq!(presence[0].pubkey, subject.public_key().to_hex());
+        assert_eq!(presence[0].status, "away");
+        assert_eq!(presence[0].updated_at, 4200);
     }
 }
