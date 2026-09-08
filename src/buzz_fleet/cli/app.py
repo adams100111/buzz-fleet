@@ -468,11 +468,7 @@ def community_use(
     """Set the active community for this machine."""
     ids = state.list_community_ids()
     if community_id not in ids:
-        # Printed to stdout, not stderr: this is a validation rejection the
-        # user is meant to read and act on directly (it names the known
-        # ids), not a stack-trace-style failure — same reasoning as the
-        # plain `no active community` message below.
-        typer.echo(f"No community {community_id!r}. Known: {', '.join(ids) or 'none'}")
+        typer.echo(f"No community {community_id!r}. Known: {', '.join(ids) or 'none'}", err=True)
         raise typer.Exit(code=1)
     state.save_active_community(community_id)
     typer.echo(f"Active community: {community_id}")
@@ -483,7 +479,7 @@ def community_show() -> None:
     """Show the active community, its relay, and how many agents it has."""
     active = _active_or_none()
     if active is None:
-        typer.echo("No active community. Run `buzz-fleet community use <id>`.")
+        typer.echo("No active community. Run `buzz-fleet community use <id>`.", err=True)
         raise typer.Exit(code=1)
     community = state.load_community(active)
     if community is None:
