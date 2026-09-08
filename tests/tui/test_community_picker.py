@@ -1,8 +1,10 @@
 """The picker writes the same active-community pointer that
 `buzz-fleet community use` writes. One source of truth, two front doors."""
 
+import os
 from unittest.mock import MagicMock
 
+import pytest
 from pydantic import SecretStr
 
 from buzz_fleet import paths, state
@@ -131,3 +133,37 @@ async def test_corrupt_agent_file_shows_unreadable_agent_count(monkeypatch, tmp_
         rows = {str(table.get_row_at(r)[1]): r for r in range(table.row_count)}
         assert str(table.get_row_at(rows["acme"])[2]) == "wss://acme.example"
         assert str(table.get_row_at(rows["acme"])[3]) == "?"
+
+
+async def test_unreadable_secrets_file_still_appears_and_is_selectable(
+    monkeypatch, tmp_path
+) -> None:
+    # _read_merged's Path.read_text() calls run before any json.loads or
+    # pydantic validation and have no error handling of their own -- a
+    # wrong-mode or root-owned secrets file (a clumsy restore, say) raises
+    # PermissionError, an OSError, not a ValueError. This is the exact case
+    # that motivated catching OSError alongside ValueError: the row must
+    # still appear and still be selectable, not just for a parse failure.
+    if os.geteuid() == 0:
+        pytest.skip("root ignores file mode bits, so this file would still read fine")
+    _connect(monkeypatch, tmp_path, "eltahir")
+    _connect(monkeypatch, tmp_path, "acme")
+    secrets_path = paths.secrets_dir() / "communities" / "acme.json"
+    secrets_path.chmod(0o000)
+    try:
+        app = BuzzFleetApp()
+        async with app.run_test() as pilot:
+            await app.push_screen(CommunityPickerScreen("eltahir"))
+            await pilot.pause()
+            table = app.screen.query_one("#community-table")
+            rows = {str(table.get_row_at(r)[1]): r for r in range(table.row_count)}
+            assert rows.keys() == {"eltahir", "acme"}
+            assert str(table.get_row_at(rows["acme"])[2]) == "<unreadable>"
+
+            table.move_cursor(row=rows["acme"])
+            await pilot.press("enter")
+            await pilot.pause()
+
+        assert state.load_active_community() == "acme"
+    finally:
+        secrets_path.chmod(0o600)
