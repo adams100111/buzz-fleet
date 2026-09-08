@@ -94,7 +94,10 @@ def ensure_template_unit_installed(runner: CommandRunner) -> bool:
     current = path.read_text() if path.exists() else None
     if current == rendered:
         return False
-    atomic.write_secure(path, rendered, mode=0o644)
+    # dir_mode=0o755, not atomic.write_secure's 0o700 default: ~/.config/
+    # systemd/user/ is systemd's own namespace, shared with every other
+    # user unit on the machine — not buzz-fleet's to mode restrictively.
+    atomic.write_secure(path, rendered, mode=0o644, dir_mode=0o755)
     runner.run(["systemctl", "--user", "daemon-reload"])
     return True
 
@@ -293,8 +296,14 @@ def _write_pi_agent_dir(agent: Agent) -> Path:
     return pi_dir
 
 
-def env_line(key: str, value: str) -> str:
+def env_line(name: str, value: str) -> str:
     """One KEY=value line for a systemd EnvironmentFile.
+
+    Parameter named `name`, not `key` — this file also has a `key` meaning
+    "community-qualified instance key" (see `write_agent_files`), and the
+    two must never collide in the same scope (a prior version of this file
+    shadowed the instance `key` with a per-agent env-var loop variable of
+    the same name; see `write_agent_files`'s `env_key` loop below).
 
     systemd stops an unquoted value at the first newline (real incident: a
     multi-paragraph BUZZ_ACP_TEAM_INSTRUCTIONS reached the agent as its first
@@ -303,9 +312,9 @@ def env_line(key: str, value: str) -> str:
     env files are byte-identical.
     """
     if "\n" not in value:
-        return f"{key}={value}"
+        return f"{name}={value}"
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'{key}="{escaped}"'
+    return f'{name}="{escaped}"'
 
 
 def write_agent_files(
@@ -316,6 +325,12 @@ def write_agent_files(
     auth_tag: str | None = None,
 ) -> None:
     key = units.instance_key(agent.community_id, agent.id)
+    # A malformed community id (e.g. containing "/" or "..", never validated
+    # at connect time — that's Task 7's job) would otherwise interpolate
+    # straight into agent_env_path/agent_prompt_path/work_dir below and
+    # write BUZZ_PRIVATE_KEY outside paths.secrets_dir() before unit_name
+    # ever gets a chance to reject it at enable_now. Fail before any write.
+    units.validate_instance_key(key)
     work_dir(key).mkdir(parents=True, exist_ok=True)
 
     prompt_path = agent_prompt_path(key)

@@ -141,10 +141,34 @@ def test_unit_name_is_community_qualified() -> None:
 
 
 def test_two_communities_address_different_units() -> None:
-    runner = RecordingRunner()
-    systemctl_client.stop(runner, units.instance_key("eltahir", "reviewer"))
-    systemctl_client.stop(runner, units.instance_key("acme", "reviewer"))
-    assert runner.calls[0] != runner.calls[1]
+    """Discriminating regression test for the actual defect this phase
+    exists to close: `AgentManager._key` for two communities that happen to
+    share an agent id must resolve to two distinct, exact unit strings, not
+    merely "not equal to each other" (which `_unit` was always injective
+    enough to satisfy even before instance keys existed — the old defect
+    was never in `_unit`, it was that callers handed it a bare `agent.id`).
+    This fails against the pre-Task-4 code, where both managers would
+    resolve to the same `buzz-agent@reviewer.service`.
+    """
+    from buzz_fleet.manager import AgentManager
+    from buzz_fleet.models import Community
+
+    eltahir = Community(id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1a")
+    acme = Community(id="acme", relay_url="wss://buzz.acme.example", relay_admin_nsec="nsec1b")
+    eltahir_runner = RecordingRunner()
+    acme_runner = RecordingRunner()
+    eltahir_manager = AgentManager(eltahir_runner, eltahir)
+    acme_manager = AgentManager(acme_runner, acme)
+
+    systemctl_client.restart(eltahir_runner, eltahir_manager._key("reviewer"))
+    systemctl_client.restart(acme_runner, acme_manager._key("reviewer"))
+
+    assert eltahir_runner.calls == [
+        ["systemctl", "--user", "restart", "buzz-agent@eltahir:reviewer.service"]
+    ]
+    assert acme_runner.calls == [
+        ["systemctl", "--user", "restart", "buzz-agent@acme:reviewer.service"]
+    ]
 
 
 def test_status_reads_the_qualified_unit() -> None:

@@ -749,3 +749,61 @@ def test_env_file_is_written_0600(monkeypatch, tmp_path: Path) -> None:
     target = paths.secrets_dir() / "units" / "eltahir:reviewer.env"
     atomic.write_secure(target, "BUZZ_PRIVATE_KEY=nsec1x")
     assert oct(target.stat().st_mode & 0o777) == "0o600"
+
+
+def test_two_communities_with_the_same_agent_id_write_distinct_secrets(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The literal defect this whole phase exists to close: two communities
+    each with a "reviewer" agent must never collide on one unit's files.
+    Before instance keys, both of these calls wrote
+    ~/.config/buzz-fleet/agents/reviewer.env — whichever `write_agent_files`
+    call ran last silently decided which community's private key
+    `buzz-agent@reviewer.service` loaded. Task 8's live-fleet migration
+    proceeds on the assumption this is now impossible; this test is the
+    direct proof, not an inference from a single-community test plus a
+    unit-name uniqueness test.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr("buzz_fleet.harnesses.shutil.which", lambda cmd: None)
+
+    from pydantic import SecretStr
+
+    eltahir_agent = _agent().model_copy(
+        update={
+            "community_id": "eltahir",
+            "id": "reviewer",
+            "private_key": SecretStr("nsec1eltahirkey"),
+        }
+    )
+    acme_agent = _agent().model_copy(
+        update={
+            "community_id": "acme",
+            "id": "reviewer",
+            "private_key": SecretStr("nsec1acmekey"),
+        }
+    )
+    eltahir_community = Community(
+        id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1admin"
+    )
+    acme_community = Community(
+        id="acme", relay_url="wss://buzz.acme.example", relay_admin_nsec="nsec1admin2"
+    )
+
+    write_agent_files(eltahir_agent, eltahir_community, None, None)
+    write_agent_files(acme_agent, acme_community, None, None)
+
+    eltahir_env_path = agent_env_path(units.instance_key("eltahir", "reviewer"))
+    acme_env_path = agent_env_path(units.instance_key("acme", "reviewer"))
+
+    assert eltahir_env_path != acme_env_path
+    assert eltahir_env_path.exists()
+    assert acme_env_path.exists()
+
+    eltahir_content = eltahir_env_path.read_text()
+    acme_content = acme_env_path.read_text()
+    assert "BUZZ_PRIVATE_KEY=nsec1eltahirkey" in eltahir_content
+    assert "BUZZ_PRIVATE_KEY=nsec1acmekey" in acme_content
+    assert "BUZZ_PRIVATE_KEY=nsec1acmekey" not in eltahir_content
+    assert "BUZZ_PRIVATE_KEY=nsec1eltahirkey" not in acme_content
