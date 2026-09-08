@@ -403,10 +403,18 @@ Shows a connect screen if no community is set up yet, otherwise a live
 dashboard of agents and their systemd status. Bindings: `c` create, `u`
 edit (display name and/or prompt — editing a persona-file agent without
 touching the prompt field leaves its persona file alone), `x` (or `Delete`)
-delete, `l` view live logs. `esc` cancels the create/edit form or closes the
-log view without side effects. Delete is destructive and not undoable, so
-`x`/`Delete` opens a confirmation dialog first (`y`/click Delete to confirm,
-`n`/`esc`/click Cancel to back out) rather than deleting on the keypress.
+delete, `l` view live logs, `s` switch community. `esc` cancels the
+create/edit form or closes the log view without side effects. Delete is
+destructive and not undoable, so `x`/`Delete` opens a confirmation dialog
+first (`y`/click Delete to confirm, `n`/`esc`/click Cancel to back out)
+rather than deleting on the keypress.
+
+`s` opens a picker listing every connected community (marking the active one
+with `*`), its relay URL, and its agent count. Enter switches to it and
+rebuilds the dashboard around it; `esc` cancels without changing anything.
+The picker writes the active community through the same
+`state.save_active_community` function `buzz-fleet community use` calls, so
+the CLI and the TUI can never disagree about which community is active.
 
 When creating an agent (`c`), the form shows a template dropdown that lists
 all `.persona.md` and `.agent.json` files from `~/.config/buzz-fleet/personas`

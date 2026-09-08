@@ -18,6 +18,7 @@ from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.systemctl_client import status as systemctl_status
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
+from buzz_fleet.tui.screens.community_picker import CommunityPickerScreen
 from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 from buzz_fleet.tui.screens.logs import LogsScreen
 from buzz_fleet.tui.theme import PANEL_BORDER, STATUS_INACTIVE
@@ -74,6 +75,7 @@ class DashboardScreen(Screen):
         Binding("x", "delete_agent", "Delete agent"),
         Binding("delete", "delete_agent", "Delete agent", show=False),
         Binding("l", "view_logs", "View logs"),
+        Binding("s", "switch_community", "Switch community"),
     ]
 
     def __init__(self, community_id: str) -> None:
@@ -185,3 +187,13 @@ class DashboardScreen(Screen):
         if agent_id is None:
             return
         self.app.push_screen(LogsScreen(units.instance_key(self._community_id, agent_id)))
+
+    def action_switch_community(self) -> None:
+        def on_chosen(chosen: str | None) -> None:
+            # Rebuilding the screen is deliberate: every widget on it is bound
+            # to one community's agents, so switching in place would mean
+            # resetting each of them by hand.
+            if chosen is not None and chosen != self._community_id:
+                self.app.switch_screen(DashboardScreen(chosen))
+
+        self.app.push_screen(CommunityPickerScreen(self._community_id), on_chosen)
