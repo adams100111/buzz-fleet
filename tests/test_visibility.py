@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from buzz_fleet import __version__
 from buzz_fleet.models import Agent, AgentVisibilityState, SystemPromptSource
 from buzz_fleet.visibility import (
     classify_signer_error,
@@ -87,6 +88,28 @@ def test_managed_agent_content_prepends_team_instructions() -> None:
     agent = _agent(team_instructions="Test-first. Strict typing.")
     content = managed_agent_content(agent)
     assert content["system_prompt"] == "Test-first. Strict typing.\n\nYou are a test agent."
+
+
+def test_managed_agent_content_includes_host(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.visibility.socket.gethostname", lambda: "mod-sol")
+    content = managed_agent_content(_agent())
+    assert content["host"] == "mod-sol"
+
+
+def test_managed_agent_content_includes_directory_fields() -> None:
+    agent = _agent().model_copy(
+        update={"role": "reviewer", "capabilities": ["laravel"], "description": "Reviews."}
+    )
+    content = managed_agent_content(agent)
+    assert content["role"] == "reviewer" and content["capabilities"] == ["laravel"] and content["description"] == "Reviews."
+    empty = managed_agent_content(_agent())
+    assert empty["role"] is None and empty["capabilities"] == [] and empty["description"] is None
+
+
+def test_managed_agent_content_includes_harness_and_version() -> None:
+    content = managed_agent_content(_agent(harness="codex"))
+    assert content["harness"] == "codex"
+    assert content["version"] == __version__
 
 
 def test_visibility_status_text_old_agent_shows_dash() -> None:

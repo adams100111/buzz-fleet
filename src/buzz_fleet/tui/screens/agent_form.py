@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -11,11 +11,58 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Select, Static, TextArea
 
 from buzz_fleet import harnesses, personas
-from buzz_fleet.manager import AgentManager
-from buzz_fleet.models import Agent, SystemPromptSource
+from buzz_fleet.models import Agent, McpServer, SystemPromptSource
 from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.tui.theme import SECTION_CSS
 from buzz_fleet.tui.theme import section as _section
+
+
+class _AgentCreator(Protocol):
+    """Structural type for the only two things this screen actually calls
+    on its manager. Narrower than the concrete `AgentManager` on purpose:
+    a test double only needs to implement `create_agent`/`update_agent` to
+    stand in for one here, rather than needing an is-a relationship with
+    the real class (which requires a `CommandRunner` and a `Community`,
+    both irrelevant to what this screen exercises).
+
+    `create_agent`'s parameter list mirrors `AgentManager.create_agent`'s
+    real signature exactly (rather than a generic `**kwargs: object`) so
+    the real class still satisfies this protocol — a protocol method typed
+    `**kwargs: object` is a poor match for a concrete method with specific
+    keyword-only parameters; mypy does not consider the latter a subtype of
+    the former. A test double's own `**kwargs`-typed method remains
+    compatible with a protocol requiring specific keywords, since it
+    genuinely accepts a superset of what's required here.
+    """
+
+    def create_agent(
+        self,
+        *,
+        display_name: str,
+        harness: str,
+        system_prompt_source: SystemPromptSource,
+        team_instructions: str | None = None,
+        model: str | None = None,
+        parallelism: int | None = None,
+        idle_timeout_seconds: int | None = None,
+        max_turn_duration_seconds: int | None = None,
+        respond_to_allowlist: list[str] | None = None,
+        session_policy: str | None = None,
+        max_turns_per_session: int | None = None,
+        heartbeat_interval_seconds: int | None = None,
+        role: str | None = None,
+        capabilities: list[str] | None = None,
+        description: str | None = None,
+        channel_ids: list[str] | None = None,
+        channel_add_policy: str | None = None,
+        anthropic_api_key: str | None = None,
+        openai_api_key: str | None = None,
+        env: dict[str, str] | None = None,
+        mcp_server: McpServer | None = None,
+        force: bool = False,
+    ) -> Agent: ...
+
+    def update_agent(self, agent_id: str, **changes: object) -> Agent: ...
 
 
 class AgentFormScreen(Screen):
@@ -37,7 +84,7 @@ class AgentFormScreen(Screen):
         Binding("escape", "cancel", "Cancel"),
     ]
 
-    def __init__(self, manager: AgentManager, agent: Agent | None = None) -> None:
+    def __init__(self, manager: _AgentCreator, agent: Agent | None = None) -> None:
         super().__init__()
         self._manager = manager
         self._agent = agent
@@ -102,6 +149,25 @@ class AgentFormScreen(Screen):
                 id="harness-select",
             )
             yield install_button
+            yield Input(
+                value=self._agent.role if self._agent and self._agent.role else "",
+                placeholder="Role (optional, e.g. reviewer)",
+                id="role-input",
+            )
+            yield Input(
+                value=(
+                    ", ".join(self._agent.capabilities)
+                    if self._agent and self._agent.capabilities
+                    else ""
+                ),
+                placeholder="Capabilities, comma-separated (optional)",
+                id="capabilities-input",
+            )
+            yield Input(
+                value=self._agent.description if self._agent and self._agent.description else "",
+                placeholder="Description (optional)",
+                id="description-input",
+            )
 
         with _section("Behavior"):
             yield TextArea(text=prompt_text, placeholder="System prompt", id="prompt-input")
@@ -142,6 +208,35 @@ class AgentFormScreen(Screen):
                 placeholder="Max turn duration seconds (optional)",
                 id="max-turn-duration-input",
             )
+            yield Input(
+                value=(
+                    str(self._agent.max_turns_per_session)
+                    if self._agent and self._agent.max_turns_per_session is not None
+                    else ""
+                ),
+                placeholder="Max turns per session (default 40)",
+                id="max-turns-per-session-input",
+            )
+            yield Input(
+                value=(
+                    str(self._agent.heartbeat_interval_seconds)
+                    if self._agent and self._agent.heartbeat_interval_seconds is not None
+                    else ""
+                ),
+                placeholder="Heartbeat interval seconds (default 900)",
+                id="heartbeat-interval-input",
+            )
+            yield Static("Session policy:")
+            yield Select(
+                [("thread (default)", "thread"), ("channel", "channel")],
+                value=(
+                    self._agent.session_policy
+                    if self._agent and self._agent.session_policy
+                    else "thread"
+                ),
+                allow_blank=False,
+                id="session-policy-select",
+            )
 
         with _section("Access"):
             yield Input(
@@ -168,6 +263,35 @@ class AgentFormScreen(Screen):
                 ),
                 allow_blank=False,
                 id="channel-add-policy-select",
+            )
+
+        with _section("Integrations"):
+            # Secrets are masked, never shown in the clear: an existing env
+            # var is pre-filled as KEY=******** and only replaced if the
+            # user actually types a new value for that key (see
+            # _resolve_env, called from on_button_pressed) — the same
+            # masking discipline as the CLI/TUI's other secret-bearing fields.
+            env_text = ""
+            if self._agent and self._agent.env:
+                env_text = "\n".join(f"{key}=********" for key in self._agent.env)
+            yield TextArea(text=env_text, placeholder="KEY=VALUE per line (optional)", id="env-input")
+
+            yield Static("MCP server (optional, buzz-acp supports one):")
+            mcp_server = self._agent.mcp_server if self._agent else None
+            yield Input(
+                value=mcp_server.name if mcp_server else "",
+                placeholder="MCP server name",
+                id="mcp-name-input",
+            )
+            yield Input(
+                value=mcp_server.command if mcp_server else "",
+                placeholder="MCP server command",
+                id="mcp-command-input",
+            )
+            yield Input(
+                value=", ".join(mcp_server.args) if mcp_server else "",
+                placeholder="MCP server args, comma-separated (optional)",
+                id="mcp-args-input",
             )
 
         yield Button("Update" if self._agent else "Create", id="submit-button", variant="primary")
@@ -202,8 +326,24 @@ class AgentFormScreen(Screen):
             if template.max_turn_duration_seconds is not None
             else ""
         )
+        self.query_one("#description-input", Input).value = template.description or ""
         # respond_to_allowlist is deliberately never pre-filled from a
-        # template — see the design spec.
+        # template — see the design spec. role/capabilities have no template
+        # source (no persona format carries either) so they're left alone.
+        # env is plain text here (never masked) — this is create mode, so
+        # there is no existing secret to protect yet.
+        self.query_one("#env-input", TextArea).text = (
+            "\n".join(f"{k}={v}" for k, v in template.env.items()) if template.env else ""
+        )
+        self.query_one("#mcp-name-input", Input).value = (
+            template.mcp_server.name if template.mcp_server else ""
+        )
+        self.query_one("#mcp-command-input", Input).value = (
+            template.mcp_server.command if template.mcp_server else ""
+        )
+        self.query_one("#mcp-args-input", Input).value = (
+            ", ".join(template.mcp_server.args) if template.mcp_server else ""
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "install-adapter-button":
@@ -216,6 +356,12 @@ class AgentFormScreen(Screen):
         harness = self.query_one("#harness-select", Select).value
         team_instructions = self.query_one("#team-instructions-input", TextArea).text.strip() or None
         model = self.query_one("#model-input", Input).value.strip() or None
+        role = self.query_one("#role-input", Input).value.strip() or None
+        capabilities_raw = self.query_one("#capabilities-input", Input).value.strip()
+        capabilities = (
+            [cap.strip() for cap in capabilities_raw.split(",") if cap.strip()] if capabilities_raw else None
+        )
+        description = self.query_one("#description-input", Input).value.strip() or None
         respond_to_raw = self.query_one("#respond-to-allowlist-input", Input).value.strip()
         respond_to_allowlist = (
             [key.strip() for key in respond_to_raw.split(",") if key.strip()]
@@ -227,16 +373,30 @@ class AgentFormScreen(Screen):
             parallelism = self._parse_optional_int("#parallelism-input")
             idle_timeout_seconds = self._parse_optional_int("#idle-timeout-input")
             max_turn_duration_seconds = self._parse_optional_int("#max-turn-duration-input")
+            max_turns_per_session = self._parse_optional_int("#max-turns-per-session-input")
+            heartbeat_interval_seconds = self._parse_optional_int("#heartbeat-interval-input")
             channel_ids = self._parse_optional_uuid_list("#channel-ids-input")
         except ValueError:
             self.notify(
-                "Parallelism, idle timeout, max turn duration must be whole numbers, "
-                "and channel IDs must be valid UUIDs.",
+                "Parallelism, idle timeout, max turn duration, max turns per session, "
+                "heartbeat interval must be whole numbers, and channel IDs must be valid UUIDs.",
                 severity="error",
             )
             return
 
+        try:
+            env = self._resolve_env()
+            mcp_server = self._resolve_mcp_server()
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
+
         channel_add_policy = self.query_one("#channel-add-policy-select", Select).value
+        session_policy_value = self.query_one("#session-policy-select", Select).value
+        # allow_blank=False on this select means Select.BLANK (NoSelection)
+        # can never actually reach here — narrow to str so create_agent's
+        # str | None parameter is satisfied without a type: ignore.
+        session_policy = session_policy_value if isinstance(session_policy_value, str) else None
 
         try:
             if self._agent is not None:
@@ -249,8 +409,16 @@ class AgentFormScreen(Screen):
                     "idle_timeout_seconds": idle_timeout_seconds,
                     "max_turn_duration_seconds": max_turn_duration_seconds,
                     "respond_to_allowlist": respond_to_allowlist,
+                    "session_policy": session_policy,
+                    "max_turns_per_session": max_turns_per_session,
+                    "heartbeat_interval_seconds": heartbeat_interval_seconds,
+                    "role": role,
+                    "capabilities": capabilities,
+                    "description": description,
                     "channel_ids": channel_ids,
                     "channel_add_policy": channel_add_policy,
+                    "env": env,
+                    "mcp_server": mcp_server,
                 }
                 # Only touch system_prompt_source if the user actually edited the
                 # prompt field. This is the fix for the v1 bug where editing only
@@ -275,8 +443,16 @@ class AgentFormScreen(Screen):
                     idle_timeout_seconds=idle_timeout_seconds,
                     max_turn_duration_seconds=max_turn_duration_seconds,
                     respond_to_allowlist=respond_to_allowlist,
+                    session_policy=session_policy,
+                    max_turns_per_session=max_turns_per_session,
+                    heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    role=role,
+                    capabilities=capabilities,
+                    description=description,
                     channel_ids=channel_ids,
                     channel_add_policy=channel_add_policy,
+                    env=env,
+                    mcp_server=mcp_server,
                 )
         except ValueError as e:
             # e.g. a blank/punctuation-only display name (agent_slug raises)
@@ -300,6 +476,49 @@ class AgentFormScreen(Screen):
         for entry in ids:
             uuid.UUID(entry)  # raises ValueError on malformed input
         return ids or None
+
+    def _resolve_env(self) -> dict[str, str] | None:
+        """Parse the env TextArea's KEY=VALUE lines, un-masking any line
+        whose value is still the literal `********` placeholder back to the
+        real secret it displayed for — only a line the user actually
+        changed carries a new value through. A key with no prior value
+        (create mode, or a key the user just added) keeps whatever they
+        typed, masked-looking or not — there is nothing to un-mask it from.
+        """
+        raw = self.query_one("#env-input", TextArea).text
+        original = self._agent.env if self._agent else None
+        resolved: dict[str, str] = {}
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "=" not in stripped:
+                raise ValueError(f"Invalid env line {stripped!r} — expected KEY=VALUE.")
+            key, value = stripped.split("=", 1)
+            if value == "********" and original and key in original:
+                value = original[key].get_secret_value()
+            resolved[key] = value
+        return resolved or None
+
+    def _resolve_mcp_server(self) -> McpServer | None:
+        """Build the MCP server from the three plain inputs, or None if all
+        three are blank. The TUI has no field for the MCP server's own env
+        vars (CLI-only, via --mcp-env) — an existing one is carried forward
+        unedited rather than silently dropped just because the user changed
+        something else on the form and resubmitted.
+        """
+        name = self.query_one("#mcp-name-input", Input).value.strip() or None
+        command = self.query_one("#mcp-command-input", Input).value.strip() or None
+        args_raw = self.query_one("#mcp-args-input", Input).value.strip()
+        args = [arg.strip() for arg in args_raw.split(",") if arg.strip()] if args_raw else []
+        if name is None and command is None and not args:
+            return None
+        if name is None or command is None:
+            raise ValueError("MCP server name and command must both be set (or both left blank).")
+        preserved_env = (
+            self._agent.mcp_server.env if self._agent and self._agent.mcp_server else {}
+        )
+        return McpServer(name=name, command=command, args=args, env=preserved_env)
 
     def _install_selected_harness_adapter(self) -> None:
         harness = self.query_one("#harness-select", Select).value

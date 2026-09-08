@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import BaseModel, SecretStr
 
 from buzz_fleet.models import Agent, Community
 
@@ -30,25 +30,31 @@ def _serialize_with_secrets(obj: Community | Agent) -> str:
     """
     data = obj.model_dump(mode="json")
 
-    # Recursively find and patch masked SecretStr placeholders with actual values
-    def patch_secrets(obj_data: dict, original_obj: Community | Agent) -> dict:
+    # Recursively find and patch masked SecretStr placeholders with actual
+    # values, walking the *original* (unmasked) model alongside the dumped
+    # JSON dict so every field is patched using its own real type rather than
+    # guessing from the serialized shape (mode="json" turns every SecretStr —
+    # top-level or nested any number of levels deep, plain or inside a dict —
+    # into the literal string "**********").
+    def patch_secrets(obj_data: dict, original_obj: BaseModel) -> dict:
         for field_name, field_value in obj_data.items():
-            if field_value == "**********":
-                # This is a masked SecretStr; get the actual value from original object
-                original_field = getattr(original_obj, field_name, None)
-                if isinstance(original_field, SecretStr):
+            original_field = getattr(original_obj, field_name, None)
+            if isinstance(original_field, SecretStr):
+                if field_value == "**********":
                     obj_data[field_name] = original_field.get_secret_value()
-            elif isinstance(field_value, dict):
-                # Recurse into nested dicts (e.g., system_prompt_source)
-                nested_original = getattr(original_obj, field_name, None)
-                if nested_original is not None:
-                    patch_secrets(field_value, nested_original)
-            elif isinstance(field_value, list):
-                # Handle lists if needed
-                for item in field_value:
-                    if isinstance(item, dict):
-                        # This is a simplified approach; full recursion would need more context
-                        pass
+            elif isinstance(original_field, BaseModel):
+                # A nested model (e.g. system_prompt_source, mcp_server) —
+                # recurse using the real sub-model as the new "original".
+                if isinstance(field_value, dict):
+                    patch_secrets(field_value, original_field)
+            elif isinstance(original_field, dict) and isinstance(field_value, dict):
+                # A dict field whose values may themselves be SecretStr (e.g.
+                # Agent.env, McpServer.env) — patch each masked entry using
+                # the real dict's values, not another recursive dict walk
+                # (its values are secrets, not nested models).
+                for key, original_value in original_field.items():
+                    if isinstance(original_value, SecretStr) and field_value.get(key) == "**********":
+                        field_value[key] = original_value.get_secret_value()
         return obj_data
 
     patch_secrets(data, obj)
@@ -65,6 +71,11 @@ def load_community(community_id: str) -> Community | None:
     if not path.exists():
         return None
     return Community.model_validate_json(path.read_text())
+
+
+def list_community_ids() -> list[str]:
+    directory = CONFIG_DIR / "communities"
+    return sorted(p.stem for p in directory.glob("*.json")) if directory.exists() else []
 
 
 def _agents_dir(community_id: str) -> Path:

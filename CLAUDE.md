@@ -118,8 +118,44 @@ actually running a live agent end-to-end, not by code review:
    immediately after rebuilding with this fix, and a real stuck-`pending`
    agent (created between concerns 6 and 7 shipping) self-healed to `synced`
    on the very next `ensure_runtime_ready()` call with no other action taken.
+8. **`buzz` itself wasn't on any agent's `PATH`, so an agent could see it had
+   been mentioned but had no way to actually invoke `buzz` to reply.** Sprig's
+   multicall binary (`buzz-acp`, see concern 1) also dispatches as `buzz` via
+   `argv[0]`, but nothing made a `buzz` command resolve inside a systemd
+   `--user` unit's restricted `PATH` — the binary on disk is named
+   `buzz-acp`, not `buzz`. Fixed by `buzz_acp.ensure_buzz_cli_link()`:
+   symlinks `~/.local/share/buzz-fleet/bin/buzz` to the installed `buzz-acp`
+   binary (replacing a dangling or stale link if one exists), called
+   unconditionally from `ensure_runtime_ready()` alongside the existing
+   `buzz-acp` install check. `TEMPLATE_UNIT` also now sets
+   `Environment=PATH=<bin dir>:/usr/local/bin:/usr/bin:/bin` and
+   `WorkingDirectory=<work dir>/%i` explicitly in the unit file itself, since
+   a `--user` unit only picks up `Environment=`/`WorkingDirectory=` from its
+   own file at start, never from the parent shell that ran `systemctl`.
+   `ensure_template_unit_installed` now reports whether it actually rewrote
+   the template so `ensure_runtime_ready()` can restart every managed agent
+   when the template itself changed, the same way it already does for a
+   per-agent env-file change.
+9. **A multi-line env value like `BUZZ_ACP_TEAM_INSTRUCTIONS` was silently
+   truncated to its first line.** systemd's own `EnvironmentFile` parsing
+   stops an unquoted value at the first newline — a live agent's real,
+   multi-paragraph team instructions (3,625 bytes) reached it as 47 bytes,
+   its first line only, with no error anywhere in the unit's logs. Fixed by
+   `systemd.env_line(key, value)`: a value with no newline is written
+   unquoted (byte-identical to before this fix); a value that does contain
+   one is wrapped in double quotes with embedded `\` and `"` escaped, which
+   systemd's parser accepts as spanning multiple lines. Every `KEY=value`
+   line `write_agent_files` writes now goes through `env_line` instead of a
+   bare f-string. Confirmed live: after the fix, `/proc/<pid>/environ`
+   carried the full 3,597-byte value (the 1-byte difference from the source
+   file is `$(...)` stripping its trailing newline, not truncation) and the
+   unit stayed `active`/`running` across the restart. Unlike concerns
+   1–5/7/8, this one is preventive at write time, not a runtime healing
+   loop — there is no "detect a truncated env file and repair it" step,
+   since every write of an agent's env file already writes it fresh from the
+   current model.
 
-Concerns 1–5 and 7 heal automatically through `ensure_runtime_ready()` — no
+Concerns 1–5, 7, and 8 heal automatically through `ensure_runtime_ready()` — no
 CLI flag, no doc a user has to know to run; it only rewrites/restarts an
 agent when something it actually needs changed (a resolved command differs
 from what's on disk, or the owner pubkey was just backfilled), never on an
@@ -130,24 +166,37 @@ stuck-`pending` agent self-heals to `synced` the next time it runs — no
 special-casing needed beyond the underlying signer fix itself). Concern 6
 is preventive (fixed in `create_agent`/`delete_agent` directly, not in
 `ensure_runtime_ready`) — it has no retroactive backfill, per the note
-above.
+above. Concern 9 is likewise preventive (fixed in `systemd.env_line` at
+write time) rather than a runtime healing loop — see its own entry above for
+why there's nothing to detect-and-repair after the fact.
 
 ## Known gaps / future work
 
-- **No per-agent MCP server support, and no generic per-agent env-var
-  passthrough.** `.persona.md` files can declare `mcp_servers`, `triggers`,
-  `thread_replies`, `subscribe`, and `broadcast_replies`, none of which have
-  any equivalent in `buzz-fleet` for any agent. The official
-  `buzz-agent-snapshot` format's `provider` field has the same problem from
-  the other direction: `buzz-acp` has no dedicated `--provider`/env-var flag
-  for it at all — provider selection happens per-harness via arbitrary
-  "per-persona env vars to inject at agent spawn time" (e.g. `GOOSE_PROVIDER`),
-  which is really a generic env-var-passthrough mechanism `buzz-fleet` doesn't
-  have. All of these are silently dropped when importing a persona/template
-  (see the persona-picker feature) rather than solved here. Not yet designed;
-  see `docs/superpowers/specs/2026-09-04-agent-mcp-server-support-design.md`
-  before attempting either — it needs its own brainstorming pass, not an
-  incremental patch onto the persona-picker feature.
+- **Per-agent MCP server support and generic per-agent env-var
+  passthrough — resolved by Task 19 of the orchestration-foundation plan.**
+  `Agent.env: dict[str, SecretStr] | None` and `Agent.mcp_server:
+  McpServer | None` (one server: `name`, `command`, `args`, `env`) now exist,
+  wired to `--env`/`--env-file` and
+  `--mcp-name`/`--mcp-command`/`--mcp-arg`/`--mcp-env` on `agent
+  create`/`agent update`; `write_agent_files` generates a `0700` wrapper
+  script and points `BUZZ_ACP_MCP_COMMAND` at it, and (for `--harness pi`)
+  also writes a private `PI_CODING_AGENT_DIR`. A persona's own `env:` block
+  and its `mcp_servers:` block's *first* entry import the same way — more
+  than one `mcp_servers` entry is refused at import, since `buzz-acp`
+  supports only one server per agent. See README's "Orchestration" section
+  for the user-facing version. What's still genuinely unsolved:
+  - A persona's `triggers`, `thread_replies`, `subscribe`, and
+    `broadcast_replies` fields still have no `buzz-fleet` equivalent and are
+    still silently dropped on import.
+  - `agent update` has no CLI flag to explicitly *clear* an already-set
+    `env` entry or `mcp_server` back to empty — only to replace it with a
+    new non-empty value. The TUI can clear both (blank the fields and
+    save); the CLI can't yet.
+  - The `buzz-agent-snapshot` format's `provider` field is arguably solved
+    now from the other direction — set the harness's own provider env var
+    (e.g. `GOOSE_PROVIDER`) via `--env`, same as any other per-agent
+    secret — but nothing on persona import maps `provider` to that
+    specifically; the operator has to know to do it by hand.
   - Fields that ARE real, wireable `buzz-acp` settings and got a proper home
     as part of the persona-picker feature instead of landing in this bucket:
     `model` (`BUZZ_ACP_MODEL`), `parallelism` (`BUZZ_ACP_AGENTS`),
@@ -158,9 +207,16 @@ above.
     deployment-level gate on which `--respond-to` *modes* are permitted at
     all, which `buzz-fleet` has no reason to expose per-agent).
   - Desktop-GUI-only fields with no `buzz-acp` backing at all, and no plan
-    to add one: `avatarDataUrl`/`avatarUrl`, `sourceIsBuiltin`, `namePool`,
-    `description`/`about` (dropped from `buzz-fleet`'s `Agent` model
-    entirely — there's nowhere for it to live or do anything).
+    to add one: `avatarDataUrl`/`avatarUrl`, `sourceIsBuiltin`, `namePool`.
+  - `description`/`about` *did* gain a home, unlike the fields just above:
+    `Agent.description`, imported from a persona's `description:` field
+    (Task 17 of the orchestration-foundation plan), exposed as
+    `--description` on `agent create`/`agent update`, and published in the
+    kind:30177 managed-agent record (`visibility.managed_agent_content`) so
+    Desktop's Agents view and `buzz-fleet fleet agents` can both show it.
+    Same task also added `role: str | None` and `capabilities: list[str] |
+    None` (`--role`, `--capability`, repeatable) alongside it, none of which
+    existed anywhere in `buzz-fleet` before.
   - `team_instructions` (`BUZZ_ACP_TEAM_INSTRUCTIONS`) is a real `Agent`
     field that existed since the original build but had zero exposure
     anywhere (no TUI input, no CLI flag) until it was wired up alongside
@@ -235,6 +291,9 @@ compaction.
   `theme.py`'s `SECTION_CSS` and `AgentFormScreen.DEFAULT_CSS`) — a longer
   form now grows and the screen scrolls, rather than fixed-share sections
   clipping their own content.
+- **Orchestration layers 2 and 3 not yet built: conductor, notifier,
+  failover, metrics, recycling, pipelines, purge, TUI screen, self-update.**
+  Spec section 4.
 - **No CHANGELOG.** Three releases in (`v0.1.0`/`v0.2.0`/`v0.3.0`) with no
   changelog file — not urgent, but the "Releasing a new version" README
   section could at least point at GitHub Releases' auto-generated notes if

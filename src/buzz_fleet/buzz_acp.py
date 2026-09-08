@@ -29,6 +29,28 @@ from pathlib import Path
 BUZZ_ACP_DIR = Path.home() / ".local" / "share" / "buzz-fleet" / "bin"
 BUZZ_ACP_PATH = BUZZ_ACP_DIR / "buzz-acp"
 
+# Sprig is also the `buzz` CLI when invoked by that name. buzz-acp never posts
+# the agent's reply itself; it tells the agent to run `buzz messages send`,
+# so without this link a fleet agent wakes on a mention and cannot answer.
+# Real incident (2026-09-06): `which buzz` was empty on every fleet machine.
+BUZZ_CLI_PATH = BUZZ_ACP_DIR / "buzz"
+
+
+def ensure_buzz_cli_link() -> bool:
+    """Make BUZZ_CLI_PATH a symlink to BUZZ_ACP_PATH. Returns True when it changed anything."""
+    if (
+        BUZZ_CLI_PATH.is_symlink()
+        and BUZZ_CLI_PATH.exists()
+        and BUZZ_CLI_PATH.resolve() == BUZZ_ACP_PATH.resolve()
+    ):
+        return False
+    BUZZ_ACP_DIR.mkdir(parents=True, exist_ok=True)
+    if BUZZ_CLI_PATH.is_symlink() or BUZZ_CLI_PATH.exists():
+        BUZZ_CLI_PATH.unlink()
+    BUZZ_CLI_PATH.symlink_to(BUZZ_ACP_PATH)
+    return True
+
+
 _SPRIG_RELEASE_BASE = "https://github.com/block/sprout/releases/download/sprig-latest"
 
 # Rust target triples Sprig publishes prebuilt musl binaries for, keyed by

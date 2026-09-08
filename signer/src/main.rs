@@ -1,8 +1,10 @@
 mod agent_events;
 mod events;
+mod fleet;
 
 use clap::{Parser, Subcommand};
 use nostr::Keys;
+use nostr::JsonUtil;
 use nostr::nips::nip19::ToBech32;
 use buzz_ws_client::connection::NostrWsConnection;
 use serde_json::json;
@@ -134,6 +136,34 @@ enum Command {
         #[arg(long)]
         auth_tag: String,
     },
+    /// Publish one kind 9 channel message with mentions, thread markers, and extra tags.
+    PostMessage {
+        #[arg(long)] relay: String,
+        #[arg(long)] nsec: String,
+        #[arg(long)] auth_tag: Option<String>,
+        #[arg(long)] channel: String,
+        /// Message text; `-` reads stdin.
+        #[arg(long)] content: String,
+        #[arg(long = "mention")] mentions: Vec<String>,
+        #[arg(long)] root: Option<String>,
+        #[arg(long)] parent: Option<String>,
+        /// Extra tag as name=value (repeatable; value may contain '=').
+        #[arg(long = "tag")] tags: Vec<String>,
+    },
+    /// One-shot REQ; prints each event as a JSON line and exits at EOSE.
+    Query { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] filter: String },
+    /// List a channel's members with display names.
+    ChannelMembers { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] channel: String },
+    /// Create a channel (owner-signed) and print its id.
+    CreateChannel { #[arg(long)] relay: String, #[arg(long)] owner_nsec: String, #[arg(long)] name: String, #[arg(long)] about: Option<String> },
+    /// Read kind 39000 metadata for one channel or every accessible channel.
+    ReadChannelMeta { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] channel: Option<String> },
+    /// Owner-signed update of a channel's about text (`-` reads stdin).
+    WriteChannelAbout { #[arg(long)] relay: String, #[arg(long)] owner_nsec: String, #[arg(long)] channel: String, #[arg(long)] about: String },
+    /// Read every kind:30177 managed-agent record authored by `owner`.
+    ReadManagedAgents { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long)] owner: String },
+    /// Read kind:40902 presence snapshots for the given pubkeys.
+    ReadPresence { #[arg(long)] relay: String, #[arg(long)] nsec: String, #[arg(long)] auth_tag: Option<String>, #[arg(long = "pubkey")] pubkeys: Vec<String> },
 }
 
 #[tokio::main]
@@ -192,13 +222,7 @@ async fn main() {
             }
         }
         Command::JoinChannel { relay, agent_nsec, channel_id, auth_tag } => {
-            let builder = uuid::Uuid::parse_str(&channel_id)
-                .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
-                .and_then(|id| {
-                    let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
-                    buzz_sdk::builders::build_add_member(id, &agent_pubkey, Some(buzz_sdk::MemberRole::Bot))
-                        .map_err(|e| anyhow::anyhow!(e))
-                });
+            let builder = build_join_channel_event(&channel_id, &agent_nsec);
             let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
             let result = match tag {
                 Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
@@ -210,13 +234,7 @@ async fn main() {
             }
         }
         Command::LeaveChannel { relay, agent_nsec, channel_id, auth_tag } => {
-            let builder = uuid::Uuid::parse_str(&channel_id)
-                .map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))
-                .and_then(|id| {
-                    let agent_pubkey = Keys::parse(&agent_nsec)?.public_key().to_hex();
-                    buzz_sdk::builders::build_remove_member(id, &agent_pubkey)
-                        .map_err(|e| anyhow::anyhow!(e))
-                });
+            let builder = build_leave_channel_event(&channel_id, &agent_nsec);
             let tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_tag).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}"));
             let result = match tag {
                 Ok(tag) => run_publish(&relay, &agent_nsec, builder, Some(&tag)).await,
@@ -289,6 +307,91 @@ async fn main() {
                 Err(e) => { println!("{}", json!({"ok": false, "error": e.to_string()})); 1 }
             }
         }
+        Command::PostMessage { relay, nsec, auth_tag, channel, content, mentions, root, parent, tags } => {
+            let result = async {
+                let channel = uuid::Uuid::parse_str(&channel).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?;
+                let content = read_content_arg(&content)?;
+                let extra = parse_tag_args(&tags)?;
+                let builder = fleet::build_fleet_message(channel, &content, &mentions, root.as_deref(), parent.as_deref(), &extra);
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                run_publish_id(&relay, &nsec, builder, tag.as_ref()).await
+            }.await;
+            match result { Ok(id) => ok_json(json!({"ok": true, "event_id": id})), Err(e) => err_json(e, 1) }
+        }
+        Command::Query { relay, nsec, auth_tag, filter } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let filter = fleet::parse_filter(&filter)?;
+                fleet::run_query(&relay, &nsec, tag.as_ref(), filter).await
+            }.await;
+            match result {
+                Ok(events) => { for e in events { println!("{}", e.as_json()); } 0 }
+                Err(e) => err_json(e, 2),
+            }
+        }
+        Command::ChannelMembers { relay, nsec, auth_tag, channel } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let channel = uuid::Uuid::parse_str(&channel).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?;
+                fleet::run_channel_members(&relay, &nsec, tag.as_ref(), channel).await
+            }.await;
+            match result {
+                Ok(members) => ok_json(json!({"ok": true, "members": members.into_iter()
+                    .map(|(pubkey, display_name)| json!({"pubkey": pubkey, "display_name": display_name})).collect::<Vec<_>>()})),
+                Err(e) => err_json(e, 1),
+            }
+        }
+        Command::CreateChannel { relay, owner_nsec, name, about } => {
+            let result = async {
+                let (id, builder) = fleet::build_create_channel(&name, about.as_deref())?;
+                run_publish(&relay, &owner_nsec, Ok(builder), None).await?;
+                Ok::<_, anyhow::Error>(id)
+            }.await;
+            match result { Ok(id) => ok_json(json!({"ok": true, "channel_id": id.to_string()})), Err(e) => err_json(e, 1) }
+        }
+        Command::ReadChannelMeta { relay, nsec, auth_tag, channel } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let channel = match channel {
+                    Some(c) => Some(uuid::Uuid::parse_str(&c).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?),
+                    None => None,
+                };
+                fleet::run_read_channel_meta(&relay, &nsec, tag.as_ref(), channel).await
+            }.await;
+            match result { Ok(metas) => ok_json(json!({"ok": true, "channels": metas})), Err(e) => err_json(e, 1) }
+        }
+        Command::WriteChannelAbout { relay, owner_nsec, channel, about } => {
+            let result = async {
+                let channel = uuid::Uuid::parse_str(&channel).map_err(|e| anyhow::anyhow!("invalid: channel {e}"))?;
+                let about = read_content_arg(&about)?;
+                run_publish(&relay, &owner_nsec, fleet::build_write_about(channel, &about), None).await
+            }.await;
+            match result { Ok(()) => ok_json(json!({"ok": true})), Err(e) => err_json(e, 1) }
+        }
+        Command::ReadManagedAgents { relay, nsec, auth_tag, owner } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let owner = nostr::PublicKey::from_hex(&owner).map_err(|e| anyhow::anyhow!("invalid: owner {e}"))?;
+                fleet::run_read_managed_agents(&relay, &nsec, tag.as_ref(), owner).await
+            }.await;
+            match result {
+                Ok(records) => ok_json(json!({"ok": true, "agents": records})),
+                Err(e) => err_json(e, 1),
+            }
+        }
+        Command::ReadPresence { relay, nsec, auth_tag, pubkeys } => {
+            let result = async {
+                let tag = parse_optional_auth_tag(auth_tag.as_deref())?;
+                let pubkeys: Vec<nostr::PublicKey> = pubkeys.iter()
+                    .map(|p| nostr::PublicKey::from_hex(p).map_err(|e| anyhow::anyhow!("invalid: pubkey {e}")))
+                    .collect::<anyhow::Result<_>>()?;
+                fleet::run_read_presence(&relay, &nsec, tag.as_ref(), pubkeys).await
+            }.await;
+            match result {
+                Ok(entries) => ok_json(json!({"ok": true, "presence": entries})),
+                Err(e) => err_json(e, 1),
+            }
+        }
     };
     std::process::exit(code);
 }
@@ -308,6 +411,34 @@ async fn run_check_connection(relay: &str, nsec: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build the self-join (kind 9000) event for `JoinChannel`.
+///
+/// `allow_self_tagging()` is required: this is a self-join, so the `p` tag
+/// equals the signing key's own pubkey, and `nostr::EventBuilder` discards
+/// any `p` tag matching the signer by default (`allow_self_tagging` defaults
+/// to false) — without this call, the tag silently vanished at *sign* time
+/// (never at build time), and the relay rejected the resulting event as
+/// "missing p tag" on every self-join. Confirmed live against
+/// buzz.eltahir.me: a real agent's join-channel call failed with exactly
+/// this error until this fix.
+fn build_join_channel_event(channel_id: &str, agent_nsec: &str) -> anyhow::Result<nostr::EventBuilder> {
+    let id = uuid::Uuid::parse_str(channel_id).map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))?;
+    let agent_pubkey = Keys::parse(agent_nsec)?.public_key().to_hex();
+    buzz_sdk::builders::build_add_member(id, &agent_pubkey, Some(buzz_sdk::MemberRole::Bot))
+        .map(|b| b.allow_self_tagging())
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Build the self-leave (kind 9001) event for `LeaveChannel` — same
+/// self-tagging fix as `build_join_channel_event` above.
+fn build_leave_channel_event(channel_id: &str, agent_nsec: &str) -> anyhow::Result<nostr::EventBuilder> {
+    let id = uuid::Uuid::parse_str(channel_id).map_err(|e| anyhow::anyhow!("invalid: channel_id {e}"))?;
+    let agent_pubkey = Keys::parse(agent_nsec)?.public_key().to_hex();
+    buzz_sdk::builders::build_remove_member(id, &agent_pubkey)
+        .map(|b| b.allow_self_tagging())
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// `auth_tag` is the NIP-OA credential attached to *this call's own*
 /// connection AUTH event (`None` for a call signed by the community owner,
 /// who is already a direct relay member; `Some` for a call signed by an
@@ -319,16 +450,53 @@ async fn run_publish(
     builder: anyhow::Result<nostr::EventBuilder>,
     auth_tag: Option<&nostr::Tag>,
 ) -> anyhow::Result<()> {
+    run_publish_id(relay, signer_nsec, builder, auth_tag).await?;
+    Ok(())
+}
+
+/// Same connect/send/disconnect/accepted-check sequence as `run_publish`,
+/// but returns the signed event's id — needed by subcommands (like
+/// `post-message`) whose success payload includes `event_id`.
+async fn run_publish_id(
+    relay: &str, signer_nsec: &str, builder: anyhow::Result<nostr::EventBuilder>, auth_tag: Option<&nostr::Tag>,
+) -> anyhow::Result<String> {
     let keys = Keys::parse(signer_nsec)?;
     let event = builder?.sign_with_keys(&keys)?;
+    let id = event.id.to_hex();
     let mut conn = NostrWsConnection::connect_authenticated(relay, &keys, auth_tag).await?;
     let response = conn.send_event(event).await?;
     conn.disconnect().await?;
     if !response.accepted {
         anyhow::bail!("relay rejected event: {}", response.message);
     }
-    Ok(())
+    Ok(id)
 }
+
+fn parse_optional_auth_tag(auth_tag: Option<&str>) -> anyhow::Result<Option<nostr::Tag>> {
+    match auth_tag {
+        None => Ok(None),
+        Some(s) => buzz_sdk::nip_oa::parse_auth_tag(s).map(Some).map_err(|e| anyhow::anyhow!("invalid: auth_tag {e}")),
+    }
+}
+
+fn read_content_arg(content: &str) -> anyhow::Result<String> {
+    if content != "-" {
+        return Ok(content.to_string());
+    }
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+    Ok(s)
+}
+
+fn parse_tag_args(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    raw.iter().map(|s| {
+        s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))
+            .ok_or_else(|| anyhow::anyhow!("invalid --tag {s:?}: expected name=value"))
+    }).collect()
+}
+
+fn ok_json(value: serde_json::Value) -> i32 { println!("{value}"); 0 }
+fn err_json(e: anyhow::Error, code: i32) -> i32 { println!("{}", json!({"ok": false, "error": e.to_string()})); code }
 
 #[cfg(test)]
 mod tests {
@@ -341,12 +509,7 @@ mod tests {
     fn join_channel_builds_self_add_with_bot_role() {
         let keys = Keys::generate();
         let channel_id = uuid::Uuid::new_v4();
-        let builder = buzz_sdk::builders::build_add_member(
-            channel_id,
-            &keys.public_key().to_hex(),
-            Some(buzz_sdk::MemberRole::Bot),
-        )
-        .unwrap();
+        let builder = build_join_channel_event(&channel_id.to_string(), &keys.secret_key().to_secret_hex()).unwrap();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind, Kind::Custom(9000));
         assert!(event.tags.iter().any(|t| {
@@ -357,18 +520,32 @@ mod tests {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["h", channel_id.to_string().as_str()]
         }));
+        // Regression: nostr::EventBuilder discards a `p` tag matching the
+        // signer by default — without `allow_self_tagging()` in
+        // `build_join_channel_event`, this self-join `p` tag (agent's own
+        // pubkey) silently vanishes at sign time and the relay rejects the
+        // event as "missing p tag" (confirmed live).
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["p", keys.public_key().to_hex().as_str()]
+        }));
     }
 
     #[test]
     fn leave_channel_builds_self_remove() {
         let keys = Keys::generate();
         let channel_id = uuid::Uuid::new_v4();
-        let builder = buzz_sdk::builders::build_remove_member(channel_id, &keys.public_key().to_hex()).unwrap();
+        let builder = build_leave_channel_event(&channel_id.to_string(), &keys.secret_key().to_secret_hex()).unwrap();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind, Kind::Custom(9001));
         assert!(event.tags.iter().any(|t| {
             let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
             v == ["h", channel_id.to_string().as_str()]
+        }));
+        // Regression: same self-tagging fix as join-channel above.
+        assert!(event.tags.iter().any(|t| {
+            let v: Vec<&str> = t.as_slice().iter().map(String::as_str).collect();
+            v == ["p", keys.public_key().to_hex().as_str()]
         }));
     }
 
@@ -402,5 +579,13 @@ mod tests {
         // string directly, not a parsed `Tag`, and returns the owner's pubkey on success).
         let verified_owner = buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent.public_key()).unwrap();
         assert_eq!(verified_owner, owner.public_key());
+    }
+
+    #[test]
+    fn parse_tag_args_splits_on_first_equals_only() {
+        let parsed = parse_tag_args(&["t=fleet".into(), "fleet={\"a\":\"b=c\"}".into()]).unwrap();
+        assert_eq!(parsed[0], ("t".into(), "fleet".into()));
+        assert_eq!(parsed[1], ("fleet".into(), "{\"a\":\"b=c\"}".into()));
+        assert!(parse_tag_args(&["novalue".into()]).is_err());
     }
 }

@@ -357,6 +357,197 @@ community's owner pubkey once so agents don't silently drop every event.
 Nothing here needs a manual restart — the next `agent list` or dashboard
 load fixes it.
 
+## Orchestration
+
+Five machines, one owner, agents that hand work to each other across all of
+them over a shared Nostr channel — the *fleet channel* — instead of direct
+network calls between agents. See
+`docs/superpowers/specs/2026-09-06-multi-agent-orchestration-design.md` for
+the full design; this section is the operational summary.
+
+### One-time setup, then automatic everywhere else
+
+Once per community — run this on whichever machine you consider primary (a
+VPS, say):
+
+```bash
+buzz-fleet fleet init --community <id>
+```
+
+This mints a retrieval keypair, creates (or, with `--channel <uuid>`, adopts)
+a NIP-29 channel named `fleet`, and writes a small JSON record into that
+channel's `about` field (limits, recorded component versions, and a
+conductor registry that stays empty until plans 2/3 land). The retrieval
+secret is printed once and stored nowhere — archive it yourself if you'll
+need it again. Never run `fleet init` a second time for the same community:
+it refuses when a record already exists anywhere it can see, specifically so
+five machines can't each create their own channel.
+
+Every other machine discovers that record automatically — no separate "join"
+command. `agent list`, `agent create`, `agent update`, and the TUI
+dashboard's own refresh all call `AgentManager.ensure_runtime_ready()`,
+which discovers the fleet record (once, then caches it on the `Community`),
+joins that machine's agents to the channel, and rewrites their env files
+with `BUZZ_FLEET_CHANNEL`/`BUZZ_FLEET_RETRIEVAL_KEY`. Check what a community
+currently knows with:
+
+```bash
+buzz-fleet fleet status --community <id>
+```
+
+### What an agent gets
+
+Every managed agent's systemd unit and prompt now carry:
+
+- `buzz` itself on `PATH` (a symlink to the installed `buzz-acp`/Sprig
+  multicall binary — see "Incident 8" below) and an explicit
+  `WorkingDirectory` per agent (`~/.local/share/buzz-fleet/work/<agent-id>`),
+  so it has somewhere to clone repos into and create worktrees.
+- The fleet channel and retrieval key
+  (`BUZZ_FLEET_CHANNEL`/`BUZZ_FLEET_RETRIEVAL_KEY`) once the fleet record is
+  known.
+- A "## Fleet coordination" block appended to `BUZZ_ACP_TEAM_INSTRUCTIONS`:
+  how to ack a delegation, work in a worktree at the exact commit given,
+  report back, and delegate onward. Kept in sync automatically — a stale
+  version already in an agent's instructions is replaced with the current
+  one, not appended again.
+- `--session-policy` (`thread`, the default, or `channel`),
+  `--max-turns-per-session` (default 40), and
+  `--heartbeat-interval-seconds` (default 900; `0` disables) — these map to
+  `buzz-acp`'s own session-scoping, rotation, and heartbeat behavior.
+
+Override any of these per agent with the matching `agent create`/`agent
+update` flag; otherwise the defaults above apply.
+
+### Delegating work
+
+```bash
+# Hand a task to another agent, at an exact commit, with a deadline
+buzz-fleet task delegate --to "Laravel Backend Developer" \
+  --repo git@github.com:you/app.git --commit abc1234 \
+  --brief "Add a boost:mcp endpoint" --wait 45m
+
+# What's still open, overdue, or waiting on an ack
+buzz-fleet tasks --stuck
+buzz-fleet tasks --unacked
+
+# The assignee's side
+buzz-fleet task ack --task <id>
+buzz-fleet task report --task <id> --status done --summary "..." \
+  --input-commit abc1234 --output-commit def5678
+
+# Anyone who can cancel it (requester or owner)
+buzz-fleet task cancel <id> --reason "no longer needed"
+
+# Full history of one task
+buzz-fleet task show <id>
+```
+
+**The artifact rule**: a delegation naming a repo/commit expects the
+assignee to work at that exact commit, in its own `git worktree` (never a
+shared checkout), and to push before reporting. `task report`'s
+`--input-commit` must equal the commit you were handed — the command refuses
+a mismatch — and `--output-commit` records what you pushed, if anything.
+This is enforced by convention (the coordination block every agent is
+given) plus the one hard check (`--input-commit` matching), not by a
+server-side gate.
+
+**Ad-hoc limits** (per fleet record, defaults shown; not yet configurable
+per community): at most 5 open ad-hoc tasks per requester, and a delegation
+chain no deeper than 4. `max_rework: 3` and `max_tasks: 20` are recorded in
+the same record but not yet enforced by anything in this plan.
+
+**Unique display names**: `agent create` refuses a display name already used
+by another member of the fleet channel; pass `--force` to create a duplicate
+anyway.
+
+**Per-machine prerequisite**: SSH access to every repository your pipelines
+will name. `task delegate` and an assignee's own worktree checkout both need
+it; `buzz-fleet` does not set it up for you.
+
+### The agent directory
+
+```bash
+buzz-fleet fleet agents
+buzz-fleet fleet agents --json
+```
+
+Lists every member of the fleet channel: display name, `role`,
+`capabilities`, and `description` (set with `--role`, `--capability`
+(repeatable), and `--description` on `agent create`/`agent update`),
+harness, host, online status, live task count, and the `buzz-fleet` version
+that published the agent's record. It's built by joining channel
+membership, each agent's published managed-agent record, best-effort
+presence, and open tasks from the reducer. See "Known limitations" below:
+`online`/last-seen are not populated in this release.
+
+### Per-agent secrets and one MCP server
+
+```bash
+buzz-fleet agent create --community <id> --display-name "..." --harness claude \
+  --prompt-file ./persona.md \
+  --env DATABASE_URL=postgres://... --env API_KEY=... \
+  --env-file ./secrets.env \
+  --mcp-name boost --mcp-command php --mcp-arg artisan --mcp-arg boost:mcp \
+  --mcp-env SOME_TOKEN=...
+```
+
+`--env`/`--env-file` (repeatable `KEY=VALUE`, or a file of `KEY=VALUE`
+lines) write arbitrary environment variables into the agent's env file,
+masked at rest like every other secret `buzz-fleet` stores.
+`--mcp-name`/`--mcp-command`/`--mcp-arg`/`--mcp-env` configure the one MCP
+server `buzz-acp` supports per agent: `buzz-fleet` generates a small `0700`
+wrapper script
+(`~/.local/share/buzz-fleet/work/<agent-id>/mcp-<name>.sh`) that exports the
+server's own env vars and `exec`s its command, then points
+`BUZZ_ACP_MCP_COMMAND` at that wrapper. A persona file can declare the same
+via an `env:` block and a single-entry `mcp_servers:` block — `buzz-acp`
+supports one server per agent, so a persona declaring more than one is
+refused at import.
+
+Pi agents (`--harness pi`) additionally get a private
+`PI_CODING_AGENT_DIR`
+(`~/.local/share/buzz-fleet/work/<agent-id>/.pi-agent/`), seeded with
+`settings.json` (`defaultProjectTrust: always`, the pinned `pi-mcp-adapter`
+package) and, when an MCP server is set, `mcp.json` — copied from a shared,
+pre-installed template the first time so the agent's first turn needs no
+network access.
+
+### Known limitations
+
+- **Presence is not readable over the protocol the signer uses.** The relay
+  only ever synthesizes presence (kinds 40902/20001) inside its HTTP bridge,
+  never in the plain-websocket `REQ` handler `buzz-fleet-signer` speaks —
+  verified against the pinned upstream commit and confirmed live. `fleet
+  agents` therefore always shows `online`/`last_seen` as empty, and the
+  design spec's live check 12 isn't achievable as designed with the current
+  transport. Closing this needs an HTTP-bridge client in the signer — a
+  follow-up, not a bug in this release.
+- **An already-published managed-agent record does not refresh
+  automatically** when `buzz-fleet` gains new record fields. After
+  upgrading, `role`, `capabilities`, `description`, `harness`, and `version`
+  stay empty in `fleet agents` for any agent created before the upgrade.
+  Force a republish by giving that agent an actual (not just repeated)
+  `--role`/`--capability`/`--description` value via `agent update` — the
+  record only republishes when one of those fields genuinely changes, not
+  on every `agent update` call — then run `agent list` (or wait for the TUI
+  dashboard's next refresh) to publish it.
+- **`agent update` has no flag to explicitly clear an `env` entry or
+  `mcp_server` once set** — only to replace it with a new non-empty value.
+  The TUI can clear both (blank the relevant fields and save); the CLI
+  cannot yet.
+- **Per-agent secrets provide no isolation between agents on the same
+  host.** All units run as one user, so any agent's harness process can
+  read every other agent's env file and MCP wrapper on that machine,
+  including their private keys — spec 5.13 presents these as per-agent, but
+  on one machine they are effectively fleet-wide.
+
+### Conductor and pipelines
+
+Multi-step pipelines, run proposals, and the always-on conductor process
+(failover, notifications, metrics, session recycling, purge) are plans 2 and
+3 — not built by this plan. See the spec, section 4, for what they'll add.
+
 ## Development
 
 ```bash

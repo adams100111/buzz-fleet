@@ -1,7 +1,18 @@
 import json
 from pathlib import Path
 
-from buzz_fleet.personas import discover_personas, parse_agent_json, parse_persona_md
+import pytest
+
+from buzz_fleet.personas import (
+    discover_personas,
+    load_persona_template,
+    parse_agent_json,
+    parse_persona_md,
+)
+
+LARAVEL_PERSONA_PATH = (
+    Path(__file__).resolve().parent.parent / "personas" / "developers" / "laravel-backend-developer.persona.md"
+)
 
 
 def _write_agent_json(path: Path, **overrides: object) -> None:
@@ -57,6 +68,33 @@ def test_parse_persona_md_extracts_fields(tmp_path: Path) -> None:
     assert template.parallelism is None
 
 
+def test_parse_persona_md_extracts_description(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.persona.md"
+    path.write_text(
+        "---\n"
+        "display_name: Laravel Backend Dev\n"
+        "runtime: claude\n"
+        "description: Laravel/PHP backend specialist.\n"
+        "---\n"
+        "You are the Laravel dev.\n"
+    )
+
+    template = parse_persona_md(path)
+
+    assert template is not None
+    assert template.description == "Laravel/PHP backend specialist."
+
+
+def test_parse_persona_md_description_is_none_without_frontmatter_key(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.persona.md"
+    path.write_text("---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nPrompt body.\n")
+
+    template = parse_persona_md(path)
+
+    assert template is not None
+    assert template.description is None
+
+
 def test_parse_persona_md_reads_sibling_pack_instructions(tmp_path: Path) -> None:
     (tmp_path / "pack_instructions.md").write_text("Test-first. Strict typing.\n")
     path = tmp_path / "laravel.persona.md"
@@ -106,8 +144,19 @@ def test_parse_agent_json_extracts_fields_and_drops_unwired_ones(tmp_path: Path)
     assert template.parallelism == 2
     assert template.idle_timeout_seconds == 90
     assert template.max_turn_duration_seconds == 300
+    assert template.description == "Laravel expert"
     # respondToAllowlist must never be carried into the template at all.
     assert not hasattr(template, "respond_to_allowlist")
+
+
+def test_parse_agent_json_description_is_none_without_about(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.agent.json"
+    _write_agent_json(path, profile={"displayName": "Laravel Backend Dev", "about": None})
+
+    template = parse_agent_json(path)
+
+    assert template is not None
+    assert template.description is None
 
 
 def test_parse_agent_json_returns_none_for_wrong_format(tmp_path: Path) -> None:
@@ -198,3 +247,154 @@ def test_discover_personas_counts_invalid_utf8_files_as_skipped_not_a_crash(tmp_
 
     assert templates == []
     assert skipped == 2
+
+
+def test_persona_imports_env_and_single_mcp_server() -> None:
+    template = load_persona_template(LARAVEL_PERSONA_PATH)   # declares one server: boost
+
+    assert template is not None
+    assert template.mcp_server is not None
+    assert template.mcp_server.name == "boost" and template.mcp_server.command == "php"
+    assert template.mcp_server.args == ["artisan", "boost:mcp"]
+
+
+def test_persona_with_two_mcp_servers_is_refused(tmp_path) -> None:
+    path = tmp_path / "two.persona.md"
+    path.write_text("---\nname: two\ndisplay_name: Two\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n  - {name: b, command: b}\n---\nbody\n")
+    with pytest.raises(ValueError, match="supports one"):
+        load_persona_template(path)
+
+
+def test_persona_with_one_mcp_server_and_no_args_or_env_defaults_empty(tmp_path: Path) -> None:
+    path = tmp_path / "one.persona.md"
+    path.write_text("---\ndisplay_name: One\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.mcp_server is not None
+    assert template.mcp_server.args == []
+    assert template.mcp_server.env == {}
+
+
+def test_persona_without_mcp_servers_key_has_none(tmp_path: Path) -> None:
+    path = tmp_path / "none.persona.md"
+    path.write_text("---\ndisplay_name: None\nruntime: claude\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.mcp_server is None
+
+
+def test_persona_imports_env_block(tmp_path: Path) -> None:
+    path = tmp_path / "env.persona.md"
+    path.write_text("---\ndisplay_name: Env\nruntime: goose\nenv:\n  GOOSE_PROVIDER: databricks\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.env == {"GOOSE_PROVIDER": "databricks"}
+
+
+def test_persona_without_env_key_has_none(tmp_path: Path) -> None:
+    path = tmp_path / "no-env.persona.md"
+    path.write_text("---\ndisplay_name: NoEnv\nruntime: claude\n---\nbody\n")
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.env is None
+
+
+def test_persona_with_unsafe_env_key_is_skipped_not_a_crash(tmp_path: Path) -> None:
+    # Finding 4 (final review): Agent.env's key validation
+    # (models.validate_env_key) applies to PersonaTemplate.env too -- the
+    # same untrusted-pack input that justified McpServer.name's validator.
+    # Unlike the MCP-server-count refusal (which deliberately propagates all
+    # the way out of parse_persona_md), a bad env key is raised inside
+    # PersonaTemplate's own construction, so it's already inside
+    # parse_persona_md's `except ValidationError: return None` -- the file
+    # is silently skipped like any other malformed field, never a crash.
+    path = tmp_path / "unsafe-env.persona.md"
+    path.write_text("---\ndisplay_name: Unsafe\nruntime: claude\nenv:\n  BUZZ_ACP_AGENT_OWNER: attacker\n---\nbody\n")
+
+    assert load_persona_template(path) is None
+
+
+def test_discover_personas_with_unsafe_env_key_counts_as_skipped_not_a_crash(tmp_path: Path) -> None:
+    root = tmp_path / "personas"
+    root.mkdir(parents=True)
+    (root / "ok.persona.md").write_text("---\ndisplay_name: OK\nruntime: claude\n---\nbody\n")
+    (root / "unsafe-env.persona.md").write_text(
+        "---\ndisplay_name: Unsafe\nruntime: claude\nenv:\n  '1BAD': x\n---\nbody\n"
+    )
+
+    templates, skipped = discover_personas(root)
+
+    assert [t.display_name for t in templates] == ["OK"]
+    assert skipped == 1
+
+
+def test_load_persona_template_dispatches_agent_json_by_extension(tmp_path: Path) -> None:
+    path = tmp_path / "laravel.agent.json"
+    _write_agent_json(path)
+
+    template = load_persona_template(path)
+
+    assert template is not None
+    assert template.display_name == "Laravel Backend Dev"
+
+
+def test_persona_with_unsafe_mcp_server_name_is_refused(tmp_path: Path) -> None:
+    """Same refusal path as the "more than one MCP server" case: an unsafe
+    name (would become a filesystem path segment, systemd.py's
+    `mcp-<name>.sh` wrapper) raises out of `_build_mcp_server`'s McpServer
+    construction, surfacing here exactly like the too-many-servers refusal
+    does, rather than crashing or silently accepting it. A `.persona.md`
+    pack is not necessarily authored by the operator, so this must be
+    caught the same way regardless of who wrote the file.
+    """
+    path = tmp_path / "unsafe.persona.md"
+    path.write_text(
+        "---\ndisplay_name: Unsafe\nruntime: claude\nmcp_servers:\n  - {name: '../../../pwned', command: a}\n---\nbody\n"
+    )
+    with pytest.raises(ValueError, match="not a safe filesystem path segment"):
+        load_persona_template(path)
+
+
+def test_discover_personas_with_unsafe_mcp_server_name_counts_as_skipped_not_a_crash(tmp_path: Path) -> None:
+    """The directory-scan equivalent of the test above: one persona with an
+    unsafe MCP server name must not take down the whole scan.
+    """
+    root = tmp_path / "personas"
+    root.mkdir(parents=True)
+    (root / "ok.persona.md").write_text("---\ndisplay_name: OK\nruntime: claude\n---\nbody\n")
+    (root / "unsafe.persona.md").write_text(
+        "---\ndisplay_name: Unsafe\nruntime: claude\nmcp_servers:\n  - {name: '../evil', command: a}\n---\nbody\n"
+    )
+
+    templates, skipped = discover_personas(root)
+
+    assert [t.display_name for t in templates] == ["OK"]
+    assert skipped == 1
+
+
+def test_discover_personas_with_two_mcp_servers_counts_as_skipped_not_a_crash(tmp_path: Path) -> None:
+    """A persona pack with one broken file (declaring two MCP servers, which
+    buzz-acp cannot support) must not take down the whole directory scan —
+    AgentFormScreen.compose() calls discover_personas synchronously, so an
+    uncaught ValueError here would crash the entire create-agent screen for
+    every persona in the pack, not just the broken one.
+    """
+    root = tmp_path / "personas"
+    root.mkdir(parents=True)
+    (root / "ok.persona.md").write_text("---\ndisplay_name: OK\nruntime: claude\n---\nbody\n")
+    (root / "broken.persona.md").write_text(
+        "---\ndisplay_name: Broken\nruntime: claude\nmcp_servers:\n  - {name: a, command: a}\n  - {name: b, command: b}\n---\nbody\n"
+    )
+
+    templates, skipped = discover_personas(root)
+
+    assert [t.display_name for t in templates] == ["OK"]
+    assert skipped == 1

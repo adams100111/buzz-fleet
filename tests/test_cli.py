@@ -523,3 +523,294 @@ def test_agent_list_shows_visibility_status(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     assert "agent-unmanaged\tUnmanaged\tclaude\t—" in result.output
     assert "agent-synced\tSynced\tclaude\tsynced" in result.output
+
+
+def test_agent_create_passes_session_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, [
+        "agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+        "--prompt-file", "/dev/null", "--session-policy", "channel", "--max-turns-per-session", "7",
+        "--heartbeat-interval-seconds", "0",
+    ])
+    assert result.exit_code == 0, result.output
+    assert (captured["session_policy"], captured["max_turns_per_session"], captured["heartbeat_interval_seconds"]) == ("channel", 7, 0)
+
+
+def test_agent_create_rejects_bad_session_policy(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X",
+                                     "--harness", "claude", "--prompt-file", "/dev/null", "--session-policy", "bogus"])
+    assert result.exit_code == 1 and "thread, channel" in result.output
+
+
+def test_agent_create_passes_directory_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--role", "reviewer", "--capability", "laravel",
+                                     "--capability", "docker-build", "--description", "Reviews."])
+    assert result.exit_code == 0, result.output
+    assert (captured["role"], captured["capabilities"], captured["description"]) == ("reviewer", ["laravel", "docker-build"], "Reviews.")
+
+
+def test_agent_create_defaults_directory_fields_to_none(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null"])
+    assert result.exit_code == 0, result.output
+    assert (captured["role"], captured["capabilities"], captured["description"]) == (None, None, None)
+
+
+def test_agent_update_passes_directory_flags(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeManager:
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1", "--role", "reviewer",
+                                     "--capability", "laravel", "--capability", "docker-build",
+                                     "--description", "Reviews."])
+    assert result.exit_code == 0, result.output
+    assert calls["changes"] == {"role": "reviewer", "capabilities": ["laravel", "docker-build"], "description": "Reviews."}
+
+
+def test_agent_create_env_and_mcp_flags(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--env", "A=1", "--env", "B=2",
+                                     "--mcp-name", "boost", "--mcp-command", "php", "--mcp-arg", "artisan", "--mcp-arg", "boost:mcp"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"] == {"A": "1", "B": "2"}
+    assert captured["mcp_server"].command == "php" and captured["mcp_server"].args == ["artisan", "boost:mcp"]
+
+
+def test_agent_create_env_file_is_overridden_by_repeated_env_flag(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    env_file = tmp_path / "agent.env"
+    env_file.write_text("A=from-file\nC=only-in-file\n")
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--env-file", str(env_file), "--env", "A=1"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"] == {"A": "1", "C": "only-in-file"}
+
+
+def test_agent_create_rejects_env_without_equals(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--env", "NOTKEYVALUE"])
+    assert result.exit_code == 1
+    assert "KEY=VALUE" in result.output
+
+
+def test_agent_create_rejects_mcp_command_without_mcp_name(monkeypatch) -> None:
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--mcp-command", "php"])
+    assert result.exit_code == 1
+    assert "--mcp-name and --mcp-command" in result.output
+
+
+def test_agent_create_rejects_unsafe_mcp_name_with_message_not_traceback(monkeypatch) -> None:
+    # Finding 5 (final review): _resolve_mcp_server was called outside the
+    # try in agent_create, so an invalid --mcp-name raised a raw pydantic
+    # ValidationError (out of McpServer's own constructor) and printed a
+    # traceback instead of the message-plus-exit-1 every other validation
+    # on this command produces.
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null", "--mcp-name", "../x", "--mcp-command", "php"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "not a safe filesystem path segment" in result.output
+
+
+def test_agent_update_rejects_unsafe_mcp_name_with_message_not_traceback(monkeypatch) -> None:
+    # Same bug, the agent_update half: agent_update had no try/except at all
+    # around _resolve_mcp_server or manager.update_agent, so any ValueError
+    # from either -- an unsafe --mcp-name, or an unsafe --env key -- printed
+    # a raw traceback.
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: object())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1",
+                                     "--mcp-name", "../x", "--mcp-command", "php"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "not a safe filesystem path segment" in result.output
+
+
+def test_agent_update_rejects_unsafe_env_key_with_message_not_traceback(monkeypatch) -> None:
+    # agent_update's own try/except (added by this fix) must also catch a
+    # ValueError raised by manager.update_agent itself (e.g. an unsafe
+    # --env key -- see test_manager.py's
+    # test_update_agent_rejects_unsafe_env_key for that check in isolation),
+    # not just one raised earlier by _resolve_mcp_server.
+    class FakeManager:
+        def update_agent(self, agent_id, **changes):
+            raise ValueError("env var name 'BUZZ_ACP_AGENT_OWNER' is reserved for buzz-fleet's own use")
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1",
+                                     "--env", "BUZZ_ACP_AGENT_OWNER=attacker"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "reserved" in result.output
+
+
+def test_agent_create_without_env_or_mcp_flags_passes_none(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def create_agent(self, **kwargs):
+            captured.update(kwargs)
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "create", "--community", "e", "--display-name", "X", "--harness", "claude",
+                                     "--prompt-file", "/dev/null"])
+    assert result.exit_code == 0, result.output
+    assert captured["env"] is None
+    assert captured["mcp_server"] is None
+
+
+def test_agent_update_env_and_mcp_flags(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeManager:
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1",
+                                     "--env", "A=1", "--mcp-name", "boost", "--mcp-command", "php"])
+    assert result.exit_code == 0, result.output
+    changes = calls["changes"]
+    assert changes["env"] == {"A": "1"}
+    assert changes["mcp_server"].name == "boost" and changes["mcp_server"].command == "php"
+
+
+def test_agent_update_without_env_or_mcp_flags_omits_them(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeManager:
+        def update_agent(self, agent_id: str, **changes: object) -> object:
+            calls["changes"] = changes
+            return _agent()
+
+    monkeypatch.setattr("buzz_fleet.cli.app._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["agent", "update", "--community", "e", "agent-1", "--role", "reviewer"])
+    assert result.exit_code == 0, result.output
+    assert "env" not in calls["changes"] and "mcp_server" not in calls["changes"]
+
+
+def test_fleet_init_prints_channel_and_record(monkeypatch) -> None:
+    from buzz_fleet.orchestration.record import FleetRecord
+
+    class FakeManager:
+        def __init__(self) -> None:
+            self._last_retrieval_secret: str | None = None
+
+        def init_fleet_channel(self, existing, host):
+            self._last_retrieval_secret = "nsec1thesecretkeynevergetsstoredanywhere"
+            return "6f1c0000-0000-4000-8000-000000000000", FleetRecord(retrieval_key="r" * 64, created_at=1)
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "init", "--community", "e"])
+    assert result.exit_code == 0, result.output
+    assert "6f1c0000-0000-4000-8000-000000000000" in result.output and "r" * 64 in result.output
+    # The retrieval secret is the entire security-relevant output of `fleet
+    # init` — nothing stores it and nothing can regenerate it — so the CLI
+    # must actually print it, not just the channel id and public key.
+    assert "nsec1thesecretkeynevergetsstoredanywhere" in result.output
+
+
+def test_fleet_init_surfaces_non_runtime_error_as_message_not_traceback(monkeypatch) -> None:
+    # Finding 5 (final review): fleet_init caught only RuntimeError where
+    # every sibling command uses fleet_commands._ERRORS (RuntimeError,
+    # ValueError, JSONDecodeError, KeyError) -- _find_fleet_record indexes
+    # a relay response with meta["channel_id"], which can raise KeyError on
+    # a malformed relay reply. That must produce the same message-plus-
+    # exit-1 contract as every other failure here, not a raw traceback.
+    class FakeManager:
+        def init_fleet_channel(self, existing, host):
+            raise KeyError("channel_id")
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "init", "--community", "e"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "channel_id" in result.output
+
+
+def test_fleet_status_no_record_message_goes_to_stderr_like_its_sibling(monkeypatch) -> None:
+    # Finding 5 (final review): the duplicate-record branch already wrote to
+    # stderr, but the adjacent "No fleet record found" branch -- the *other*
+    # half of the same `if/else` that ends in the same `raise
+    # typer.Exit(code=1)` -- wrote to stdout instead. Both are the failure
+    # output of the same command and must go to the same stream.
+    class FakeManager:
+        _last_fleet_error = None
+
+        def ensure_fleet_record(self):
+            return None
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "status", "--community", "e"])
+    assert result.exit_code == 1
+    assert "No fleet record found" in result.stderr
+    assert "No fleet record found" not in result.stdout
+
+
+def test_fleet_status_reports_duplicate_record_error_instead_of_generic_message(monkeypatch) -> None:
+    class FakeManager:
+        def __init__(self) -> None:
+            self._last_fleet_error = (
+                "more than one channel carries a fleet record: chan-a, chan-b; archive all but one"
+            )
+
+        def ensure_fleet_record(self):
+            return None
+
+    monkeypatch.setattr("buzz_fleet.cli.fleet_commands._load_manager", lambda community: FakeManager())
+    result = runner_cli.invoke(app, ["fleet", "status", "--community", "e"])
+    assert result.exit_code == 1
+    # Must surface the real problem, not the generic "run fleet init"
+    # message — running fleet init again here would create a THIRD channel.
+    assert "more than one channel carries a fleet record" in result.output
+    assert "Run `buzz-fleet fleet init`" not in result.output

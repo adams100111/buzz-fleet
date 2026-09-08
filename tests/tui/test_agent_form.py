@@ -26,7 +26,7 @@ async def test_submitting_form_calls_create_agent() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         # Set values directly rather than simulating keystrokes: Textual's
@@ -61,7 +61,7 @@ async def test_submitting_form_in_edit_mode_calls_update_agent() -> None:
     )
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
         assert app.screen.query_one("#display-name-input", Input).value == "Laravel Dev"
@@ -102,7 +102,7 @@ async def test_editing_only_display_name_does_not_touch_persona_file_prompt() ->
     )
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
         # persona_file agents never get their prompt Input pre-filled.
@@ -132,7 +132,7 @@ async def test_submitting_blank_display_name_notifies_instead_of_crashing() -> N
     manager = RaisingManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "!!!"
@@ -148,7 +148,7 @@ async def test_escape_cancels_form_without_calling_manager() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         assert isinstance(app.screen, AgentFormScreen)
@@ -174,7 +174,7 @@ async def test_template_select_present_only_in_create_mode(tmp_path, monkeypatch
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         assert app.screen.query("#template-select")
@@ -211,7 +211,7 @@ async def test_no_templates_found_shows_explanatory_message_instead_of_blank_sel
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
 
@@ -235,7 +235,7 @@ async def test_selecting_template_prefills_and_overwrites_form_fields(tmp_path, 
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Something Typed First"
@@ -265,7 +265,7 @@ async def test_harness_select_defaults_to_first_available_harness(monkeypatch) -
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
 
@@ -296,7 +296,7 @@ async def test_harness_select_keeps_existing_agent_harness_regardless_of_availab
     )
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
 
@@ -314,7 +314,7 @@ async def test_install_adapter_button_hidden_when_default_harness_is_available(
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
 
@@ -330,7 +330,7 @@ async def test_install_adapter_button_shown_when_default_harness_unavailable(mon
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
 
@@ -351,7 +351,7 @@ async def test_selecting_a_missing_harness_shows_install_button(monkeypatch) -> 
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
 
@@ -382,7 +382,7 @@ async def test_clicking_install_adapter_button_runs_install_and_hides_itself(mon
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
 
@@ -412,7 +412,7 @@ async def test_clicking_install_adapter_button_notifies_error_on_failure(monkeyp
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
 
@@ -442,7 +442,7 @@ async def test_selecting_template_prefills_team_instructions_from_sibling_pack_f
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         select = app.screen.query_one("#template-select", Select)
@@ -460,7 +460,7 @@ async def test_submitting_form_passes_team_instructions_to_create_agent() -> Non
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -492,7 +492,7 @@ async def test_editing_agent_shows_and_updates_team_instructions() -> None:
     )
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager, agent=existing))
         await pilot.pause()
         assert app.screen.query_one("#team-instructions-input", TextArea).text == "Old team rules."
@@ -510,7 +510,7 @@ async def test_submitting_form_passes_new_fields_to_create_agent() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -537,7 +537,7 @@ async def test_submitting_form_with_blank_optional_fields_passes_none() -> None:
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -558,7 +558,7 @@ async def test_submitting_form_with_malformed_channel_id_notifies_instead_of_cra
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -575,7 +575,7 @@ async def test_submitting_form_passes_channel_ids_and_add_policy_to_create_agent
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -594,7 +594,7 @@ async def test_submitting_form_with_non_numeric_parallelism_notifies_instead_of_
     manager = FakeManager()
     app = BuzzFleetApp()
 
-    async with app.run_test(size=(80, 70)) as pilot:
+    async with app.run_test(size=(80, 120)) as pilot:
         await app.push_screen(AgentFormScreen(manager))
         await pilot.pause()
         app.screen.query_one("#display-name-input", Input).value = "Test Agent"
@@ -607,3 +607,191 @@ async def test_submitting_form_with_non_numeric_parallelism_notifies_instead_of_
         # once run_test() has torn down the app, so these must run before exit.
         assert manager.created == []
         assert isinstance(app.screen, AgentFormScreen)
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_passes_env_and_mcp_server_to_create_agent() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 120)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", TextArea).text = "hi"
+        app.screen.query_one("#env-input", TextArea).text = "DATABASE_URL=postgres://x\nOTHER=1"
+        app.screen.query_one("#mcp-name-input", Input).value = "boost"
+        app.screen.query_one("#mcp-command-input", Input).value = "php"
+        app.screen.query_one("#mcp-args-input", Input).value = "artisan, boost:mcp"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    assert manager.created[0]["env"] == {"DATABASE_URL": "postgres://x", "OTHER": "1"}
+    mcp_server = manager.created[0]["mcp_server"]
+    assert mcp_server.name == "boost" and mcp_server.command == "php"
+    assert mcp_server.args == ["artisan", "boost:mcp"]
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_with_blank_env_and_mcp_fields_passes_none() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 120)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", TextArea).text = "hi"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    assert manager.created[0]["env"] is None
+    assert manager.created[0]["mcp_server"] is None
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_with_env_line_missing_equals_notifies_instead_of_crashing() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 120)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", TextArea).text = "hi"
+        app.screen.query_one("#env-input", TextArea).text = "NOTKEYVALUE"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+        assert manager.created == []
+        assert isinstance(app.screen, AgentFormScreen)
+
+
+@pytest.mark.asyncio
+async def test_submitting_form_with_mcp_command_but_no_name_notifies_instead_of_crashing() -> None:
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 120)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        app.screen.query_one("#display-name-input", Input).value = "Test Agent"
+        app.screen.query_one("#prompt-input", TextArea).text = "hi"
+        app.screen.query_one("#mcp-command-input", Input).value = "php"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+        assert manager.created == []
+        assert isinstance(app.screen, AgentFormScreen)
+
+
+@pytest.mark.asyncio
+async def test_editing_agent_masks_existing_env_secrets() -> None:
+    """The edit form must never render a real secret value — only the
+    literal KEY=******** placeholder — and re-submitting untouched must
+    resolve that placeholder back to the real value rather than sending the
+    masked literal string to update_agent (which would overwrite the real
+    secret with the literal text "********").
+    """
+    from datetime import UTC, datetime
+
+    from buzz_fleet.models import Agent, SystemPromptSource
+
+    manager = FakeManager()
+    existing = Agent(
+        id="laravel-dev",
+        community_id="eltahir",
+        display_name="Laravel Dev",
+        harness="claude",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="old prompt"),
+        env={"DATABASE_URL": "postgres://real-secret"},
+        created_at=datetime.now(UTC),
+    )
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 120)) as pilot:
+        await app.push_screen(AgentFormScreen(manager, agent=existing))
+        await pilot.pause()
+
+        env_text = app.screen.query_one("#env-input", TextArea).text
+        assert env_text == "DATABASE_URL=********"
+        assert "real-secret" not in env_text
+
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    agent_id, changes = manager.updated[0]
+    assert agent_id == "laravel-dev"
+    assert changes["env"] == {"DATABASE_URL": "postgres://real-secret"}
+
+
+@pytest.mark.asyncio
+async def test_editing_unrelated_field_preserves_mcp_server_env_secrets() -> None:
+    """Regression guard: the TUI has no field for the MCP server's own env
+    vars (CLI-only). Rebuilding McpServer from the three plain inputs on
+    every submit must not silently drop an existing mcp_server.env just
+    because the user edited something else on the form and resubmitted.
+    """
+    from datetime import UTC, datetime
+
+    from buzz_fleet.models import Agent, McpServer, SystemPromptSource
+
+    manager = FakeManager()
+    existing = Agent(
+        id="laravel-dev",
+        community_id="eltahir",
+        display_name="Laravel Dev",
+        harness="claude",
+        private_key="nsec1x",
+        public_key="a" * 64,
+        system_prompt_source=SystemPromptSource(kind="inline", text="old prompt"),
+        mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "real-secret"}),
+        created_at=datetime.now(UTC),
+    )
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 120)) as pilot:
+        await app.push_screen(AgentFormScreen(manager, agent=existing))
+        await pilot.pause()
+        assert app.screen.query_one("#mcp-name-input", Input).value == "boost"
+        assert app.screen.query_one("#mcp-command-input", Input).value == "php"
+        assert app.screen.query_one("#mcp-args-input", Input).value == "artisan, boost:mcp"
+        app.screen.query_one("#display-name-input", Input).value = "Laravel Dev Renamed"
+        await pilot.click("#submit-button")
+        await pilot.pause()
+
+    agent_id, changes = manager.updated[0]
+    assert agent_id == "laravel-dev"
+    assert changes["mcp_server"].env["TOKEN"].get_secret_value() == "real-secret"
+
+
+@pytest.mark.asyncio
+async def test_selecting_template_prefills_env_and_mcp_server(tmp_path, monkeypatch) -> None:
+    from buzz_fleet import personas
+
+    personas_dir = tmp_path / "personas"
+    personas_dir.mkdir()
+    (personas_dir / "laravel.persona.md").write_text(
+        "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n"
+        "env:\n  GOOSE_PROVIDER: databricks\n"
+        "mcp_servers:\n  - name: boost\n    command: php\n    args: [\"artisan\", \"boost:mcp\"]\n"
+        "---\nYou are the Laravel dev.\n"
+    )
+    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
+
+    manager = FakeManager()
+    app = BuzzFleetApp()
+
+    async with app.run_test(size=(80, 120)) as pilot:
+        await app.push_screen(AgentFormScreen(manager))
+        await pilot.pause()
+        select = app.screen.query_one("#template-select", Select)
+        select.value = 0
+        await pilot.pause()
+
+        assert app.screen.query_one("#env-input", TextArea).text == "GOOSE_PROVIDER=databricks"
+        assert app.screen.query_one("#mcp-name-input", Input).value == "boost"
+        assert app.screen.query_one("#mcp-command-input", Input).value == "php"
+        assert app.screen.query_one("#mcp-args-input", Input).value == "artisan, boost:mcp"

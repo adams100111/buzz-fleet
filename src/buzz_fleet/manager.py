@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import SecretStr
+
 from buzz_fleet import (
+    __version__,
     buzz_acp,
     harnesses,
     signer_client,
@@ -16,11 +20,20 @@ from buzz_fleet import (
     systemd,
     visibility,
 )
-from buzz_fleet.models import Agent, Community, SystemPromptSource
+from buzz_fleet.models import Agent, Community, McpServer, SystemPromptSource, validate_env_key
+from buzz_fleet.orchestration import instructions
+from buzz_fleet.orchestration.record import FleetRecord, decode_about, encode_about
 from buzz_fleet.proc import CommandRunner
 from buzz_fleet.slug import agent_slug
 
 _ENV_KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+
+FLEET_CHANNEL_NAME = "fleet"
+
+
+def _agent_env_has(agent_id: str, key: str, value: str) -> bool:
+    path = systemd.agent_env_path(agent_id)
+    return path.exists() and f"{key}={value}\n" in path.read_text()
 
 
 def _agent_env_has_auth_tag(agent_id: str) -> bool:
@@ -72,6 +85,20 @@ class AgentManager:
     def __init__(self, runner: CommandRunner, community: Community) -> None:
         self._runner = runner
         self._community = community
+        # Set only by init_fleet_channel: the fleet's retrieval secret,
+        # which nothing stores and nothing can regenerate (spec 5.1) — the
+        # CLI's `fleet init` prints it once, immediately after the call
+        # that mints it, and it is never returned from init_fleet_channel
+        # itself (which must keep the brief's tuple[str, FleetRecord]
+        # signature) nor persisted anywhere.
+        self._last_retrieval_secret: str | None = None
+        # Set only by ensure_fleet_record on failure: the swallowed reason
+        # (e.g. more than one channel carrying a fleet record), so `fleet
+        # status` can tell the operator the real problem instead of the
+        # generic "no fleet record" message — which, for the duplicate
+        # case, is actively wrong advice (running `fleet init` again would
+        # create a third channel).
+        self._last_fleet_error: str | None = None
 
     def list_agents(self) -> list[Agent]:
         return state.load_agents(self._community.id)
@@ -90,6 +117,116 @@ class AgentManager:
         )
         self._community = self._community.model_copy(update={"owner_pubkey": owner_pubkey})
         state.save_community(self._community)
+
+    def _owner_nsec(self) -> str:
+        return self._community.relay_admin_nsec.get_secret_value()
+
+    def _find_fleet_record(self) -> tuple[str, FleetRecord] | None:
+        found = []
+        for meta in signer_client.read_channel_meta(self._runner, self._community.relay_url, self._owner_nsec(),
+                                                    channel_id=None, auth_tag=None):
+            if meta.get("archived"):
+                continue
+            rec = decode_about(meta.get("about"))
+            if rec:
+                found.append((meta["channel_id"], rec))
+        if len(found) > 1:
+            raise RuntimeError("more than one channel carries a fleet record: " + ", ".join(c for c, _ in found)
+                               + "; archive all but one")
+        return found[0] if found else None
+
+    def _save_fleet(self, channel_id: str, rec: FleetRecord) -> None:
+        self._community = self._community.model_copy(update={"fleet_channel_id": channel_id, "fleet_record": rec})
+        state.save_community(self._community)
+
+    def init_fleet_channel(self, existing: str | None, host: str) -> tuple[str, FleetRecord]:
+        """Create (or adopt) the fleet channel and write the fleet record, once per community.
+
+        Never automatic: five machines auto-creating would produce five channels.
+        Refuses when a record already exists anywhere the owner can see.
+        """
+        if self._find_fleet_record() is not None:
+            raise RuntimeError("a fleet record already exists on this relay; other machines discover it automatically "
+                               "(`buzz-fleet agent list`). Use `fleet status` to see it.")
+        retrieval_pub, retrieval_secret = signer_client.generate_key(self._runner)
+        rec = FleetRecord(
+            retrieval_key=retrieval_pub, conductors={},
+            # pi-mcp-adapter's pinned version travels in the fleet record
+            # alongside buzz-fleet's own — every machine (and Desktop/mobile,
+            # which reads this record) can see what's actually pinned for
+            # Pi's MCP support without SSHing in to check harnesses.py.
+            versions={"buzz-fleet": __version__, "pi-mcp-adapter": harnesses.PI_MCP_ADAPTER_VERSION},
+            created_at=int(time.time()),
+        )
+        if existing:
+            channel_id = existing
+        else:
+            channel_id = signer_client.create_channel(self._runner, self._community.relay_url, self._owner_nsec(),
+                                                      FLEET_CHANNEL_NAME, about=None)
+        # create_channel and write_channel_about are two separate publishes.
+        # If the second one fails, the channel already exists on the relay
+        # but carries no fleet record — invisible to _find_fleet_record's
+        # discovery (it only recognizes ABOUT_HEADER), so a blind retry of
+        # this create-once operation would create a SECOND channel and
+        # leave the first as permanent debris on the owner's relay. Name
+        # the orphaned id in the re-raised error so the operator can adopt
+        # it with `--channel` instead.
+        try:
+            signer_client.write_channel_about(self._runner, self._community.relay_url, self._owner_nsec(),
+                                              channel_id, encode_about(rec))
+        except (RuntimeError, OSError) as e:
+            raise RuntimeError(
+                f"channel {channel_id!r} was created but writing its fleet record failed: {e}; "
+                f"rerun with `--channel {channel_id}` to adopt it instead of creating a new one"
+            ) from e
+        self._save_fleet(channel_id, rec)
+        # The retrieval secret is deliberately not stored: nothing ever signs
+        # with it (spec 5.1). Returned once so the owner can archive it.
+        self._last_retrieval_secret = retrieval_secret
+        return channel_id, rec
+
+    def ensure_fleet_record(self) -> FleetRecord | None:
+        """Discover and cache the fleet record. Never raises: called from
+
+        `ensure_runtime_ready` on every machine, and a relay hiccup — or a
+        community with no fleet channel yet — must not break agent
+        management. On a genuine problem (most notably: more than one
+        channel carries a fleet record, which two racing `fleet init` runs
+        would produce), the reason is stashed on `_last_fleet_error` rather
+        than raised, so `fleet status` can tell the operator the truth
+        instead of the generic "run fleet init" message, which for that
+        case is actively wrong advice.
+        """
+        if self._community.fleet_record:
+            return self._community.fleet_record
+        try:
+            found = self._find_fleet_record()
+        except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
+            self._last_fleet_error = str(e)
+            return None
+        self._last_fleet_error = None
+        if found:
+            try:
+                self._save_fleet(*found)
+            except OSError:
+                # Caching locally failed (e.g. a read-only/full-disk home),
+                # but the record itself was found and is perfectly usable
+                # for this call — don't let a caching failure masquerade as
+                # "no fleet record exists".
+                pass
+            return found[1]
+        return None
+
+    def display_name_taken(self, display_name: str) -> bool:
+        channel = self._community.fleet_channel_id
+        if not channel:
+            return False
+        try:
+            members = signer_client.channel_members(self._runner, self._community.relay_url, self._owner_nsec(),
+                                                    channel, auth_tag=None)
+        except (RuntimeError, json.JSONDecodeError, KeyError, OSError):
+            return False
+        return any(n and n.strip().lower() == display_name.strip().lower() for _, n in members)
 
     def _compute_agent_auth_tag(self, agent: Agent) -> str | None:
         """The NIP-OA auth tag to write into `agent`'s env file as
@@ -119,7 +256,7 @@ class AgentManager:
         and an agent is only rewritten/restarted when something it actually
         needs changed, never on an already-healthy call.
 
-        Heals five distinct, real incidents this way:
+        Heals six distinct, real incidents this way:
 
         1. buzz-fleet never installed buzz-acp (the binary every unit
            execs) at all — a machine that never separately installed it
@@ -147,6 +284,15 @@ class AgentManager:
            published fine — publishing the tag on the agent's kind:0
            profile is a separate, client-side-only verification path that
            never reaches the relay's own ownership record on its own.
+        8. The `buzz` CLI was never on the unit's PATH — `buzz-acp` tells an
+           agent to run `buzz messages send` to reply, not something it
+           posts itself, so an agent woke on a mention and could not answer
+           at all. Fixed by symlinking `buzz` to `buzz-acp` (Sprig's own
+           multicall dispatch) and adding it to the unit's `Environment=
+           PATH=`; since a running `--user` unit only picks up a new
+           `Environment=`/`WorkingDirectory=` line on restart, every agent
+           is restarted whenever `ensure_template_unit_installed` reports
+           the template actually changed.
 
         No step here should ever need a human to run something by hand.
         """
@@ -155,9 +301,11 @@ class AgentManager:
         owner_pubkey_just_backfilled = owner_pubkey_before != self._community.owner_pubkey
 
         systemd.ensure_linger_enabled(self._runner)
-        systemd.ensure_template_unit_installed(self._runner)
+        template_changed = systemd.ensure_template_unit_installed(self._runner)
         buzz_acp_just_installed = buzz_acp.ensure_buzz_acp_installed()
-        needs_full_refresh = buzz_acp_just_installed or owner_pubkey_just_backfilled
+        buzz_acp.ensure_buzz_cli_link()
+        needs_full_refresh = buzz_acp_just_installed or owner_pubkey_just_backfilled or template_changed
+        rec = self.ensure_fleet_record()
 
         for agent in self.list_agents():
             synced = self._sync_visibility(agent)
@@ -167,9 +315,17 @@ class AgentManager:
 
             resolved_command = harnesses.resolve_adapter_command(agent.harness)
             needs_auth_tag = agent.visibility_managed and not _agent_env_has_auth_tag(agent.id)
+            needs_fleet_env = rec is not None and not (
+                _agent_env_has(agent.id, "BUZZ_FLEET_CHANNEL", self._community.fleet_channel_id or "")
+                and _agent_env_has(agent.id, "BUZZ_FLEET_RETRIEVAL_KEY", rec.retrieval_key)
+            )
+            env_path = systemd.agent_env_path(agent.id)
+            needs_block = not instructions.has_current_block(env_path.read_text() if env_path.exists() else "")
             if (
                 not needs_full_refresh
                 and not needs_auth_tag
+                and not needs_fleet_env
+                and not needs_block
                 and _read_agent_command(agent.id) == resolved_command
             ):
                 continue
@@ -246,7 +402,10 @@ class AgentManager:
                 if visibility.classify_signer_error(e) == "permanent":
                     vs.add_policy_error = str(e)
 
-        for channel_id in agent.channel_ids or []:
+        wanted = list(agent.channel_ids or [])
+        if self._community.fleet_channel_id and self._community.fleet_channel_id not in wanted:
+            wanted.append(self._community.fleet_channel_id)
+        for channel_id in wanted:
             if vs.channels.get(channel_id) == "joined" or channel_id in vs.channel_errors:
                 continue
             try:
@@ -274,12 +433,24 @@ class AgentManager:
         idle_timeout_seconds: int | None = None,
         max_turn_duration_seconds: int | None = None,
         respond_to_allowlist: list[str] | None = None,
+        session_policy: str | None = None,
+        max_turns_per_session: int | None = None,
+        heartbeat_interval_seconds: int | None = None,
+        role: str | None = None,
+        capabilities: list[str] | None = None,
+        description: str | None = None,
         channel_ids: list[str] | None = None,
         channel_add_policy: str | None = None,
         anthropic_api_key: str | None = None,
         openai_api_key: str | None = None,
+        env: dict[str, str] | None = None,
+        mcp_server: McpServer | None = None,
+        force: bool = False,
     ) -> Agent:
         self.ensure_runtime_ready()
+        if not force and self.display_name_taken(display_name):
+            raise ValueError(f"display name {display_name!r} is already used by an agent in the fleet channel; "
+                             f"pick another or pass --force")
         existing_ids = {a.id for a in self.list_agents()}
         agent_id = agent_slug(display_name, existing_ids)
         public_key, secret_key = signer_client.generate_key(self._runner)
@@ -298,8 +469,16 @@ class AgentManager:
             idle_timeout_seconds=idle_timeout_seconds,
             max_turn_duration_seconds=max_turn_duration_seconds,
             respond_to_allowlist=respond_to_allowlist,
+            session_policy=session_policy,  # type: ignore[arg-type]
+            max_turns_per_session=max_turns_per_session,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            role=role,
+            capabilities=capabilities,
+            description=description,
             channel_ids=channel_ids,
             channel_add_policy=channel_add_policy,
+            env=env,  # type: ignore[arg-type]
+            mcp_server=mcp_server,
             visibility_managed=True,
             created_at=datetime.now(UTC),
         )
@@ -346,12 +525,50 @@ class AgentManager:
         # (rather than honoring it or erroring) so it can never be overridden
         # through this path even by a future/careless caller.
         changes = {k: v for k, v in changes.items() if k != "visibility_managed"}
+        if "env" in changes and changes["env"] is not None:
+            # model_copy(update=...) below does NOT run field validation, so
+            # a plain dict[str, str] (what the CLI/TUI actually pass — env
+            # is the one place a caller of this generic, untyped **changes
+            # signature supplies raw dict values, unlike mcp_server which
+            # callers always build via the McpServer constructor, and so is
+            # already fully validated by the time it gets here) would
+            # otherwise be assigned directly into a field typed
+            # dict[str, SecretStr] without ever becoming SecretStr — which
+            # blows up the next time this agent is serialized (state.py's
+            # SecretStr serializer expects an actual SecretStr instance).
+            # Coerce explicitly rather than relying on validate-on-copy. The
+            # same "model_copy skips validation" gap applies to the *keys*,
+            # not just the value type -- Agent.env's field_validator
+            # (models.validate_env_key) never runs for an update, so an
+            # update path calling this with an unsafe key (a newline, or the
+            # reserved BUZZ_ prefix/PI_CODING_AGENT_DIR) would otherwise
+            # silently bypass the same check `agent create` enforces.
+            raw_env = changes["env"]
+            assert isinstance(raw_env, dict)
+            for key in raw_env:
+                validate_env_key(key)
+            changes = {**changes, "env": {k: v if isinstance(v, SecretStr) else SecretStr(v) for k, v in raw_env.items()}}
         self._ensure_owner_pubkey()
         agents = {a.id: a for a in self.list_agents()}
         current = agents[agent_id]
         updated = current.model_copy(update=changes)
 
         if current.visibility_managed:
+            # `env` and `mcp_server` are deliberately NOT in this set.
+            # visibility.managed_agent_content() never reads either field —
+            # so today, changing one is simply a no-op for this trigger, not
+            # a leak. But content_fields' whole job is "does this field
+            # affect the publicly-published record," and these two hold
+            # secrets published to nothing else in this codebase: keeping
+            # them out here is a second, independent guard against them ever
+            # reaching the relay, so a future edit to managed_agent_content
+            # that starts including one (say, to advertise `mcp_server.name`
+            # for discovery) doesn't silently also start publishing its
+            # `env` dict the very next time this set is naively "kept in
+            # sync." A change to either still takes effect immediately —
+            # write_agent_files reads them straight off `updated` below,
+            # unconditionally, on every update — it just never republishes
+            # the relay-facing managed-agent record for it.
             content_fields = {
                 "display_name",
                 "system_prompt_source",
@@ -359,6 +576,10 @@ class AgentManager:
                 "model",
                 "parallelism",
                 "respond_to_allowlist",
+                "role",
+                "capabilities",
+                "description",
+                "harness",
             }
             vs = updated.visibility_state.model_copy(deep=True)
             if any(f in changes and getattr(updated, f) != getattr(current, f) for f in content_fields):
@@ -463,3 +684,15 @@ class AgentManager:
         # slug (Fix 4).
         systemd.agent_env_path(agent_id).unlink(missing_ok=True)
         systemd.agent_prompt_path(agent_id).unlink(missing_ok=True)
+        # Task 19 added two more secret-bearing artifacts under this agent's
+        # WORK_DIR that this cleanup never covered: the MCP wrapper script
+        # (mode 0700, `export TOKEN='<real secret>'`) and Pi's private
+        # mcp.json (mode 0600, the same secrets as JSON) — without this an
+        # agent's real MCP credentials survive "deletion" on disk exactly like
+        # the private key did before the fix above. Glob rather than building
+        # one expected `mcp-<name>.sh` path from `agent.mcp_server` — a server
+        # renamed at some point (before `write_agent_files`'s own stale-wrapper
+        # cleanup existed) can have orphaned more than one wrapper here.
+        for wrapper in (systemd.WORK_DIR / agent_id).glob("mcp-*.sh"):
+            wrapper.unlink(missing_ok=True)
+        (systemd.WORK_DIR / agent_id / ".pi-agent" / "mcp.json").unlink(missing_ok=True)
