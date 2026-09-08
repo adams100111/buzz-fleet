@@ -244,13 +244,26 @@ buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me
 
 ### Communities
 
-Every command that touches a specific community accepts `--community` and
-falls back to the `BUZZ_FLEET_COMMUNITY` environment variable — both
-override the active community for that one invocation only, without
-changing what's stored. The active community itself — used whenever neither
-is given — is a small piece of persisted state, separate from `config.toml`,
-and `community use` is how you change it from the command line (the TUI's
-connect screen is the only other thing that writes it):
+The active community is a small piece of persisted state, separate from
+`config.toml`. `community use` is how you change it from the command line;
+the TUI's picker (`s` on the dashboard) and its connect screen are the only
+other things that write it.
+
+Which commands consult it depends on whether `--community` is optional:
+
+- **`--community` is required**, and the active community is never consulted:
+  `agent create`, `agent list`, `agent delete`, `agent update`, `fleet init`,
+  `fleet status`.
+- **`--community` is optional**, and the active community is used when it is
+  omitted: `fleet agents`, `tasks`, and `task delegate` / `ack` / `report` /
+  `cancel` / `show`. On these, `BUZZ_FLEET_COMMUNITY` also works and takes
+  precedence over the stored pointer — both override it for that one
+  invocation without changing what is stored.
+- The TUI uses it to decide which community it opens to, and `community show`
+  reports it.
+
+Wiring the resolver into the first group is deliberately left to a later
+phase, so today `community use` does not change what `agent list` shows.
 
 ```bash
 # List every community connected on this machine; `*` marks the active one
@@ -269,10 +282,11 @@ buzz-fleet community show
 `community use` first); `community list` never does — several communities
 with none selected is simply displayed with no `*` marked, not an error.
 
-The active community currently affects only the TUI (which screen it opens
-to on launch) and `community show` — the `agent`, `fleet`, and `task`
-command groups do not consult it yet, so `--community` is still required on
-every one of their commands regardless of what `community use` last set.
+If `migrate` refuses with a message about an agent id shared across more than
+one community, that is the collision described in "Upgrading from 0.8.x" — the
+legacy layout stored one env file per bare agent id, so two communities with
+the same agent name shared it, and there is no way to tell from disk which key
+belongs to which agent. Rename or remove one of them before migrating.
 
 ### Manage agents (CLI)
 
