@@ -6,6 +6,7 @@ from buzz_fleet.systemctl_client import (
     AgentStatus,
     disable_now,
     enable_now,
+    raw_state_of_unit,
     restart,
     status,
     status_of_unit,
@@ -139,6 +140,28 @@ def test_status_delegates_to_status_of_unit_with_the_qualified_name() -> None:
     assert status(runner, "acme:reviewer") == status_of_unit(
         FakeRunner(stdout="active\n"), "buzz-agent@acme:reviewer.service"
     )
+
+
+# `raw_state_of_unit` — fix-round 2, MUST-FIX 1: migrate.py's active-unit
+# refusal needs the LITERAL systemctl answer, not `AgentStatus`'s coarser
+# classification (which folds "deactivating" in with "inactive" purely for
+# display, hiding half of an auto-restarting crash loop from a safety check).
+
+
+def test_raw_state_of_unit_returns_the_literal_answer_unclassified() -> None:
+    runner = FakeRunner(stdout="deactivating\n")
+    assert raw_state_of_unit(runner, "buzz-agent@reviewer.service") == "deactivating"
+
+
+def test_raw_state_of_unit_takes_a_literal_unit_name() -> None:
+    runner = FakeRunner(stdout="active\n")
+    assert raw_state_of_unit(runner, "buzz-agent@reviewer.service") == "active"
+    assert runner.calls == [["systemctl", "--user", "is-active", "buzz-agent@reviewer.service"]]
+
+
+def test_raw_state_of_unit_returns_empty_string_for_broken_systemctl() -> None:
+    runner = FakeRunner(stdout="", returncode=1)
+    assert raw_state_of_unit(runner, "buzz-agent@reviewer.service") == ""
 
 
 # Task 4 regression tests: agent ids are unique only within a community, but

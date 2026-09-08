@@ -3,6 +3,7 @@ is just running it again. It refuses to start while any unit is active, because
 moving an agent's env file out from under a running unit is how you get an agent
 holding a key it can no longer re-read."""
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -106,11 +107,34 @@ def test_refuses_when_systemctl_gives_no_usable_answer(tmp_path, monkeypatch) ->
         migrate.run(BrokenRunner())
 
 
-def test_deactivating_and_failed_and_inactive_are_all_safe(tmp_path, monkeypatch) -> None:
-    """The flip side of the two tests above: `inactive`, `deactivating` (an
-    existing, display-oriented coarsening reused from systemctl_client, not
-    something new here), and `failed` must NOT block a migration."""
-    for unit_state in ("inactive", "deactivating", "failed"):
+def test_refuses_while_a_unit_is_deactivating(tmp_path, monkeypatch) -> None:
+    """Fix-round 2 MUST-FIX 1: an auto-restarting (Restart=on-failure) unit
+    transits `deactivating -> activating -> active` on EVERY restart, so a
+    migration that accepts "deactivating" as safe guards only half of the
+    exact crash-loop cycle `test_refuses_while_a_unit_is_activating` guards
+    the other half of. `systemctl_client`'s own `AgentStatus.STOPPED` folds
+    "deactivating" in with "inactive" for display purposes -- migrate must
+    NOT inherit that coarsening for a safety decision, hence
+    `raw_state_of_unit` plus migrate's own explicit allowlist rather than
+    reusing `status()`/`AgentStatus`."""
+    _legacy_tree(tmp_path, monkeypatch)
+
+    class DeactivatingRunner(FakeRunner):
+        def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+            self.calls.append(args)
+            if "is-active" in args:
+                return subprocess.CompletedProcess(args, 0, stdout="deactivating", stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    with pytest.raises(RuntimeError, match="still active"):
+        migrate.run(DeactivatingRunner())
+
+
+def test_failed_and_inactive_are_safe(tmp_path, monkeypatch) -> None:
+    """The flip side of the refusing tests above: `inactive` and `failed`
+    (the literal raw systemctl strings migrate's allowlist accepts) must
+    NOT block a migration."""
+    for unit_state in ("inactive", "failed"):
         _legacy_tree(tmp_path / unit_state, monkeypatch)
 
         class Runner(FakeRunner):
@@ -173,10 +197,20 @@ def test_migrate_installs_the_current_template_unit(tmp_path, monkeypatch) -> No
     agents/%i.env`), pointing at an env file that will never exist there
     again -- the unit fails to start after migration reports success."""
     _legacy_tree(tmp_path, monkeypatch)
-    migrate.run(FakeRunner())
+    runner = FakeRunner()
+    migrate.run(runner)
     content = systemd.template_unit_path().read_text()
     assert str(paths.secrets_dir() / "units") in content
     assert "/agents/%i.env" not in content
+
+    # Fix-round 2: the content check above would also pass against a buggy
+    # version that installs the template AFTER the loop (too late for the
+    # very `enable --now` this is meant to protect) -- assert the ORDER of
+    # calls, not just the end state.
+    flat = [" ".join(c) for c in runner.calls]
+    daemon_reload_index = flat.index("systemctl --user daemon-reload")
+    first_enable_index = next(i for i, c in enumerate(flat) if "enable --now" in c)
+    assert daemon_reload_index < first_enable_index
 
 
 def test_a_failed_enable_aborts_the_migration_rather_than_reporting_success(tmp_path, monkeypatch) -> None:
@@ -360,6 +394,59 @@ def test_a_straggler_added_after_a_full_migration_is_still_found(tmp_path, monke
     assert (paths.secrets_dir() / "units" / "eltahir:straggler.env").exists()
 
 
+def test_deleting_a_migrated_agent_then_remigrating_does_not_resurrect_it(
+    tmp_path, monkeypatch
+) -> None:
+    """Fix-round 2 MUST-FIX 2: `manager.delete_agent` only ever touches the
+    NEW layout -- the agent's state JSON (state.delete_agent), its env file
+    (systemd.agent_env_path), and its prompt (systemd.agent_prompt_path).
+    It knows nothing about the still-present legacy files, and the legacy
+    tree is deliberately kept around until the operator cleans it up by
+    hand (README's "Upgrading from 0.8.x"). Before this fix, `plan()`
+    re-derived every step straight from the legacy tree on every call, so
+    deleting a migrated agent and re-running migrate silently recreated it
+    -- BUZZ_PRIVATE_KEY and all -- directly undoing the deletion (and Fix
+    4's whole point, that a deleted agent's key must not survive on disk).
+    """
+    legacy = _legacy_tree(tmp_path, monkeypatch)
+    migrate.run(FakeRunner())
+
+    # Simulate `buzz-fleet agent delete reviewer` -- exactly the three
+    # NEW-layout files `manager.delete_agent` removes, nothing under legacy.
+    (paths.state_dir() / "communities" / "eltahir" / "agents" / "reviewer.json").unlink()
+    (paths.secrets_dir() / "communities" / "eltahir" / "agents" / "reviewer.json").unlink()
+    (paths.secrets_dir() / "units" / "eltahir:reviewer.env").unlink()
+    (paths.state_dir() / "units" / "eltahir:reviewer.prompt.md").unlink()
+
+    second = migrate.run(FakeRunner())
+
+    assert second == []  # the marker says this agent is done; nothing to redo
+    assert not (paths.state_dir() / "communities" / "eltahir" / "agents" / "reviewer.json").exists()
+    assert not (paths.secrets_dir() / "communities" / "eltahir" / "agents" / "reviewer.json").exists()
+    assert not (paths.secrets_dir() / "units" / "eltahir:reviewer.env").exists()
+    assert not (paths.state_dir() / "units" / "eltahir:reviewer.prompt.md").exists()
+    # The legacy files are still there, untouched (as documented) -- the
+    # fix is that migrate refuses to re-derive from them, not that it
+    # deletes them once an agent's marker exists.
+    assert (legacy / "agents" / "reviewer.env").exists()
+
+
+def test_stray_env_files_already_migrated_do_not_block_a_clean_run(tmp_path, monkeypatch) -> None:
+    """Fix-round 2 small item: the stray-`agents/`-with-no-`communities/`
+    refusal must not fire for an env file that's simply left over after a
+    successful migration plus a partial cleanup -- the README's own
+    documented order deletes `communities/` before `agents/`, so a machine
+    mid-cleanup legitimately has this shape and must still report "safe to
+    re-run", not exit 1."""
+    legacy = _legacy_tree(tmp_path, monkeypatch)
+    migrate.run(FakeRunner())
+
+    # Partial cleanup, per the README: communities/ deleted, agents/ not yet.
+    shutil.rmtree(legacy / "communities")
+
+    assert migrate.run(FakeRunner()) == []
+
+
 def test_env_file_paths_into_the_legacy_tree_are_rewritten(tmp_path, monkeypatch) -> None:
     """The hazard a byte-for-byte copy would reintroduce: a copied-verbatim env
     file's BUZZ_ACP_SYSTEM_PROMPT_FILE still points at the legacy prompt path,
@@ -399,6 +486,12 @@ def test_env_file_paths_into_the_legacy_tree_are_rewritten(tmp_path, monkeypatch
 
     mcp_command = Path(env_values["BUZZ_ACP_MCP_COMMAND"])
     assert mcp_command == paths.data_dir() / "work" / "eltahir:reviewer" / "mcp-search.sh"
+    # Fix-round 2: path equality alone doesn't prove the work-dir copy
+    # actually happened -- assert the file the rewritten path points at is
+    # real and still executable (the work dir is genuinely copied by this
+    # migration, so this is meaningful, not automatically true).
+    assert mcp_command.is_file()
+    assert mcp_command.stat().st_mode & 0o100
     assert str(old_work) not in moved.read_text()
 
     pi_dir = Path(env_values["PI_CODING_AGENT_DIR"])
@@ -455,8 +548,12 @@ def test_created_at_backfill_is_printed_not_silent(tmp_path, monkeypatch, capsys
     _legacy_tree(tmp_path, monkeypatch)
     migrate.run(FakeRunner())
     captured = capsys.readouterr()
-    assert "eltahir:reviewer" in captured.out
-    assert "created_at" in captured.out
+    # Fix-round 2: stderr, not stdout -- stdout is reserved for the CLI's
+    # own step-by-step listing (each Step's description); interleaving this
+    # note into that would make both harder to read or script against.
+    assert "eltahir:reviewer" in captured.err
+    assert "created_at" in captured.err
+    assert "eltahir:reviewer" not in captured.out
 
 
 def test_a_legacy_agent_file_missing_other_required_data_is_a_clean_runtime_error(

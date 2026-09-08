@@ -64,6 +64,25 @@ _STATE_MAP = {
 }
 
 
+def raw_state_of_unit(runner: CommandRunner, unit: str) -> str:
+    """The literal, unclassified `systemctl is-active` answer for `unit`.
+
+    For the one caller (`migrate.py`'s active-unit refusal) that must NOT
+    go through `_STATE_MAP`'s coarsening: `AgentStatus.STOPPED` folds
+    "inactive" and "deactivating" together for display purposes, but a
+    migration refusal needs to tell them apart — a "deactivating" unit is
+    mid-cycle on an auto-restarting (`Restart=on-failure`) crash loop just
+    as much as "activating" is (a live agent transits `deactivating ->
+    activating -> active` on every restart), so accepting it as safe closes
+    only half of the exact crash-loop hazard this refusal exists for.
+    Migrate builds its own explicit allowlist directly from this raw
+    string rather than from any `AgentStatus` bucket, so "safe" never
+    depends on how `_STATE_MAP` happens to be grouped for a different
+    purpose.
+    """
+    return runner.run(["systemctl", "--user", "is-active", unit]).stdout.strip()
+
+
 def status_of_unit(runner: CommandRunner, unit: str) -> AgentStatus:
     """As `status`, but takes a literal systemd unit name rather than a
     community-qualified instance key.

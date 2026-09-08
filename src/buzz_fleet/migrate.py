@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,7 +49,6 @@ from pydantic import ValidationError
 from buzz_fleet import atomic, connect, paths, state, systemctl_client, systemd, units
 from buzz_fleet.models import Agent, Community
 from buzz_fleet.proc import CommandRunner
-from buzz_fleet.systemctl_client import AgentStatus
 
 # Bumped whenever the on-disk layout changes in a way this module's `plan()`
 # needs to know how to move a machine off of. NOTE for a future bump: a
@@ -57,20 +57,24 @@ from buzz_fleet.systemctl_client import AgentStatus
 # "2". A v2-to-v3 migration is a new, separate set of steps; this file's
 # per-asset existence checks (not a whole-machine version gate — see the
 # module docstring) mean a v2 machine already reports "nothing to do" for
-# everything covered here regardless of what a future version adds.
+# everything covered here regardless of what a future version adds. It is
+# currently a write-only artifact — nothing in this codebase reads it back —
+# kept solely because `test_writes_a_layout_version_marker` requires it and
+# a future v2->v3 migration will want a place to check "did v2 finish".
 LAYOUT_VERSION = 2
 
-# systemctl states this migration is safe to run in front of. Reused from
-# `systemctl_client`'s own vocabulary rather than a fresh string comparison —
-# NOT literally just {"inactive"}: `systemctl_client`'s `STOPPED` bucket
-# already folds "deactivating" in alongside "inactive" (a pre-existing,
-# display-oriented coarsening, not something introduced here). Everything
-# else this migration must refuse in front of — "active", "activating"
-# (the crash-loop state; see CLAUDE.md's 775-restart incident), "reloading",
-# and an empty/unrecognised response from a broken or unreachable systemctl —
-# already falls outside this set via `AgentStatus.UNKNOWN`'s default, with no
-# extra handling needed.
-_SAFE_TO_MIGRATE_STATES = frozenset({AgentStatus.STOPPED, AgentStatus.FAILED})
+# The ONLY raw `systemctl is-active` answers this migration accepts as safe
+# to act on. Deliberately an allowlist of literal strings, not a lookup
+# through `systemctl_client`'s `AgentStatus`/`_STATE_MAP`: that map is a
+# *display*-oriented coarsening that folds "deactivating" into the same
+# bucket as "inactive" purely for a status column, and "deactivating" is
+# NOT safe here — an auto-restarting (`Restart=on-failure`) unit transits
+# `deactivating -> activating -> active` on every single restart, so a
+# migration that accepts "deactivating" guards only half of the exact
+# crash-loop hazard CLAUDE.md's 775-restart incident describes. An
+# allowlist also refuses "" and every unrecognised string BY CONSTRUCTION
+# — "unknown is unsafe" no longer depends on a shared enum's default.
+_SAFE_TO_MIGRATE_RAW_STATES = frozenset({"inactive", "failed"})
 
 
 @dataclass(frozen=True)
@@ -117,20 +121,20 @@ def _legacy_community_ids(legacy: Path) -> list[str]:
 def _active_legacy_units(runner: CommandRunner, legacy: Path) -> list[str]:
     """Legacy units not safe to migrate out from under.
 
-    Uses `systemctl_client.status_of_unit` (the unqualified-name sibling of
-    `systemctl_client.status`, since a legacy unit's bare `buzz-agent@<agent
-    id>.service` name would be rejected by `status`'s own `units.split_key`
-    call) rather than a hand-rolled string comparison, so this inherits
-    `_STATE_MAP`'s classification instead of re-deriving it. Anything not in
-    `_SAFE_TO_MIGRATE_STATES` is refused — which, via `AgentStatus.UNKNOWN`,
-    already covers a broken/unreachable systemctl (empty stdout, or any
-    string the map doesn't recognise) with no separate check needed.
+    Uses `systemctl_client.raw_state_of_unit` — the unclassified, literal
+    `is-active` answer — rather than `status_of_unit`'s `AgentStatus`. The
+    systemctl call itself still lives inside `systemctl_client`, not
+    re-implemented here; only the safety judgment (the
+    `_SAFE_TO_MIGRATE_RAW_STATES` allowlist above) is migrate's own, kept
+    deliberately separate from `_STATE_MAP`'s display-oriented grouping so
+    "deactivating" can't quietly ride along with "inactive" the way it does
+    for a status column. See that constant's own comment for why.
     """
     unsafe = []
     for community_id in _legacy_community_ids(legacy):
         for agent_id in _legacy_agent_ids(legacy, community_id):
             unit = f"buzz-agent@{agent_id}.service"
-            if systemctl_client.status_of_unit(runner, unit) not in _SAFE_TO_MIGRATE_STATES:
+            if systemctl_client.raw_state_of_unit(runner, unit) not in _SAFE_TO_MIGRATE_RAW_STATES:
                 unsafe.append(unit)
     return unsafe
 
@@ -144,6 +148,30 @@ def _legacy_work_dir(agent_id: str) -> Path:
 
 def _legacy_prompt_path(legacy: Path, agent_id: str) -> Path:
     return legacy / "agents" / f"{agent_id}.prompt.md"
+
+
+def _already_migrated_agent_ids() -> set[str]:
+    """Bare agent ids (not community-qualified) that already have an env
+    file under the new secrets tree.
+
+    Used only to tell a genuinely stranded legacy env file (one that was
+    never migrated, with no community context left to place it) apart from
+    one that's simply left over after a successful migration plus a
+    partial cleanup — the README's own documented order deletes
+    `communities/` before `agents/`, so a machine mid-cleanup legitimately
+    has agent env files with no `communities/` directory at all.
+    """
+    units_dir = paths.secrets_dir() / "units"
+    if not units_dir.exists():
+        return set()
+    ids = set()
+    for p in units_dir.glob("*.env"):
+        try:
+            _, agent_id = units.split_key(p.stem)
+        except ValueError:
+            continue
+        ids.add(agent_id)
+    return ids
 
 
 def _unique_backup_path(legacy: Path) -> Path:
@@ -196,11 +224,15 @@ def _load_legacy_agent(source: Path) -> Agent:
             f"legacy agent file {source} is missing or has invalid required data: {e}"
         ) from e
     if backfilled:
+        # stderr, not stdout: the CLI's own step-by-step listing (each
+        # Step's `description`) goes to stdout, and interleaving this note
+        # into that would make both harder to read or script against.
         print(
             f"note: {source} had no 'created_at' — using its own mtime "
             f"({mtime.isoformat()}) for {agent.community_id}:{agent.id}. Nothing reads "
             "this field today; fix it by hand afterward if the true creation date ever "
-            "matters (see CLAUDE.md's unbuilt recycling work)."
+            "matters (see CLAUDE.md's unbuilt recycling work).",
+            file=sys.stderr,
         )
     return agent
 
@@ -247,6 +279,16 @@ def plan(runner: CommandRunner) -> list[Step]:
     migration completed is still found and planned here, not silently
     ignored forever.
 
+    An agent whose `_unit_marker_path` already exists is skipped in full —
+    not just its `unit` step. `manager.delete_agent` only ever touches the
+    NEW layout (state JSON, env file, prompt); it knows nothing about the
+    still-present legacy files or this marker, and the legacy tree is
+    deliberately kept around until the operator cleans it up by hand. Without
+    this, `plan()` re-deriving every step straight from the legacy tree on
+    every call would let "migrate, then delete an agent, then migrate again"
+    silently RECREATE that agent — private key included — directly undoing
+    the deletion.
+
     `runner` is used only to query state (`systemctl is-active`, inside
     `run()`'s active-unit refusal, not here) — `plan()` itself never enables,
     disables, or otherwise changes anything a real `systemctl` would
@@ -255,13 +297,19 @@ def plan(runner: CommandRunner) -> list[Step]:
     legacy = paths.legacy_dir()
     if not (legacy / "communities").exists():
         stray_agents = legacy / "agents"
-        if stray_agents.exists() and any(stray_agents.glob("*.env")):
-            raise RuntimeError(
-                f"{stray_agents} holds agent env files but {legacy / 'communities'} does not "
-                "exist — cannot determine which community they belong to, so refusing to "
-                "report 'nothing to do' while they're stranded. Move or remove them, or "
-                "restore the missing communities directory, before migrating."
-            )
+        if stray_agents.exists():
+            already_migrated = _already_migrated_agent_ids()
+            genuinely_stranded = [
+                p.stem for p in stray_agents.glob("*.env") if p.stem not in already_migrated
+            ]
+            if genuinely_stranded:
+                raise RuntimeError(
+                    f"{stray_agents} holds agent env file(s) for {genuinely_stranded} but "
+                    f"{legacy / 'communities'} does not exist — cannot determine which "
+                    "community they belong to, so refusing to report 'nothing to do' while "
+                    "they're stranded. Move or remove them, or restore the missing "
+                    "communities directory, before migrating."
+                )
         return []
 
     community_ids = _legacy_community_ids(legacy)
@@ -300,6 +348,13 @@ def plan(runner: CommandRunner) -> list[Step]:
             )
         for agent_id in _legacy_agent_ids(legacy, community_id):
             key = units.instance_key(community_id, agent_id)
+            if _unit_marker_path(key).exists():
+                # Fully migrated already (see the "MUST-FIX 2" paragraph in
+                # this function's own docstring) -- skip this agent
+                # entirely, not just its unit step, so a legacy tree left in
+                # place (as documented) can never resurrect a since-deleted
+                # agent from it.
+                continue
             agent_target = (
                 paths.state_dir() / "communities" / community_id / "agents" / f"{agent_id}.json"
             )
@@ -317,28 +372,30 @@ def plan(runner: CommandRunner) -> list[Step]:
             if env_source.exists() and not env_target.exists():
                 steps.append(Step("env", f"move env file for {key}", env_source, env_target))
             prompt_source = _legacy_prompt_path(legacy, agent_id)
-            prompt_target = paths.state_dir() / "units" / f"{key}.prompt.md"
+            # Same helper `_rewrite_env` uses for the new location, not a
+            # second, independently-spelled path -- they used to agree only
+            # by coincidence.
+            prompt_target = systemd.agent_prompt_path(key)
             if prompt_source.exists() and not prompt_target.exists():
                 steps.append(Step("prompt", f"move prompt for {key}", prompt_source, prompt_target))
             work_source = _legacy_work_dir(agent_id)
             work_target = systemd.work_dir(key)
             if work_source.exists() and not work_target.exists():
                 steps.append(Step("work", f"move workdir for {key}", work_source, work_target))
-            # The legacy unit name is deliberately unqualified: that is what it
-            # is actually called on a pre-migration machine. Gated on its own
-            # on-disk marker (see `_unit_marker_path`), not on whether the
-            # other four steps above ran THIS call — an interruption between
-            # "work" and "unit" must still re-plan "unit" on resume even
-            # though every other asset for this agent already exists.
-            if not _unit_marker_path(key).exists():
-                steps.append(
-                    Step(
-                        "unit",
-                        f"rename buzz-agent@{agent_id} to buzz-agent@{key}",
-                        old_unit=f"buzz-agent@{agent_id}.service",
-                        new_unit=units.unit_name(key),
-                    )
+            # The legacy unit name is deliberately unqualified: that is what
+            # it is actually called on a pre-migration machine. Unconditional
+            # here (unlike the four steps above): reaching this line already
+            # means `_unit_marker_path(key)` doesn't exist yet (the `continue`
+            # above would have skipped this agent otherwise), so the unit
+            # step is always still outstanding.
+            steps.append(
+                Step(
+                    "unit",
+                    f"rename buzz-agent@{agent_id} to buzz-agent@{key}",
+                    old_unit=f"buzz-agent@{agent_id}.service",
+                    new_unit=units.unit_name(key),
                 )
+            )
     return steps
 
 
@@ -433,7 +490,13 @@ def run(runner: CommandRunner, *, dry_run: bool = False) -> list[Step]:
             # interrupted attempt is cleared first so the retry starts
             # clean rather than erroring on an already-existing directory.
             tmp_dest = step.destination.parent / f".{step.destination.name}.migrating"
-            if tmp_dest.exists():
+            # `.exists()` alone would miss a dangling symlink AND would raise
+            # `NotADirectoryError` from `rmtree` if the leftover is a plain
+            # file or a symlink to one (nothing prevents a killed run's
+            # leftover from being either) -- check what it actually is.
+            if tmp_dest.is_symlink() or tmp_dest.is_file():
+                tmp_dest.unlink()
+            elif tmp_dest.is_dir():
                 shutil.rmtree(tmp_dest)
             shutil.copytree(step.source, tmp_dest, symlinks=True)
             os.replace(tmp_dest, step.destination)
