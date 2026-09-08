@@ -385,9 +385,16 @@ is fixed in the Python core, independently of the frontend:
   escaping algorithm leaves alone — and `:` is excluded from the slug charset
   (`[^a-z0-9-]` in `slug.py`), so the name cannot be ambiguous the way
   `<community>-<agent>` would be when either half contains a dash.
-- Names are built with `systemd-escape --template`, never string concatenation,
-  so a community id that later admits a wider charset cannot produce an invalid
-  unit name silently.
+- Names are **not** escaped. Verified live: `systemd-escape` renders a literal
+  `-` as `\x2d`, because `-` is systemd's escape for `/` — so escaping
+  `eltahir:my-lara-cdx` yields `eltahir:my\x2dlara\x2dcdx`, and since the
+  template uses `%i`, the env file would be named with backslashes in it. A
+  literal-dash instance name is meanwhile perfectly valid and loadable, and
+  every real agent on this fleet has dashes. Keys are therefore used verbatim
+  and *validated* against the unit-name charset (`[A-Za-z0-9:_.-]`, no leading
+  `.`), so a malformed key fails loudly rather than being silently mangled.
+- The template unit must keep `%i` and never `%I`: they differ for dashed names,
+  because `%I` unescapes `-` back to `/`.
 - **Convention, inherited by everything that follows: an instance name is
   community-first.** `buzz-fleet-conductor@<community>` in the orchestration
   design already conforms. Recording it here stops a third convention appearing
