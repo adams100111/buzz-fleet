@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -91,6 +93,8 @@ app.add_typer(task_app, name="task")
 app.command("tasks")(tasks_command)
 config_app = typer.Typer(help="Inspect configuration")
 app.add_typer(config_app, name="config")
+community_app = typer.Typer(help="List the connected communities and choose the active one")
+app.add_typer(community_app, name="community")
 
 
 def _version_callback(show_version: bool) -> None:
@@ -421,6 +425,74 @@ def config_show() -> None:
         typer.echo("unrecognised keys (ignored):")
         for key in unknown_keys:
             typer.echo(f"  {key}")
+
+
+def _active_or_none() -> str | None:
+    """resolve_community_id raises RuntimeError when several communities
+    exist and none is selected, and ValueError when config.toml (which it
+    consults internally) is malformed. For `community list`/`show` neither
+    case is an error to raise past the caller — an ambiguous selection is a
+    state to display, and a config typo must not break `community list`
+    (the same bug was found and fixed in the TUI in Task 7)."""
+    from buzz_fleet.orchestration.identity import resolve_community_id
+
+    try:
+        return resolve_community_id(os.environ, None)
+    except (RuntimeError, ValueError):
+        return None
+
+
+@community_app.command("list")
+def community_list(
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List every connected community and mark the active one."""
+    ids = state.list_community_ids()
+    active = _active_or_none()
+    if as_json:
+        typer.echo(json.dumps([{"id": i, "active": i == active} for i in ids]))
+        return
+    if not ids:
+        typer.echo("No communities yet. Run `buzz-fleet connect` first.")
+        return
+    for community_id in ids:
+        typer.echo(f"{'*' if community_id == active else ' '} {community_id}")
+    if active is None:
+        typer.echo("\nNo active community. Run `buzz-fleet community use <id>`.")
+
+
+@community_app.command("use")
+def community_use(
+    community_id: Annotated[str, typer.Argument(help="The community to make active")],
+) -> None:
+    """Set the active community for this machine."""
+    ids = state.list_community_ids()
+    if community_id not in ids:
+        # Printed to stdout, not stderr: this is a validation rejection the
+        # user is meant to read and act on directly (it names the known
+        # ids), not a stack-trace-style failure — same reasoning as the
+        # plain `no active community` message below.
+        typer.echo(f"No community {community_id!r}. Known: {', '.join(ids) or 'none'}")
+        raise typer.Exit(code=1)
+    state.save_active_community(community_id)
+    typer.echo(f"Active community: {community_id}")
+
+
+@community_app.command("show")
+def community_show() -> None:
+    """Show the active community, its relay, and how many agents it has."""
+    active = _active_or_none()
+    if active is None:
+        typer.echo("No active community. Run `buzz-fleet community use <id>`.")
+        raise typer.Exit(code=1)
+    community = state.load_community(active)
+    if community is None:
+        typer.echo(f"Community {active!r} is selected but its file is missing.", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"id:            {community.id}")
+    typer.echo(f"relay:         {community.relay_url}")
+    typer.echo(f"agents:        {len(state.load_agents(active))}")
+    typer.echo(f"fleet channel: {community.fleet_channel_id or '(none)'}")
 
 
 @app.command()

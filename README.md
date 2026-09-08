@@ -237,6 +237,33 @@ instead of passing it as a plaintext argument:
 buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me
 ```
 
+### Communities
+
+Every command that touches a specific community accepts `--community` and
+falls back to the `BUZZ_FLEET_COMMUNITY` environment variable — both
+override the active community for that one invocation only, without
+changing what's stored. The active community itself — used whenever neither
+is given — is a small piece of persisted state, separate from `config.toml`,
+and `community use` is how you change it from the command line (the TUI's
+connect screen is the only other thing that writes it):
+
+```bash
+# List every community connected on this machine; `*` marks the active one
+buzz-fleet community list
+buzz-fleet community list --json
+
+# Make a community active — validates the id exists first, and leaves the
+# previous selection untouched if it doesn't
+buzz-fleet community use eltahir
+
+# Show the active community's relay, agent count, and fleet channel
+buzz-fleet community show
+```
+
+`community show` exits with an error if no community is active yet (run
+`community use` first); `community list` never does — several communities
+with none selected is simply displayed with no `*` marked, not an error.
+
 ### Manage agents (CLI)
 
 ```bash
