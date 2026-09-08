@@ -84,3 +84,34 @@ def test_unit_name_raises_for_invalid_key() -> None:
     """unit_name validates the key and raises rather than emitting a mangled name."""
     with pytest.raises(ValueError, match="contains invalid character"):
         units.unit_name("eltahir:my agent")
+
+
+def test_unit_name_with_uppercase() -> None:
+    """Uppercase is valid in systemd unit names and must be preserved."""
+    assert (
+        units.unit_name("Eltahir:reviewer")
+        == "buzz-agent@Eltahir:reviewer.service"
+    )
+
+
+def test_validate_instance_key_accepts_mixed_case() -> None:
+    """Mixed-case keys are valid and accepted without raising."""
+    units.validate_instance_key("Eltahir:Reviewer")
+
+
+def test_validate_instance_key_rejects_multiple_colons() -> None:
+    """Keys with more than one colon are rejected; split_key would misparse them."""
+    with pytest.raises(ValueError, match="has 2 colons"):
+        units.validate_instance_key("a:b:c")
+
+
+def test_validate_instance_key_rejects_no_separator() -> None:
+    """Keys without a colon separator are rejected."""
+    with pytest.raises(ValueError, match="has no separator"):
+        units.validate_instance_key("noseparator")
+
+
+def test_unit_name_raises_for_multiple_colons() -> None:
+    """unit_name rejects keys with multiple colons rather than emitting a name."""
+    with pytest.raises(ValueError, match="has 2 colons"):
+        units.unit_name("a:b:c")

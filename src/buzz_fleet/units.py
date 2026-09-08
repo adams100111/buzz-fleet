@@ -24,10 +24,11 @@ from __future__ import annotations
 TEMPLATE = "buzz-agent@.service"
 SEPARATOR = ":"
 
-# Valid characters in a systemd instance name: alphanumerics, dashes, underscores,
-# dots (not leading), and colons. Matches the slug charset [a-z0-9-] plus the
-# separator `:` and the non-slug safe characters `_` and `.`.
-_VALID = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.:")
+# Valid characters in a systemd instance name: alphanumerics (both cases), dashes,
+# underscores, dots (not leading), and colons. Matches [A-Za-z0-9:_.-].
+_VALID = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
+)
 
 
 def instance_key(community_id: str, agent_id: str) -> str:
@@ -50,8 +51,8 @@ def split_key(key: str) -> tuple[str, str]:
 def validate_instance_key(key: str) -> None:
     """Validate an instance key for use in a systemd unit name.
 
-    Raises ValueError if the key contains invalid characters or starts with '.'.
-    A leading dot is invalid because systemd would escape it as \x2e.
+    Raises ValueError if the key contains invalid characters, starts with '.',
+    or does not contain exactly one colon separator.
     """
     if key.startswith("."):
         raise ValueError(
@@ -62,6 +63,15 @@ def validate_instance_key(key: str) -> None:
             raise ValueError(
                 f"instance key {key!r} contains invalid character {char!r}"
             )
+    colon_count = key.count(SEPARATOR)
+    if colon_count == 0:
+        raise ValueError(
+            f"instance key {key!r} has no separator (missing colon)"
+        )
+    if colon_count > 1:
+        raise ValueError(
+            f"instance key {key!r} has {colon_count} colons (expected 1)"
+        )
 
 
 def unit_name(key: str) -> str:
