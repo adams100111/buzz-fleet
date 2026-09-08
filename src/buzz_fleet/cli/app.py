@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from buzz_fleet import __version__, harnesses, state
+from buzz_fleet import __version__, harnesses, paths, state
 from buzz_fleet.cli.fleet_commands import fleet_app, task_app, tasks_command
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
@@ -89,6 +89,8 @@ app.add_typer(harness_app, name="harness")
 app.add_typer(fleet_app, name="fleet")
 app.add_typer(task_app, name="task")
 app.command("tasks")(tasks_command)
+config_app = typer.Typer(help="Inspect configuration")
+app.add_typer(config_app, name="config")
 
 
 def _version_callback(show_version: bool) -> None:
@@ -389,6 +391,21 @@ def harness_install(name: Annotated[str, typer.Argument(help="claude, codex, pi,
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
     typer.echo(f"Installed {name}'s adapter.")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print the effective configuration and where it was read from."""
+    from dataclasses import asdict
+
+    from buzz_fleet import config as config_module
+
+    path = paths.config_dir() / "config.toml"
+    typer.echo(f"# {path}{'' if path.exists() else '  (not present; showing defaults)'}")
+    values = asdict(config_module.load())
+    values["ntfy_token"] = "<set>" if values["ntfy_token"] else None
+    for key, value in values.items():
+        typer.echo(f"{key} = {value!r}")
 
 
 @app.command()

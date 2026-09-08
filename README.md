@@ -127,6 +127,48 @@ privilege for a non-console session to self-enable lingering — if that
 happens, `buzz-fleet` tells you the exact one-time command to run
 (`sudo loginctl enable-linger <you>`) instead of failing confusingly later.
 
+### Configuration
+
+`config.toml` lives at `$XDG_CONFIG_HOME/buzz-fleet/config.toml` (falling back
+to `~/.config/buzz-fleet/config.toml` when `XDG_CONFIG_HOME` is unset).
+`buzz-fleet` never rewrites this file — that's deliberate, so your comments
+and formatting survive, and it's why every field is optional and defaults
+apply when the file (or any section in it) is missing:
+
+```toml
+# buzz-fleet configuration. Machine-managed data lives in $XDG_STATE_HOME.
+
+[general]
+default_community = "eltahir"   # used when nothing else selects one
+
+[ui]
+refresh_interval_ms = 2000
+default_view       = "agents"   # agents | runs | tasks
+theme              = "buzz-fleet"
+confirm_destructive = true
+
+[defaults]
+harness = "claude"              # pre-selected in the create-agent form
+
+[notifier]                      # orchestration spec 5.4
+ntfy_url   = "https://ntfy.example.org/buzz-fleet"
+ntfy_token = "env:BUZZ_FLEET_NTFY_TOKEN"   # never a literal secret
+
+[herdr]
+report_agents = false           # see section 9
+```
+
+Secrets are never literals in config. A value may be `env:NAME` to indirect
+through the environment; anything else is treated as plaintext and rejected
+for fields marked secret (currently `notifier.ntfy_token`) — `config.toml` is
+a file you're invited to edit and hand around, so a pasted token would be the
+one plaintext secret outside the secrets tree.
+
+Run `buzz-fleet config show` to print the effective configuration (defaults
+merged with whatever `config.toml` sets) and where it was read from. A secret
+value is never printed — you'll see `<set>` or `None` for `ntfy_token`, never
+its value.
+
 ## Usage
 
 ### Connect to a community
