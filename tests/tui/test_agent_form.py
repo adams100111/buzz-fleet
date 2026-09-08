@@ -169,7 +169,7 @@ async def test_template_select_present_only_in_create_mode(tmp_path, monkeypatch
     (personas_dir / "laravel.persona.md").write_text(
         "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nPrompt body.\n"
     )
-    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
+    monkeypatch.setattr(personas, "default_personas_dir", lambda: personas_dir)
 
     manager = FakeManager()
     app = BuzzFleetApp()
@@ -206,7 +206,7 @@ async def test_no_templates_found_shows_explanatory_message_instead_of_blank_sel
 ) -> None:
     from buzz_fleet import personas
 
-    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", tmp_path / "personas")
+    monkeypatch.setattr(personas, "default_personas_dir", lambda: tmp_path / "personas")
 
     manager = FakeManager()
     app = BuzzFleetApp()
@@ -230,7 +230,7 @@ async def test_selecting_template_prefills_and_overwrites_form_fields(tmp_path, 
         "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\nmodel: claude-sonnet-5\n---\n"
         "You are the Laravel dev.\n"
     )
-    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
+    monkeypatch.setattr(personas, "default_personas_dir", lambda: personas_dir)
 
     manager = FakeManager()
     app = BuzzFleetApp()
@@ -437,7 +437,7 @@ async def test_selecting_template_prefills_team_instructions_from_sibling_pack_f
     (personas_dir / "laravel.persona.md").write_text(
         "---\ndisplay_name: Laravel Backend Dev\nruntime: claude\n---\nYou are the Laravel dev.\n"
     )
-    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
+    monkeypatch.setattr(personas, "default_personas_dir", lambda: personas_dir)
 
     manager = FakeManager()
     app = BuzzFleetApp()
@@ -779,7 +779,7 @@ async def test_selecting_template_prefills_env_and_mcp_server(tmp_path, monkeypa
         "mcp_servers:\n  - name: boost\n    command: php\n    args: [\"artisan\", \"boost:mcp\"]\n"
         "---\nYou are the Laravel dev.\n"
     )
-    monkeypatch.setattr(personas, "DEFAULT_PERSONAS_DIR", personas_dir)
+    monkeypatch.setattr(personas, "default_personas_dir", lambda: personas_dir)
 
     manager = FakeManager()
     app = BuzzFleetApp()

@@ -28,9 +28,13 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ValidationError, field_validator
 
+from buzz_fleet import paths
 from buzz_fleet.models import McpServer, validate_env_key
 
-DEFAULT_PERSONAS_DIR = Path.home() / ".config" / "buzz-fleet" / "personas"
+
+def default_personas_dir() -> Path:
+    # User-authored content, so config rather than state.
+    return paths.config_dir() / "personas"
 
 
 class PersonaTemplate(BaseModel):
