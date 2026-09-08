@@ -424,6 +424,34 @@ def config_show() -> None:
 
 
 @app.command()
+def migrate(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the plan and change nothing.")
+    ] = False,
+) -> None:
+    """Move this machine onto the current file layout and unit names.
+
+    Never runs automatically: it stops units and moves key material. Safe to
+    re-run — every step checks its own postcondition, so an interrupted
+    migration resumes where it stopped.
+    """
+    from buzz_fleet import migrate as migrate_module
+
+    try:
+        steps = migrate_module.run(RealCommandRunner(), dry_run=dry_run)
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    if not steps:
+        typer.echo("Already on the current layout; nothing to do.")
+        return
+    for step in steps:
+        typer.echo(f"{'would ' if dry_run else ''}{step.description}")
+    typer.echo(f"\n{len(steps)} step(s){' planned' if dry_run else ' applied'}.")
+
+
+@app.command()
 def tui() -> None:
     from buzz_fleet.tui.app import BuzzFleetApp
 

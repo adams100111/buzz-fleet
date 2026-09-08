@@ -58,6 +58,37 @@ overwrites the installed binaries in place — there's no separate "update"
 command, no version diffing, and no confirmation prompt. Run
 `buzz-fleet --version` afterward to confirm you're on the new version.
 
+### Upgrading from 0.8.x
+
+0.9.0 moved every file `buzz-fleet` owns onto the XDG base directories (with
+secrets split into a parallel, more restrictively permissioned tree) and
+renamed every agent's systemd unit instance from `buzz-agent@<agent-id>` to
+`buzz-agent@<community-id>:<agent-id>`, so two communities can never again
+collide on one agent id sharing a unit. Existing installs need a one-time,
+one-command migration — it does not run automatically, because it stops
+units and moves key material:
+
+```bash
+# Stop every agent first — the migration refuses to run while any are active.
+systemctl --user stop 'buzz-agent@*'
+
+buzz-fleet migrate --dry-run   # review the plan; changes nothing
+buzz-fleet migrate             # apply it
+buzz-fleet agent list          # confirm every agent is present and running
+```
+
+The migration is resumable: if it's interrupted partway, just run
+`buzz-fleet migrate` again — every step checks its own postcondition, so
+whatever already moved is left alone and only the rest is redone.
+
+Before touching anything, it copies your entire pre-migration
+`~/.config/buzz-fleet` tree to `~/.config/buzz-fleet.bak-<timestamp>`.
+**That backup holds every secret it copied in plaintext** — the legacy
+layout kept relay nsecs and agent private keys inline in the same JSON files
+as everything else, unlike the split state/secrets tree the migration moves
+you onto. Keep the backup only until you've confirmed the fleet is healthy
+on the new layout, then delete it.
+
 ### Building from source instead
 
 If you're on an architecture the releases don't cover yet, or you're
