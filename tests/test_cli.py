@@ -45,7 +45,7 @@ def test_version_flag_prints_version_and_exits() -> None:
 
 
 def test_connect_saves_community_on_success(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", lambda: FakeRunner())
 
     result = runner_cli.invoke(
@@ -66,7 +66,7 @@ def test_connect_prompts_for_admin_nsec_with_masked_input_when_omitted(tmp_path,
     rather than required as a plain CLI argument, to keep the owner's nsec out
     of shell history and /proc/<pid>/cmdline.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", lambda: FakeRunner())
 
     result = runner_cli.invoke(

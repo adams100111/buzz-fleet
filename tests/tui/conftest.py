@@ -13,13 +13,13 @@ def _isolated_buzz_fleet_config_dir(tmp_path, monkeypatch) -> None:
     "eltahir" community already saved (this one does, from earlier manual
     testing), every test in this directory would silently act on it.
 
-    Point `CONFIG_DIR` at an empty per-test directory by default — using
+    Point `XDG_STATE_HOME` at an empty per-test directory by default — using
     the real `state.load_community` implementation throughout, never
     mocked — so `state.load_community(...)` genuinely, correctly returns
     None rather than reporting a fake value. Tests that want a specific
     saved community write one into this same `tmp_path` themselves (most
-    already monkeypatch `buzz_fleet.state.CONFIG_DIR` to their own
-    `tmp_path` explicitly, which is the same object pytest hands this
-    fixture, so the two compose without conflict).
+    already set `XDG_STATE_HOME` to their own `tmp_path` explicitly, which
+    is the same object pytest hands this fixture, so the two compose
+    without conflict).
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path / "buzz-fleet-config")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "buzz-fleet-state"))

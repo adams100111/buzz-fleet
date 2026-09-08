@@ -88,7 +88,7 @@ def _buzz_acp_already_installed(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -120,7 +120,7 @@ def test_create_agent_writes_env_and_mcp_server_into_agent_files(tmp_path: Path,
     """
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -156,7 +156,7 @@ def test_update_agent_rejects_unsafe_env_key(tmp_path: Path, monkeypatch) -> Non
     # but, before this fix, never applied the same reasoning to the *key*.
     # `agent update --env BUZZ_ACP_AGENT_OWNER=attacker` would otherwise
     # silently re-point a live agent's owner with no validation anywhere.
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -185,7 +185,7 @@ def test_update_agent_env_or_mcp_server_change_does_not_republish_managed_agent(
     """
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -225,7 +225,7 @@ def test_create_agent_publishes_profile_and_add_policy_with_connection_auth_tag(
     member" before the event is ever considered, regardless of what auth
     tag is embedded in the event content.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -247,7 +247,7 @@ def test_create_agent_publishes_profile_and_add_policy_with_connection_auth_tag(
 
 
 def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -267,7 +267,7 @@ def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch)
 
 
 def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -290,7 +290,7 @@ def test_create_agent_with_missing_persona_file_fails_before_publishing(tmp_path
     A missing/invalid persona_file path must fail loudly before any relay-side
     effect happens — otherwise state would be orphaned with no local record.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -315,7 +315,7 @@ def test_delete_agent_survives_remove_member_failure_for_never_registered_agent(
     rejects remove-member as "member not found" on delete. That must not
     crash deletion — it's expected steady state, not an error to surface.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -345,7 +345,7 @@ def test_delete_agent_removes_env_and_prompt_files(tmp_path: Path, monkeypatch) 
     private-key-bearing .env file and its .prompt.md file, not just the state
     JSON — otherwise the secret survives "deletion" on disk.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -376,7 +376,7 @@ def test_delete_agent_removes_mcp_wrapper_and_pi_mcp_json(tmp_path: Path, monkey
 
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
@@ -404,7 +404,7 @@ def test_update_agent_preserves_previously_set_api_keys(tmp_path: Path, monkeypa
     """Regression test for Fix 9: update_agent must not wipe a previously-set
     ANTHROPIC_API_KEY/OPENAI_API_KEY when the update doesn't touch keys at all.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -444,7 +444,7 @@ def test_create_agent_is_recorded_locally_even_if_enable_now_fails(tmp_path: Pat
     the agent must still be discoverable (and therefore deletable/retryable)
     via `list_agents()` even though its unit never actually started.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -491,7 +491,7 @@ def test_create_agent_fails_before_any_side_effect_when_linger_cannot_be_enabled
     message — before minting a key, publishing relay membership, or writing
     any files — not fail confusingly later at enable_now.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -511,7 +511,7 @@ def test_create_agent_fails_before_any_side_effect_when_linger_cannot_be_enabled
 
 
 def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -537,7 +537,7 @@ def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) ->
 
 
 def test_create_agent_publishes_visibility_events_in_order(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -562,7 +562,7 @@ def test_create_agent_publishes_visibility_events_in_order(tmp_path: Path, monke
 
 
 def test_create_agent_records_permanent_channel_error_without_failing(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -606,7 +606,7 @@ def test_ensure_runtime_ready_restarts_existing_agents_when_buzz_acp_just_instal
     restart when buzz-acp was already fine (that would restart healthy
     agents on every single call, not just the one that matters).
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -637,7 +637,7 @@ def test_ensure_runtime_ready_restarts_existing_agents_when_buzz_acp_just_instal
 def test_ensure_runtime_ready_does_not_restart_agents_when_buzz_acp_already_installed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -667,7 +667,7 @@ def test_ensure_runtime_ready_refreshes_agent_whose_adapter_command_is_now_resol
     must notice the now-resolvable command differs from what's on disk and
     heal it, without needing buzz-acp itself to have just been installed.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -707,7 +707,7 @@ def test_ensure_runtime_ready_refreshes_agent_whose_adapter_command_is_now_resol
 def test_ensure_runtime_ready_continues_healing_other_agents_if_one_restart_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -748,7 +748,7 @@ def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(
     feature existed (visibility_managed=False) must never have any
     visibility signer subcommand invoked against it, ever.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -788,7 +788,7 @@ def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(
 
 
 def test_ensure_runtime_ready_retries_a_still_pending_visibility_step(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -823,7 +823,7 @@ def test_ensure_runtime_ready_retries_a_still_pending_visibility_step(tmp_path: 
 
 
 def test_update_agent_republishes_managed_agent_on_display_name_change(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -858,7 +858,7 @@ def test_update_agent_republishes_managed_agent_on_directory_field_change(
     to republish would leave every other machine reading stale directory
     data indefinitely, since nothing else re-triggers the publish.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -887,7 +887,7 @@ def test_update_agent_republishes_managed_agent_on_directory_field_change(
 def test_update_agent_with_unchanged_directory_field_does_not_republish(
     field: str, value: object, tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -916,7 +916,7 @@ def test_update_agent_with_unchanged_directory_field_does_not_republish(
 
 
 def test_update_agent_joins_new_channel_and_leaves_removed_one(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -943,7 +943,7 @@ def test_update_agent_joins_new_channel_and_leaves_removed_one(tmp_path: Path, m
 
 
 def test_update_agent_does_not_touch_visibility_for_old_agent(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -974,7 +974,7 @@ def test_update_agent_with_unchanged_display_name_does_not_republish(tmp_path: P
     force a republish (and silently clear any recorded permanent error) on
     every TUI edit, even a no-op one.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1006,7 +1006,7 @@ def test_update_agent_drops_caller_supplied_visibility_managed(tmp_path: Path, m
     dropped — never honored, and never an error either — so a future/
     careless caller can't flip it.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1029,7 +1029,7 @@ def test_update_agent_drops_caller_supplied_visibility_managed(tmp_path: Path, m
 
 
 def test_delete_agent_leaves_channels_retracts_and_archives(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1068,7 +1068,7 @@ def test_delete_agent_continues_leaving_other_channels_if_one_leave_fails(tmp_pa
     afterward — this is the specific fault-isolation behavior a
     single-channel test cannot exercise.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1118,7 +1118,7 @@ def test_ensure_runtime_ready_survives_deleted_persona_file(tmp_path: Path, monk
     could reappear), leaving `managed_agent_published=False` and
     `managed_agent_error=None` so a future call retries it.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1151,7 +1151,7 @@ def test_ensure_runtime_ready_survives_deleted_persona_file(tmp_path: Path, monk
 
 
 def test_delete_agent_skips_visibility_teardown_for_old_agent(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1186,7 +1186,7 @@ def test_create_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -
     with "policy:owner_only — agent has no owner set", even though every
     visibility event (kind:0/30177/10100) published fine.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1209,7 +1209,7 @@ def test_ensure_runtime_ready_retroactively_adds_missing_auth_tag(tmp_path: Path
     but its env file lacks BUZZ_AUTH_TAG — ensure_runtime_ready must notice
     and fix it on the very next call, without needing the agent recreated.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1236,7 +1236,7 @@ def test_ensure_runtime_ready_retroactively_adds_missing_auth_tag(tmp_path: Path
 
 
 def test_ensure_runtime_ready_does_not_add_auth_tag_for_old_agent(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1265,7 +1265,7 @@ def test_ensure_runtime_ready_does_not_add_auth_tag_for_old_agent(tmp_path: Path
 
 
 def test_update_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
@@ -1288,7 +1288,7 @@ def test_update_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -
 
 
 def test_template_change_restarts_every_agent(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "config"))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
@@ -1312,7 +1312,7 @@ from buzz_fleet.orchestration.record import ABOUT_HEADER, FleetRecord, encode_ab
 
 
 def _fresh_manager(tmp_path: Path, monkeypatch, runner: FakeRunner) -> AgentManager:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "config"))
     monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
     monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)

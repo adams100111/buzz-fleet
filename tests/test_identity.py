@@ -25,7 +25,7 @@ def test_agent_identity_from_env() -> None:
 
 
 def test_owner_identity_from_local_state(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     state.save_community(Community(id="e", relay_url="wss://r", relay_admin_nsec="nsec1admin", owner_pubkey="0" * 64,
                                    fleet_channel_id=CH, fleet_record=FleetRecord(retrieval_key=RK, created_at=1)))
     ident = resolve_identity({}, FakeRunner(), community_id=None)
@@ -33,7 +33,7 @@ def test_owner_identity_from_local_state(tmp_path, monkeypatch) -> None:
 
 
 def test_owner_identity_errors(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     with pytest.raises(RuntimeError, match="connect"):
         resolve_identity({}, FakeRunner(), community_id=None)
     for cid in ("a", "b"):

@@ -112,7 +112,7 @@ def test_env_and_mcp_round_trip_with_secrets(tmp_path, monkeypatch) -> None:
     from buzz_fleet import state
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr(state, "CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     agent = Agent(**_base_kwargs(), env={"DATABASE_URL": "postgres://x"},
                   mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"}))
     state.save_agent(agent)

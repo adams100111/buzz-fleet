@@ -30,7 +30,7 @@ class FakeRunner:
 
 
 def test_connect_and_save_saves_community_on_success(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     runner = FakeRunner(ok=True)
 
     result = connect_and_save(runner, "eltahir", "wss://buzz.eltahir.me", "nsec1abc")
@@ -42,7 +42,7 @@ def test_connect_and_save_saves_community_on_success(tmp_path, monkeypatch) -> N
 
 
 def test_connect_and_save_does_not_save_on_failure(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     runner = FakeRunner(ok=False)
 
     result = connect_and_save(runner, "eltahir", "wss://buzz.eltahir.me", "nsec1bad")
@@ -53,7 +53,7 @@ def test_connect_and_save_does_not_save_on_failure(tmp_path, monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_connect_screen_success_switches_to_dashboard(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr(
         "buzz_fleet.tui.screens.connect.RealCommandRunner", lambda: FakeRunner(ok=True)
     )
@@ -74,7 +74,7 @@ async def test_connect_screen_success_switches_to_dashboard(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_connect_screen_failure_stays_on_screen_and_does_not_save(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr(
         "buzz_fleet.tui.screens.connect.RealCommandRunner", lambda: FakeRunner(ok=False)
     )
