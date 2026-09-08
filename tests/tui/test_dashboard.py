@@ -65,7 +65,7 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
     monkeypatch.setattr(
         "buzz_fleet.tui.screens.dashboard.agent_status",
-        lambda agent_id: AgentStatus.RUNNING,
+        lambda community_id, agent_id: AgentStatus.RUNNING,
     )
 
     app = BuzzFleetApp()
@@ -124,7 +124,7 @@ async def test_dashboard_refreshes_when_a_pushed_screen_is_popped(monkeypatch) -
 
     agents: list[Agent] = []
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: list(agents))
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
@@ -238,7 +238,7 @@ async def test_delete_agent_shows_confirmation_before_deleting(monkeypatch) -> N
     from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]
@@ -262,7 +262,7 @@ async def test_confirming_delete_dialog_deletes_the_agent(monkeypatch) -> None:
     from unittest.mock import MagicMock
 
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]
@@ -288,7 +288,7 @@ async def test_cancelling_delete_dialog_does_not_delete(monkeypatch) -> None:
     from unittest.mock import MagicMock
 
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]
@@ -319,7 +319,7 @@ async def test_delete_key_binding_triggers_delete_confirmation(monkeypatch) -> N
     from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]

@@ -10,7 +10,7 @@ Its only standalone (non-Tauri-bundled) distribution is Sprig
 (block/sprout): a static musl multicall binary published to GitHub
 Releases under the rolling `sprig-latest` tag, with `buzz-acp` as one of
 its dispatch names (argv[0]-based, like `busybox`). Installed per-user
-under `BUZZ_ACP_DIR` — not `/usr/local/bin` — specifically so this can
+under `buzz_acp_dir()` — not `/usr/local/bin` — specifically so this can
 happen automatically with no sudo prompt and no manual step, matching
 buzz-fleet's own "no root, anywhere" principle for anything that runs
 after install.
@@ -26,28 +26,36 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-BUZZ_ACP_DIR = Path.home() / ".local" / "share" / "buzz-fleet" / "bin"
-BUZZ_ACP_PATH = BUZZ_ACP_DIR / "buzz-acp"
+from buzz_fleet import paths
 
-# Sprig is also the `buzz` CLI when invoked by that name. buzz-acp never posts
-# the agent's reply itself; it tells the agent to run `buzz messages send`,
-# so without this link a fleet agent wakes on a mention and cannot answer.
-# Real incident (2026-09-06): `which buzz` was empty on every fleet machine.
-BUZZ_CLI_PATH = BUZZ_ACP_DIR / "buzz"
+
+def buzz_acp_dir() -> Path:
+    return paths.data_dir() / "bin"
+
+
+def buzz_acp_path() -> Path:
+    return buzz_acp_dir() / "buzz-acp"
+
+
+def buzz_cli_path() -> Path:
+    # Sprig is also the `buzz` CLI when invoked by that name. buzz-acp never
+    # posts the agent's reply itself; it tells the agent to run `buzz
+    # messages send`, so without this link a fleet agent wakes on a mention
+    # and cannot answer. Real incident (2026-09-06): `which buzz` was empty
+    # on every fleet machine.
+    return buzz_acp_dir() / "buzz"
 
 
 def ensure_buzz_cli_link() -> bool:
-    """Make BUZZ_CLI_PATH a symlink to BUZZ_ACP_PATH. Returns True when it changed anything."""
-    if (
-        BUZZ_CLI_PATH.is_symlink()
-        and BUZZ_CLI_PATH.exists()
-        and BUZZ_CLI_PATH.resolve() == BUZZ_ACP_PATH.resolve()
-    ):
+    """Make buzz_cli_path() a symlink to buzz_acp_path(). Returns True when it changed anything."""
+    acp_path = buzz_acp_path()
+    cli_path = buzz_cli_path()
+    if cli_path.is_symlink() and cli_path.exists() and cli_path.resolve() == acp_path.resolve():
         return False
-    BUZZ_ACP_DIR.mkdir(parents=True, exist_ok=True)
-    if BUZZ_CLI_PATH.is_symlink() or BUZZ_CLI_PATH.exists():
-        BUZZ_CLI_PATH.unlink()
-    BUZZ_CLI_PATH.symlink_to(BUZZ_ACP_PATH)
+    buzz_acp_dir().mkdir(parents=True, exist_ok=True)
+    if cli_path.is_symlink() or cli_path.exists():
+        cli_path.unlink()
+    cli_path.symlink_to(acp_path)
     return True
 
 
@@ -90,7 +98,8 @@ def ensure_buzz_acp_installed() -> bool:
     crash-looping because the binary didn't exist; a no-op call shouldn't
     trigger unnecessary restarts of healthy agents.
     """
-    if BUZZ_ACP_PATH.is_file() and BUZZ_ACP_PATH.stat().st_mode & 0o100:
+    acp_path = buzz_acp_path()
+    if acp_path.is_file() and acp_path.stat().st_mode & 0o100:
         return False
 
     target = _target_triple()
@@ -113,11 +122,11 @@ def ensure_buzz_acp_installed() -> bool:
         with tarfile.open(archive_path) as tar:
             tar.extractall(tmp_path, filter="data")
 
-        BUZZ_ACP_DIR.mkdir(parents=True, exist_ok=True)
+        buzz_acp_dir().mkdir(parents=True, exist_ok=True)
         # shutil.copy follows the symlink and copies the real binary's
         # bytes — the destination ends up a plain file literally named
         # "buzz-acp", which is what Sprig's argv[0]-based dispatch needs.
-        shutil.copy(tmp_path / "buzz-acp", BUZZ_ACP_PATH)
-        BUZZ_ACP_PATH.chmod(0o755)
+        shutil.copy(tmp_path / "buzz-acp", acp_path)
+        acp_path.chmod(0o755)
 
     return True

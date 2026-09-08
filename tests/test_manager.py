@@ -79,18 +79,19 @@ def _buzz_acp_already_installed(tmp_path: Path, monkeypatch) -> None:
     stub = acp_dir / "buzz-acp"
     stub.write_bytes(b"stub")
     stub.chmod(0o755)
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", acp_dir)
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", stub)
-    monkeypatch.setattr(buzz_acp, "BUZZ_CLI_PATH", acp_dir / "buzz")
+    monkeypatch.setattr(buzz_acp, "buzz_acp_dir", lambda: acp_dir)
+    monkeypatch.setattr(buzz_acp, "buzz_acp_path", lambda: stub)
+    monkeypatch.setattr(buzz_acp, "buzz_cli_path", lambda: acp_dir / "buzz")
     # write_agent_files() now also creates WORK_DIR/<agent-id> as the unit's
     # WorkingDirectory — keep that off the real home directory too.
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
 
 
 def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -108,7 +109,7 @@ def test_create_agent_mints_key_registers_and_starts(tmp_path: Path, monkeypatch
     # break the owner_only channel-add-policy backfill. Matches Desktop's own
     # agent-creation flow, which never adds agents as direct relay members.
     assert not any("add-member" in c for c in runner.calls)
-    assert ["systemctl", "--user", "enable", "--now", "buzz-agent@laravel-backend-dev"] in runner.calls
+    assert ["systemctl", "--user", "enable", "--now", "buzz-agent@eltahir:laravel-backend-dev.service"] in runner.calls
     assert manager.list_agents() == [agent]
 
 
@@ -120,8 +121,9 @@ def test_create_agent_writes_env_and_mcp_server_into_agent_files(tmp_path: Path,
     from buzz_fleet.models import McpServer
 
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -133,10 +135,10 @@ def test_create_agent_writes_env_and_mcp_server_into_agent_files(tmp_path: Path,
         mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"]),
     )
 
-    env_text = agent_env_path(agent.id).read_text()
+    env_text = agent_env_path(f"eltahir:{agent.id}").read_text()
     assert "DATABASE_URL=postgres://x\n" in env_text
     assert "BUZZ_ACP_MCP_COMMAND=" in env_text
-    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    wrapper = tmp_path / "work" / f"eltahir:{agent.id}" / "mcp-boost.sh"
     assert wrapper.is_file()
     # And it round-tripped through state as a real SecretStr, not the
     # masked literal "**********".
@@ -155,8 +157,9 @@ def test_update_agent_rejects_unsafe_env_key(tmp_path: Path, monkeypatch) -> Non
     # `agent update --env BUZZ_ACP_AGENT_OWNER=attacker` would otherwise
     # silently re-point a live agent's owner with no validation anywhere.
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -183,8 +186,9 @@ def test_update_agent_env_or_mcp_server_change_does_not_republish_managed_agent(
     from buzz_fleet.models import McpServer
 
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -204,7 +208,7 @@ def test_update_agent_env_or_mcp_server_change_does_not_republish_managed_agent(
     # content_fields only governs the relay republish, not whether the
     # change actually takes effect.
     assert getattr(updated, field) is not None
-    env_text = agent_env_path(agent.id).read_text()
+    env_text = agent_env_path(f"eltahir:{agent.id}").read_text()
     if field == "env":
         assert "TOKEN=shh\n" in env_text
     else:
@@ -222,8 +226,9 @@ def test_create_agent_publishes_profile_and_add_policy_with_connection_auth_tag(
     tag is embedded in the event content.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -243,8 +248,9 @@ def test_create_agent_publishes_profile_and_add_policy_with_connection_auth_tag(
 
 def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -255,15 +261,16 @@ def test_delete_agent_removes_member_and_stops_unit(tmp_path: Path, monkeypatch)
 
     manager.delete_agent(agent.id)
 
-    assert ["systemctl", "--user", "disable", "--now", "buzz-agent@throwaway"] in runner.calls
+    assert ["systemctl", "--user", "disable", "--now", "buzz-agent@eltahir:throwaway.service"] in runner.calls
     assert any("remove-member" in c for c in runner.calls)
     assert manager.list_agents() == []
 
 
 def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -273,7 +280,7 @@ def test_update_agent_restarts_without_re_registering(tmp_path: Path, monkeypatc
     )
     updated = manager.update_agent(agent.id, system_prompt_source=SystemPromptSource(kind="inline", text="y"))
 
-    assert ["systemctl", "--user", "restart", "buzz-agent@throwaway"] in runner.calls
+    assert ["systemctl", "--user", "restart", "buzz-agent@eltahir:throwaway.service"] in runner.calls
     assert updated.system_prompt_source.text == "y"
 
 
@@ -284,8 +291,9 @@ def test_create_agent_with_missing_persona_file_fails_before_publishing(tmp_path
     effect happens — otherwise state would be orphaned with no local record.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -308,8 +316,9 @@ def test_delete_agent_survives_remove_member_failure_for_never_registered_agent(
     crash deletion — it's expected steady state, not an error to surface.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
 
     class NeverMemberRunner(FakeRunner):
         def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -337,8 +346,9 @@ def test_delete_agent_removes_env_and_prompt_files(tmp_path: Path, monkeypatch) 
     JSON — otherwise the secret survives "deletion" on disk.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -346,13 +356,13 @@ def test_delete_agent_removes_env_and_prompt_files(tmp_path: Path, monkeypatch) 
         harness="claude",
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
     )
-    assert agent_env_path(agent.id).exists()
-    assert agent_prompt_path(agent.id).exists()
+    assert agent_env_path(f"eltahir:{agent.id}").exists()
+    assert agent_prompt_path(f"eltahir:{agent.id}").exists()
 
     manager.delete_agent(agent.id)
 
-    assert not agent_env_path(agent.id).exists()
-    assert not agent_prompt_path(agent.id).exists()
+    assert not agent_env_path(f"eltahir:{agent.id}").exists()
+    assert not agent_prompt_path(f"eltahir:{agent.id}").exists()
 
 
 def test_delete_agent_removes_mcp_wrapper_and_pi_mcp_json(tmp_path: Path, monkeypatch) -> None:
@@ -367,10 +377,11 @@ def test_delete_agent_removes_mcp_wrapper_and_pi_mcp_json(tmp_path: Path, monkey
     from buzz_fleet.models import McpServer
 
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
-    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", tmp_path / "pi-template-unused")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.pi_agent_template_dir", lambda: tmp_path / "pi-template-unused")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -379,8 +390,8 @@ def test_delete_agent_removes_mcp_wrapper_and_pi_mcp_json(tmp_path: Path, monkey
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
         mcp_server=McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")}),
     )
-    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
-    mcp_json = tmp_path / "work" / agent.id / ".pi-agent" / "mcp.json"
+    wrapper = tmp_path / "work" / f"eltahir:{agent.id}" / "mcp-boost.sh"
+    mcp_json = tmp_path / "work" / f"eltahir:{agent.id}" / ".pi-agent" / "mcp.json"
     assert wrapper.exists() and mcp_json.exists()
 
     manager.delete_agent(agent.id)
@@ -394,8 +405,9 @@ def test_update_agent_preserves_previously_set_api_keys(tmp_path: Path, monkeypa
     ANTHROPIC_API_KEY/OPENAI_API_KEY when the update doesn't touch keys at all.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -404,11 +416,11 @@ def test_update_agent_preserves_previously_set_api_keys(tmp_path: Path, monkeypa
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
         anthropic_api_key="sk-ant-test",
     )
-    assert "ANTHROPIC_API_KEY=sk-ant-test" in agent_env_path(agent.id).read_text()
+    assert "ANTHROPIC_API_KEY=sk-ant-test" in agent_env_path(f"eltahir:{agent.id}").read_text()
 
     manager.update_agent(agent.id, display_name="Keyed Agent Renamed")
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(f"eltahir:{agent.id}").read_text()
     assert "ANTHROPIC_API_KEY=sk-ant-test" in env_content
 
 
@@ -433,8 +445,9 @@ def test_create_agent_is_recorded_locally_even_if_enable_now_fails(tmp_path: Pat
     via `list_agents()` even though its unit never actually started.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FailingEnableRunner()
     manager = AgentManager(runner, _community())
 
@@ -479,8 +492,9 @@ def test_create_agent_fails_before_any_side_effect_when_linger_cannot_be_enabled
     any files — not fail confusingly later at enable_now.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = LingerCantEnableRunner()
     manager = AgentManager(runner, _community())
 
@@ -498,8 +512,9 @@ def test_create_agent_fails_before_any_side_effect_when_linger_cannot_be_enabled
 
 def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -523,8 +538,9 @@ def test_create_agent_stores_new_optional_fields(tmp_path: Path, monkeypatch) ->
 
 def test_create_agent_publishes_visibility_events_in_order(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -547,8 +563,9 @@ def test_create_agent_publishes_visibility_events_in_order(tmp_path: Path, monke
 
 def test_create_agent_records_permanent_channel_error_without_failing(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
 
     class BadChannelRunner(FakeRunner):
         def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -590,8 +607,9 @@ def test_ensure_runtime_ready_restarts_existing_agents_when_buzz_acp_just_instal
     agents on every single call, not just the one that matters).
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     first = manager.create_agent(
@@ -612,16 +630,17 @@ def test_ensure_runtime_ready_restarts_existing_agents_when_buzz_acp_just_instal
 
     manager.ensure_runtime_ready()
 
-    assert ["systemctl", "--user", "restart", f"buzz-agent@{first.id}"] in runner.calls
-    assert ["systemctl", "--user", "restart", f"buzz-agent@{second.id}"] in runner.calls
+    assert ["systemctl", "--user", "restart", f"buzz-agent@eltahir:{first.id}.service"] in runner.calls
+    assert ["systemctl", "--user", "restart", f"buzz-agent@eltahir:{second.id}.service"] in runner.calls
 
 
 def test_ensure_runtime_ready_does_not_restart_agents_when_buzz_acp_already_installed(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     manager.create_agent(
@@ -649,8 +668,9 @@ def test_ensure_runtime_ready_refreshes_agent_whose_adapter_command_is_now_resol
     heal it, without needing buzz-acp itself to have just been installed.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
 
     from buzz_fleet import harnesses
 
@@ -662,7 +682,7 @@ def test_ensure_runtime_ready_refreshes_agent_whose_adapter_command_is_now_resol
         harness="codex",
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
     )
-    env_path = agent_env_path(agent.id)
+    env_path = agent_env_path(f"eltahir:{agent.id}")
     assert "BUZZ_ACP_AGENT_COMMAND=codex-acp" in env_path.read_text()
     runner.calls.clear()
 
@@ -681,15 +701,16 @@ def test_ensure_runtime_ready_refreshes_agent_whose_adapter_command_is_now_resol
         "BUZZ_ACP_AGENT_COMMAND=/home/dev/.local/share/mise/installs/node/22/bin/codex-acp"
         in env_path.read_text()
     )
-    assert ["systemctl", "--user", "restart", f"buzz-agent@{agent.id}"] in runner.calls
+    assert ["systemctl", "--user", "restart", f"buzz-agent@eltahir:{agent.id}.service"] in runner.calls
 
 
 def test_ensure_runtime_ready_continues_healing_other_agents_if_one_restart_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
 
     class FlakyRestartRunner(FakeRunner):
         def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -718,7 +739,7 @@ def test_ensure_runtime_ready_continues_healing_other_agents_if_one_restart_fail
 
     manager.ensure_runtime_ready()  # must not raise despite the first restart failing
 
-    assert ["systemctl", "--user", "restart", f"buzz-agent@{second.id}"] in runner.calls
+    assert ["systemctl", "--user", "restart", f"buzz-agent@eltahir:{second.id}.service"] in runner.calls
 
 
 def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(tmp_path: Path, monkeypatch) -> None:
@@ -728,8 +749,9 @@ def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(
     visibility signer subcommand invoked against it, ever.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -767,8 +789,9 @@ def test_ensure_runtime_ready_never_touches_agent_with_visibility_managed_false(
 
 def test_ensure_runtime_ready_retries_a_still_pending_visibility_step(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
 
     class FlakyProfileRunner(FakeRunner):
         def __init__(self) -> None:
@@ -801,8 +824,9 @@ def test_ensure_runtime_ready_retries_a_still_pending_visibility_step(tmp_path: 
 
 def test_update_agent_republishes_managed_agent_on_display_name_change(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -835,8 +859,9 @@ def test_update_agent_republishes_managed_agent_on_directory_field_change(
     data indefinitely, since nothing else re-triggers the publish.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -863,8 +888,9 @@ def test_update_agent_with_unchanged_directory_field_does_not_republish(
     field: str, value: object, tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -891,8 +917,9 @@ def test_update_agent_with_unchanged_directory_field_does_not_republish(
 
 def test_update_agent_joins_new_channel_and_leaves_removed_one(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -917,8 +944,9 @@ def test_update_agent_joins_new_channel_and_leaves_removed_one(tmp_path: Path, m
 
 def test_update_agent_does_not_touch_visibility_for_old_agent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -947,8 +975,9 @@ def test_update_agent_with_unchanged_display_name_does_not_republish(tmp_path: P
     every TUI edit, even a no-op one.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -978,8 +1007,9 @@ def test_update_agent_drops_caller_supplied_visibility_managed(tmp_path: Path, m
     careless caller can't flip it.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1000,8 +1030,9 @@ def test_update_agent_drops_caller_supplied_visibility_managed(tmp_path: Path, m
 
 def test_delete_agent_leaves_channels_retracts_and_archives(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1038,8 +1069,9 @@ def test_delete_agent_continues_leaving_other_channels_if_one_leave_fails(tmp_pa
     single-channel test cannot exercise.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
 
     class FlakyLeaveRunner(FakeRunner):
         def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1087,8 +1119,9 @@ def test_ensure_runtime_ready_survives_deleted_persona_file(tmp_path: Path, monk
     `managed_agent_error=None` so a future call retries it.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     persona_path = tmp_path / "persona.md"
     persona_path.write_text("You are a persona-backed agent.")
     runner = FakeRunner()
@@ -1119,8 +1152,9 @@ def test_ensure_runtime_ready_survives_deleted_persona_file(tmp_path: Path, monk
 
 def test_delete_agent_skips_visibility_teardown_for_old_agent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1153,8 +1187,9 @@ def test_create_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -
     visibility event (kind:0/30177/10100) published fine.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
 
@@ -1164,7 +1199,7 @@ def test_create_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
     )
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(f"eltahir:{agent.id}").read_text()
     assert f"BUZZ_AUTH_TAG={_expected_fake_auth_tag()}" in env_content
 
 
@@ -1175,8 +1210,9 @@ def test_ensure_runtime_ready_retroactively_adds_missing_auth_tag(tmp_path: Path
     and fix it on the very next call, without needing the agent recreated.
     """
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1185,7 +1221,7 @@ def test_ensure_runtime_ready_retroactively_adds_missing_auth_tag(tmp_path: Path
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
     )
     # Simulate a pre-fix env file: strip the BUZZ_AUTH_TAG line back out.
-    env_path = agent_env_path(agent.id)
+    env_path = agent_env_path(f"eltahir:{agent.id}")
     stripped = "\n".join(
         line for line in env_path.read_text().splitlines() if not line.startswith("BUZZ_AUTH_TAG=")
     )
@@ -1196,13 +1232,14 @@ def test_ensure_runtime_ready_retroactively_adds_missing_auth_tag(tmp_path: Path
     manager.ensure_runtime_ready()
 
     assert f"BUZZ_AUTH_TAG={_expected_fake_auth_tag()}" in env_path.read_text()
-    assert ["systemctl", "--user", "restart", f"buzz-agent@{agent.id}"] in runner.calls
+    assert ["systemctl", "--user", "restart", f"buzz-agent@eltahir:{agent.id}.service"] in runner.calls
 
 
 def test_ensure_runtime_ready_does_not_add_auth_tag_for_old_agent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1214,7 +1251,7 @@ def test_ensure_runtime_ready_does_not_add_auth_tag_for_old_agent(tmp_path: Path
 
     old_style = agent.model_copy(update={"visibility_managed": False})
     state_module.save_agent(old_style)
-    env_path = agent_env_path(agent.id)
+    env_path = agent_env_path(f"eltahir:{agent.id}")
     stripped = "\n".join(
         line for line in env_path.read_text().splitlines() if not line.startswith("BUZZ_AUTH_TAG=")
     )
@@ -1229,8 +1266,9 @@ def test_ensure_runtime_ready_does_not_add_auth_tag_for_old_agent(tmp_path: Path
 
 def test_update_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "systemd" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "systemd" / "buzz-agent@.service")
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
     agent = manager.create_agent(
@@ -1238,7 +1276,7 @@ def test_update_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -
         harness="claude",
         system_prompt_source=SystemPromptSource(kind="inline", text="x"),
     )
-    env_path = agent_env_path(agent.id)
+    env_path = agent_env_path(f"eltahir:{agent.id}")
     stripped = "\n".join(
         line for line in env_path.read_text().splitlines() if not line.startswith("BUZZ_AUTH_TAG=")
     )
@@ -1251,9 +1289,10 @@ def test_update_agent_writes_auth_tag_to_env_file(tmp_path: Path, monkeypatch) -
 
 def test_template_change_restarts_every_agent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path / "config")
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "unit" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "unit" / "buzz-agent@.service")
     monkeypatch.setattr("buzz_fleet.systemd.ensure_linger_enabled", lambda runner: None)
     runner = FakeRunner()
     manager = AgentManager(runner, _community())
@@ -1274,9 +1313,10 @@ from buzz_fleet.orchestration.record import ABOUT_HEADER, FleetRecord, encode_ab
 
 def _fresh_manager(tmp_path: Path, monkeypatch, runner: FakeRunner) -> AgentManager:
     monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path / "config")
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", tmp_path / "unit" / "buzz-agent@.service")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: tmp_path / "unit" / "buzz-agent@.service")
     monkeypatch.setattr("buzz_fleet.systemd.ensure_linger_enabled", lambda runner: None)
     from buzz_fleet import state
     community = _community()
@@ -1350,7 +1390,7 @@ def test_ensure_runtime_ready_discovers_record_joins_and_rewrites_env(tmp_path: 
     saved = state.load_community("eltahir")
     assert saved is not None and saved.fleet_channel_id == FLEET
     assert len([a for a in runner.calls if a[1] == "join-channel" and FLEET in a]) == 1
-    env = agent_env_path(agent.id).read_text()
+    env = agent_env_path(f"eltahir:{agent.id}").read_text()
     assert f"BUZZ_FLEET_CHANNEL={FLEET}\n" in env and f"BUZZ_FLEET_RETRIEVAL_KEY={'r' * 64}\n" in env
     assert state.load_agents("eltahir")[0].visibility_state.channels[FLEET] == "joined"
 
@@ -1360,7 +1400,7 @@ def test_ensure_runtime_ready_refreshes_stale_block(tmp_path: Path, monkeypatch)
     manager = _fresh_manager(tmp_path, monkeypatch, runner)
     agent = manager.create_agent(display_name="Blocky", harness="claude",
                                  system_prompt_source=SystemPromptSource(kind="inline", text="hi"))
-    env_path = agent_env_path(agent.id)
+    env_path = agent_env_path(f"eltahir:{agent.id}")
     env_path.write_text(env_path.read_text().replace("coordination v1", "coordination v0"))
     runner.calls.clear()
 

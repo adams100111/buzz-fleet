@@ -11,7 +11,7 @@ from textual.binding import Binding, BindingType
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header
 
-from buzz_fleet import state, visibility
+from buzz_fleet import state, units, visibility
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Agent
 from buzz_fleet.proc import RealCommandRunner
@@ -56,8 +56,8 @@ def list_agents() -> list:
     return state.load_agents(community.id) if community else []
 
 
-def agent_status(agent_id: str) -> AgentStatus:
-    return systemctl_status(RealCommandRunner(), agent_id)
+def agent_status(community_id: str, agent_id: str) -> AgentStatus:
+    return systemctl_status(RealCommandRunner(), units.instance_key(community_id, agent_id))
 
 
 class DashboardScreen(Screen):
@@ -112,7 +112,7 @@ class DashboardScreen(Screen):
         table = self.query_one("#agent-table", DataTable)
         table.clear()
         for agent in list_agents():
-            text, color = _STATUS_DISPLAY[agent_status(agent.id)]
+            text, color = _STATUS_DISPLAY[agent_status(CURRENT_COMMUNITY_ID, agent.id)]
             vis_text, vis_color = _visibility_display(agent)
             table.add_row(
                 agent.id,
@@ -182,4 +182,4 @@ class DashboardScreen(Screen):
         agent_id = self._selected_agent_id()
         if agent_id is None:
             return
-        self.app.push_screen(LogsScreen(agent_id))
+        self.app.push_screen(LogsScreen(units.instance_key(CURRENT_COMMUNITY_ID, agent_id)))
