@@ -402,10 +402,20 @@ def config_show() -> None:
 
     path = paths.config_dir() / "config.toml"
     typer.echo(f"# {path}{'' if path.exists() else '  (not present; showing defaults)'}")
-    values = asdict(config_module.load())
+    try:
+        loaded = config_module.load()
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    values = asdict(loaded)
+    unknown_keys = values.pop("unknown_keys")
     values["ntfy_token"] = "<set>" if values["ntfy_token"] else None
     for key, value in values.items():
         typer.echo(f"{key} = {value!r}")
+    if unknown_keys:
+        typer.echo("unrecognised keys (ignored):")
+        for key in unknown_keys:
+            typer.echo(f"  {key}")
 
 
 @app.command()

@@ -150,12 +150,12 @@ confirm_destructive = true
 [defaults]
 harness = "claude"              # pre-selected in the create-agent form
 
-[notifier]                      # orchestration spec 5.4
+[notifier]                      # reserved for a future ntfy-based alert feature; not wired up yet
 ntfy_url   = "https://ntfy.example.org/buzz-fleet"
 ntfy_token = "env:BUZZ_FLEET_NTFY_TOKEN"   # never a literal secret
 
 [herdr]
-report_agents = false           # see section 9
+report_agents = false           # reserved for a future fleet-health report; not wired up yet
 ```
 
 Secrets are never literals in config. A value may be `env:NAME` to indirect
@@ -167,7 +167,12 @@ one plaintext secret outside the secrets tree.
 Run `buzz-fleet config show` to print the effective configuration (defaults
 merged with whatever `config.toml` sets) and where it was read from. A secret
 value is never printed — you'll see `<set>` or `None` for `ntfy_token`, never
-its value.
+its value. An unrecognised section or key (a typo, or a key a newer
+`buzz-fleet` understands that this older binary doesn't) is never rejected —
+across a fleet with machines on different versions, a forward-compatible
+config key must not brick an older binary mid-upgrade — but `config show`
+lists any it found under "unrecognised keys (ignored)" so a typo doesn't go
+unnoticed.
 
 ## Usage
 
