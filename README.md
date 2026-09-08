@@ -89,6 +89,18 @@ as everything else, unlike the split state/secrets tree the migration moves
 you onto. Keep the backup only until you've confirmed the fleet is healthy
 on the new layout, then delete it.
 
+The migration also never deletes anything from your *original*
+`~/.config/buzz-fleet` tree (only the backup copy above and the legacy
+system-prompt files it verified copying first) — `communities/*.json` and
+`agents/*.env` are left behind with every relay nsec and agent private key
+still inline, and any agent that used an MCP server keeps its old
+`mcp-*.sh` wrapper (with its own `export TOKEN=…` lines) under the legacy
+work directory too. Once you've confirmed the fleet is healthy on the new
+layout, delete `~/.config/buzz-fleet/communities/` and
+`~/.config/buzz-fleet/agents/` specifically — **do not delete
+`~/.config/buzz-fleet` itself**, since `config.toml` and your `personas/`
+templates genuinely still live there under the current layout too.
+
 ### Building from source instead
 
 If you're on an architecture the releases don't cover yet, or you're

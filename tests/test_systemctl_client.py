@@ -8,6 +8,7 @@ from buzz_fleet.systemctl_client import (
     enable_now,
     restart,
     status,
+    status_of_unit,
     stop,
     tail_logs,
 )
@@ -112,6 +113,32 @@ def test_stop_raises_on_nonzero_returncode() -> None:
     runner = FakeRunner(returncode=1)
     with pytest.raises(RuntimeError):
         stop(runner, "acme:laravel-backend-dev")
+
+
+# `status_of_unit` — the migrate.py-facing sibling of `status` that takes a
+# literal unit name so it can be used on a LEGACY, unqualified
+# `buzz-agent@<agent-id>.service` name that `status`'s own `_unit()` call
+# (via `units.split_key`) would otherwise reject outright.
+
+
+def test_status_of_unit_takes_a_literal_unit_name() -> None:
+    runner = FakeRunner(stdout="active\n")
+    assert status_of_unit(runner, "buzz-agent@reviewer.service") == AgentStatus.RUNNING
+    assert runner.calls == [["systemctl", "--user", "is-active", "buzz-agent@reviewer.service"]]
+
+
+def test_status_of_unit_rejects_nothing_split_key_would() -> None:
+    """The whole reason this function exists: an unqualified name must NOT
+    raise here, unlike `status`."""
+    runner = FakeRunner(stdout="inactive\n")
+    assert status_of_unit(runner, "buzz-agent@reviewer.service") == AgentStatus.STOPPED
+
+
+def test_status_delegates_to_status_of_unit_with_the_qualified_name() -> None:
+    runner = FakeRunner(stdout="active\n")
+    assert status(runner, "acme:reviewer") == status_of_unit(
+        FakeRunner(stdout="active\n"), "buzz-agent@acme:reviewer.service"
+    )
 
 
 # Task 4 regression tests: agent ids are unique only within a community, but

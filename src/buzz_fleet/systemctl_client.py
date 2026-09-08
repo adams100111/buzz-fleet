@@ -64,9 +64,26 @@ _STATE_MAP = {
 }
 
 
-def status(runner: CommandRunner, key: str) -> AgentStatus:
-    result = runner.run(["systemctl", "--user", "is-active", _unit(key)])
+def status_of_unit(runner: CommandRunner, unit: str) -> AgentStatus:
+    """As `status`, but takes a literal systemd unit name rather than a
+    community-qualified instance key.
+
+    The one caller that needs this is `migrate.py`'s active-unit refusal: it
+    has to query a *legacy*, unqualified `buzz-agent@<agent-id>.service` name
+    (that's genuinely what it's called before migration), and `status`'s own
+    `_unit()` call would reject that outright via `units.split_key`. Anything
+    unrecognised (an empty string from a broken/unreachable systemctl
+    included, since it isn't a key in `_STATE_MAP`) maps to `UNKNOWN` here
+    exactly as it does for `status` — callers that need "safe to act on"
+    rather than "for display" should treat `UNKNOWN` as unsafe, not as a
+    stand-in for `STOPPED`.
+    """
+    result = runner.run(["systemctl", "--user", "is-active", unit])
     return _STATE_MAP.get(result.stdout.strip(), AgentStatus.UNKNOWN)
+
+
+def status(runner: CommandRunner, key: str) -> AgentStatus:
+    return status_of_unit(runner, _unit(key))
 
 
 def tail_logs(runner: CommandRunner, key: str, lines: int = 200) -> str:

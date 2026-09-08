@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from unittest.mock import MagicMock
 
 import pytest
 from textual.widgets import Input
@@ -100,6 +101,17 @@ async def test_connect_screen_success_switches_to_dashboard(tmp_path, monkeypatc
     monkeypatch.setattr(
         "buzz_fleet.tui.screens.connect.RealCommandRunner", lambda: FakeRunner(ok=True)
     )
+    # DashboardScreen.refresh_agents() calls a real AgentManager(RealCommandRunner(),
+    # community).ensure_runtime_ready() the moment state.load_community() finds a
+    # saved community (which this test's own successful connect produces) --
+    # unmocked, that shells out to the real systemctl/loginctl and (absent a
+    # pre-installed buzz-acp at the now-isolated fake home) attempts a real
+    # network download. This test only cares that DashboardScreen is reached
+    # with the right community id, not that self-healing itself ran -- see
+    # tests/tui/test_dashboard.py's own AgentManager mocks for the same pattern.
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.AgentManager", lambda runner, community: MagicMock()
+    )
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
@@ -192,6 +204,11 @@ async def test_connecting_a_second_community_adds_rather_than_overwrites(tmp_pat
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr(
         "buzz_fleet.tui.screens.connect.RealCommandRunner", lambda: FakeRunner(ok=True)
+    )
+    # See the identical comment in test_connect_screen_success_switches_to_dashboard
+    # above -- this test also reaches DashboardScreen via a real, saved community.
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.AgentManager", lambda runner, community: MagicMock()
     )
 
     app = BuzzFleetApp()
