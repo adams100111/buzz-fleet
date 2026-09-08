@@ -288,3 +288,29 @@ def test_second_write_failure_leaves_no_orphaned_state_file(monkeypatch, tmp_pat
     assert not state_path.exists()
     assert secret_path.exists()
     assert state.list_community_ids() == []
+
+
+def test_active_community_round_trips(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert state.load_active_community() is None
+
+    state.save_active_community("acme")
+
+    assert state.load_active_community() == "acme"
+
+
+def test_active_community_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_active_community("acme")
+
+    path = paths.state_dir() / "active-community"
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600
+
+
+def test_save_active_community_overwrites_previous_pointer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_active_community("acme")
+    state.save_active_community("eltahir")
+
+    assert state.load_active_community() == "eltahir"

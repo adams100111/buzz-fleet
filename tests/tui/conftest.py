@@ -5,8 +5,10 @@ import pytest
 def _isolated_buzz_fleet_config_dir(tmp_path, monkeypatch) -> None:
     """Every TUI test constructs a real `BuzzFleetApp()`, whose `on_mount()`
 
-    calls `state.load_community(CURRENT_COMMUNITY_ID)` to decide whether to
-    auto-push a `DashboardScreen` — and `DashboardScreen.refresh_agents()`
+    calls `identity.resolve_community_id(os.environ, None)` (which in turn
+    reads `state.list_community_ids()`/`state.load_active_community()`) to
+    decide whether to auto-push a `DashboardScreen` — and
+    `DashboardScreen.refresh_agents()`
     self-heals via a real `AgentManager` whenever a community IS connected,
     up to and including shelling out to real `systemctl`/`loginctl`/
     `buzz-fleet-signer`. On a dev machine that happens to have a real

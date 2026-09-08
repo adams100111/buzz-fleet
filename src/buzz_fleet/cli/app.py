@@ -123,7 +123,12 @@ def connect(
     ],
 ) -> None:
     runner = RealCommandRunner()
-    if not connect_and_save(runner, id, relay, admin_nsec):
+    try:
+        connected = connect_and_save(runner, id, relay, admin_nsec)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    if not connected:
         typer.echo("Could not authenticate against that relay with that key.", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Connected and saved community '{id}'.")

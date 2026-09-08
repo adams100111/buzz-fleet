@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from buzz_fleet import signer_client, state
+from buzz_fleet import config, signer_client, state
 from buzz_fleet.orchestration.record import FleetRecord
 from buzz_fleet.proc import CommandRunner
 
@@ -23,6 +23,31 @@ class Identity:
     record: FleetRecord | None
 
 
+def resolve_community_id(env: Mapping[str, str], explicit: str | None) -> str:
+    """Spec 5.2. First match wins.
+
+    A pointer naming a community that no longer exists is ignored rather than
+    raising: deleting the active community must not wedge every later command.
+    """
+    ids = state.list_community_ids()
+    if explicit:
+        return explicit
+    from_env = env.get("BUZZ_FLEET_COMMUNITY")
+    if from_env:
+        return from_env
+    active = state.load_active_community()
+    if active and active in ids:
+        return active
+    default = config.load().default_community
+    if default and default in ids:
+        return default
+    if len(ids) == 1:
+        return ids[0]
+    if not ids:
+        raise RuntimeError("no local community; run `buzz-fleet connect` first")
+    raise RuntimeError(f"several local communities ({', '.join(ids)}); pass --community")
+
+
 def resolve_identity(env: Mapping[str, str], runner: CommandRunner, community_id: str | None) -> Identity:
     nsec, relay_url = env.get("BUZZ_PRIVATE_KEY"), env.get("BUZZ_RELAY_URL")
     if nsec and relay_url:
@@ -30,13 +55,7 @@ def resolve_identity(env: Mapping[str, str], runner: CommandRunner, community_id
                         auth_tag=env.get("BUZZ_AUTH_TAG") or None, fleet_channel=env.get("BUZZ_FLEET_CHANNEL") or None,
                         retrieval_key=env.get("BUZZ_FLEET_RETRIEVAL_KEY") or None, is_owner=False,
                         owner_pubkey=env.get("BUZZ_ACP_AGENT_OWNER") or None, record=None)
-    ids = state.list_community_ids()
-    if community_id is None:
-        if not ids:
-            raise RuntimeError("no BUZZ_PRIVATE_KEY in the environment and no local community; run `buzz-fleet connect` first")
-        if len(ids) > 1:
-            raise RuntimeError(f"several local communities ({', '.join(ids)}); pass --community")
-        community_id = ids[0]
+    community_id = resolve_community_id(env, community_id)
     community = state.load_community(community_id)
     if community is None:
         raise RuntimeError(f"no community '{community_id}'; run `buzz-fleet connect` first")

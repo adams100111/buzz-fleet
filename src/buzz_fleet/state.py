@@ -24,6 +24,21 @@ from buzz_fleet.models import Agent, Community
 _MASK = "**********"
 
 
+def _active_path() -> Path:
+    return paths.state_dir() / "active-community"
+
+
+def save_active_community(community_id: str) -> None:
+    """What the toggle writes. Deliberately state, not config: config.toml
+    holds the *default*, this holds what was last selected."""
+    atomic.write_secure(_active_path(), community_id + "\n", mode=0o600)
+
+
+def load_active_community() -> str | None:
+    path = _active_path()
+    return path.read_text().strip() or None if path.exists() else None
+
+
 def _communities_dir() -> Path:
     return paths.state_dir() / "communities"
 

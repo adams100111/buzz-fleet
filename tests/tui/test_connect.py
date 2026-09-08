@@ -11,8 +11,12 @@ from textual.widgets import Input
 from buzz_fleet import state
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.tui.app import BuzzFleetApp
-from buzz_fleet.tui.screens.connect import CURRENT_COMMUNITY_ID, ConnectScreen
+from buzz_fleet.tui.screens.connect import ConnectScreen
 from buzz_fleet.tui.screens.dashboard import DashboardScreen
+
+# The screen no longer hardcodes a community id (that's the point of this
+# task) — tests that drive it through the UI type this into #id-input.
+COMMUNITY_ID = "eltahir"
 
 
 class FakeRunner:
@@ -62,14 +66,61 @@ async def test_connect_screen_success_switches_to_dashboard(tmp_path, monkeypatc
     async with app.run_test() as pilot:
         await app.push_screen(ConnectScreen())
         await pilot.pause()
+        app.screen.query_one("#id-input", Input).value = COMMUNITY_ID
         app.screen.query_one("#relay-input", Input).value = "wss://buzz.eltahir.me"
         app.screen.query_one("#nsec-input", Input).value = "nsec1abc"
         await pilot.click("#connect-button")
         await pilot.pause()
 
         assert isinstance(app.screen, DashboardScreen)
+        assert app.screen._community_id == COMMUNITY_ID
 
-    assert state.load_community(CURRENT_COMMUNITY_ID) is not None
+    assert state.load_community(COMMUNITY_ID) is not None
+    assert state.load_active_community() == COMMUNITY_ID
+
+
+@pytest.mark.asyncio
+async def test_connect_screen_rejects_an_unsafe_id_and_does_not_save(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.connect.RealCommandRunner", lambda: FakeRunner(ok=True)
+    )
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(ConnectScreen())
+        await pilot.pause()
+        app.screen.query_one("#id-input", Input).value = "../escape"
+        app.screen.query_one("#relay-input", Input).value = "wss://buzz.eltahir.me"
+        app.screen.query_one("#nsec-input", Input).value = "nsec1abc"
+        await pilot.click("#connect-button")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConnectScreen)
+
+    assert state.list_community_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_connect_screen_requires_an_id(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.connect.RealCommandRunner", lambda: FakeRunner(ok=True)
+    )
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await app.push_screen(ConnectScreen())
+        await pilot.pause()
+        # Deliberately leave #id-input blank.
+        app.screen.query_one("#relay-input", Input).value = "wss://buzz.eltahir.me"
+        app.screen.query_one("#nsec-input", Input).value = "nsec1abc"
+        await pilot.click("#connect-button")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConnectScreen)
+
+    assert state.list_community_ids() == []
 
 
 @pytest.mark.asyncio
@@ -83,6 +134,7 @@ async def test_connect_screen_failure_stays_on_screen_and_does_not_save(tmp_path
     async with app.run_test() as pilot:
         await app.push_screen(ConnectScreen())
         await pilot.pause()
+        app.screen.query_one("#id-input", Input).value = COMMUNITY_ID
         app.screen.query_one("#relay-input", Input).value = "wss://buzz.eltahir.me"
         app.screen.query_one("#nsec-input", Input).value = "nsec1bad"
         await pilot.click("#connect-button")
@@ -90,4 +142,4 @@ async def test_connect_screen_failure_stays_on_screen_and_does_not_save(tmp_path
 
         assert isinstance(app.screen, ConnectScreen)
 
-    assert state.load_community(CURRENT_COMMUNITY_ID) is None
+    assert state.load_community(COMMUNITY_ID) is None

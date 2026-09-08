@@ -22,8 +22,6 @@ from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 from buzz_fleet.tui.screens.logs import LogsScreen
 from buzz_fleet.tui.theme import PANEL_BORDER, STATUS_INACTIVE
 
-CURRENT_COMMUNITY_ID = "eltahir"
-
 # Displayed status text borrows systemd's own vocabulary (active/inactive/
 # failed) rather than inventing new words for states the underlying system
 # already names — paired with a theme color so state is legible at a glance.
@@ -51,8 +49,8 @@ def _visibility_display(agent: Agent) -> tuple[str, str]:
     return text, "#C98A2C"  # "pending"
 
 
-def list_agents() -> list:
-    community = state.load_community(CURRENT_COMMUNITY_ID)
+def list_agents(community_id: str) -> list:
+    community = state.load_community(community_id)
     return state.load_agents(community.id) if community else []
 
 
@@ -77,6 +75,10 @@ class DashboardScreen(Screen):
         Binding("delete", "delete_agent", "Delete agent", show=False),
         Binding("l", "view_logs", "View logs"),
     ]
+
+    def __init__(self, community_id: str) -> None:
+        super().__init__()
+        self._community_id = community_id
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -105,14 +107,14 @@ class DashboardScreen(Screen):
         # template is current, so this is cheap on every refresh, not just
         # the first. Runs inside this worker, not synchronously at mount,
         # so a cold install's download can't freeze the UI's first paint.
-        community = state.load_community(CURRENT_COMMUNITY_ID)
+        community = state.load_community(self._community_id)
         if community is not None:
             AgentManager(RealCommandRunner(), community).ensure_runtime_ready()
 
         table = self.query_one("#agent-table", DataTable)
         table.clear()
-        for agent in list_agents():
-            text, color = _STATUS_DISPLAY[agent_status(CURRENT_COMMUNITY_ID, agent.id)]
+        for agent in list_agents(self._community_id):
+            text, color = _STATUS_DISPLAY[agent_status(agent.community_id, agent.id)]
             vis_text, vis_color = _visibility_display(agent)
             table.add_row(
                 agent.id,
@@ -133,7 +135,7 @@ class DashboardScreen(Screen):
         return str(table.get_row_at(table.cursor_row)[0])
 
     def _manager_or_notify(self) -> AgentManager | None:
-        community = state.load_community(CURRENT_COMMUNITY_ID)
+        community = state.load_community(self._community_id)
         if community is None:
             self.notify("No connected community — run `buzz-fleet connect` first.", severity="error")
             return None
@@ -182,4 +184,4 @@ class DashboardScreen(Screen):
         agent_id = self._selected_agent_id()
         if agent_id is None:
             return
-        self.app.push_screen(LogsScreen(units.instance_key(CURRENT_COMMUNITY_ID, agent_id)))
+        self.app.push_screen(LogsScreen(units.instance_key(self._community_id, agent_id)))
