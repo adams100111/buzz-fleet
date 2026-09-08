@@ -3,10 +3,11 @@
 Fact 12 of the spec: systemd.unit(5)'s escaping leaves ASCII alphanumerics,
 ':', '_' and '.' alone, which is why ':' is the right separator — and why it
 cannot collide with the slug charset ([a-z0-9-]) the way '-' would.
-"""
 
-import shutil
-import subprocess
+A literal '-' in a key is valid in a systemd unit name and is what every real
+agent uses (e.g. 'my-lara-cdx', 'my-dotnet-cdx', 'laravel-backend-developer-claude').
+Keys are validated and used verbatim — no escaping applied.
+"""
 
 import pytest
 
@@ -37,46 +38,49 @@ def test_two_communities_do_not_collide() -> None:
     assert a != b
 
 
-def test_unit_name_wraps_the_template() -> None:
+def test_unit_name_with_simple_ids() -> None:
     assert units.unit_name("eltahir:reviewer") == "buzz-agent@eltahir:reviewer.service"
 
 
-def test_escape_leaves_safe_characters_alone() -> None:
-    assert units.escape_instance("eltahir:reviewer") == "eltahir:reviewer"
+def test_unit_name_with_dashes() -> None:
+    """Real agent ids contain dashes; they must be preserved verbatim."""
+    assert (
+        units.unit_name("eltahir:my-lara-cdx")
+        == "buzz-agent@eltahir:my-lara-cdx.service"
+    )
 
 
-def test_escape_replaces_slash_with_dash() -> None:
-    assert units.escape_instance("a/b") == "a-b"
+def test_unit_name_accepts_underscore_and_dot() -> None:
+    """All characters in the key are valid in a systemd unit name."""
+    assert (
+        units.unit_name("eltahir:my_agent.v2")
+        == "buzz-agent@eltahir:my_agent.v2.service"
+    )
 
 
-def test_escape_escapes_a_leading_dot() -> None:
-    assert units.escape_instance(".hidden") == r"\x2ehidden"
+def test_validate_instance_key_accepts_valid_keys() -> None:
+    """Valid keys are silently accepted."""
+    units.validate_instance_key("eltahir:reviewer")
+    units.validate_instance_key("eltahir:my-lara-cdx")
+    units.validate_instance_key("acme:my_agent.v2")
 
 
-def test_escape_does_not_escape_a_non_leading_dot() -> None:
-    assert units.escape_instance("a.b") == "a.b"
+def test_validate_instance_key_rejects_space() -> None:
+    with pytest.raises(ValueError, match="contains invalid character ' '"):
+        units.validate_instance_key("eltahir:my agent")
 
 
-def test_escape_escapes_a_space() -> None:
-    assert units.escape_instance("a b") == r"a\x20b"
+def test_validate_instance_key_rejects_slash() -> None:
+    with pytest.raises(ValueError, match="contains invalid character '/'"):
+        units.validate_instance_key("eltahir/reviewer")
 
 
-@pytest.mark.skipif(shutil.which("systemd-escape") is None, reason="systemd-escape not installed")
-@pytest.mark.parametrize(
-    "value",
-    [
-        "eltahir:reviewer",
-        "a/b",
-        ".hidden",
-        "a.b",
-        "a b",
-        "acme:my-lara-cdx",
-        "a-b_c.d:e",
-    ],
-)
-def test_escape_matches_systemd_escape(value: str) -> None:
-    """The implementation is ours; the authority is the binary."""
-    expected = subprocess.run(
-        ["systemd-escape", "--", value], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    assert units.escape_instance(value) == expected
+def test_validate_instance_key_rejects_leading_dot() -> None:
+    with pytest.raises(ValueError, match="starts with invalid character '.'"):
+        units.validate_instance_key(".hidden:reviewer")
+
+
+def test_unit_name_raises_for_invalid_key() -> None:
+    """unit_name validates the key and raises rather than emitting a mangled name."""
+    with pytest.raises(ValueError, match="contains invalid character"):
+        units.unit_name("eltahir:my agent")

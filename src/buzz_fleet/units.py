@@ -9,17 +9,25 @@ which Nostr key the unit loaded — silently, and with the wrong identity.
 The separator is ':' because systemd.unit(5) leaves it unescaped and the slug
 charset ([a-z0-9-]) excludes it, so `<community>:<agent>` is unambiguous where
 `<community>-<agent>` would not be when either half contains a dash.
+
+Keys are validated and used verbatim — no escaping. A literal '-' is not
+escaped by systemd because '-' is systemd's escape-sequence for '/', and a
+literal dash is valid in a systemd unit name (every real agent uses dashes:
+'my-lara-cdx', 'my-dotnet-cdx', 'laravel-backend-developer-claude'). Escaping
+them to '\x2d' would corrupt the names on disk. The unit template must use %i
+(literal instance specifier) and never %I (unescaped specifier), because they
+differ for dashed names — %I unescapes '-' back to '/'.
 """
 
 from __future__ import annotations
 
-import string
-
 TEMPLATE = "buzz-agent@.service"
 SEPARATOR = ":"
 
-# systemd.unit(5): everything outside this set becomes a C-style \xNN escape.
-_SAFE = frozenset(string.ascii_letters + string.digits + ":_.")
+# Valid characters in a systemd instance name: alphanumerics, dashes, underscores,
+# dots (not leading), and colons. Matches the slug charset [a-z0-9-] plus the
+# separator `:` and the non-slug safe characters `_` and `.`.
+_VALID = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.:")
 
 
 def instance_key(community_id: str, agent_id: str) -> str:
@@ -39,26 +47,29 @@ def split_key(key: str) -> tuple[str, str]:
     return community, agent
 
 
-def escape_instance(value: str) -> str:
-    """Escape a string for use as a systemd instance name.
+def validate_instance_key(key: str) -> None:
+    """Validate an instance key for use in a systemd unit name.
 
-    Implements systemd.unit(5)'s algorithm directly rather than shelling out to
-    `systemd-escape` on every call: it is total, documented, and hot enough that
-    a subprocess per unit name would be absurd. `tests/test_units.py` asserts
-    parity against the real binary wherever it is installed.
+    Raises ValueError if the key contains invalid characters or starts with '.'.
+    A leading dot is invalid because systemd would escape it as \x2e.
     """
-    out: list[str] = []
-    for index, char in enumerate(value):
-        if char == "/":
-            out.append("-")
-        elif char in _SAFE and not (index == 0 and char == "."):
-            out.append(char)
-        else:
-            out.extend(f"\\x{byte:02x}" for byte in char.encode())
-    return "".join(out)
+    if key.startswith("."):
+        raise ValueError(
+            f"instance key {key!r} starts with invalid character '.'"
+        )
+    for char in key:
+        if char not in _VALID:
+            raise ValueError(
+                f"instance key {key!r} contains invalid character {char!r}"
+            )
 
 
 def unit_name(key: str) -> str:
-    """The full unit name for an instance key, escaped."""
+    """The full unit name for an instance key, used verbatim.
+
+    Validates the key and returns the unit name. The template uses %i (literal
+    instance specifier), not %I, to preserve dashes in the instance name.
+    """
+    validate_instance_key(key)
     prefix, _, suffix = TEMPLATE.partition("@")
-    return f"{prefix}@{escape_instance(key)}{suffix}"
+    return f"{prefix}@{key}{suffix}"
