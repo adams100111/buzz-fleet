@@ -60,6 +60,18 @@ def test_partial_file_keeps_other_defaults(monkeypatch, tmp_path) -> None:
     assert cfg.refresh_interval_ms == 2000
 
 
+def test_repr_does_not_leak_the_resolved_ntfy_token(monkeypatch, tmp_path) -> None:
+    """Final whole-branch review FIX 3: `Config` is a frozen dataclass with
+    the auto-generated `__repr__`, so `repr(cfg)`/`print(cfg)`/a log line
+    carrying the object would expose the resolved token. Nothing does that
+    today, but Phase B's JSON-RPC daemon will serialise Config objects."""
+    _write(tmp_path, '[notifier]\nntfy_token = "env:MY_TOKEN"\n', monkeypatch)
+    monkeypatch.setenv("MY_TOKEN", "t0ken-super-secret")
+    cfg = config.load()
+    assert cfg.ntfy_token == "t0ken-super-secret"
+    assert "t0ken-super-secret" not in repr(cfg)
+
+
 def test_env_indirection_resolves(monkeypatch, tmp_path) -> None:
     _write(tmp_path, '[notifier]\nntfy_token = "env:MY_TOKEN"\n', monkeypatch)
     monkeypatch.setenv("MY_TOKEN", "t0ken")
@@ -156,6 +168,22 @@ def test_refresh_interval_ms_non_numeric_names_field_and_file(monkeypatch, tmp_p
     with pytest.raises(ValueError, match="refresh_interval_ms") as exc_info:
         config.load()
     assert "config.toml" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("section_name", ["general", "ui", "defaults", "notifier", "herdr"])
+def test_scalar_section_is_refused_not_a_crash(monkeypatch, tmp_path, section_name) -> None:
+    """Final whole-branch review FIX 2: `ui = 5` is valid TOML but not a
+    valid section — every section reader below `load()` calls `.get()` on
+    whatever it's handed, and an `int` has no `.get()`. Before this fix that
+    was a bare, unattributed `AttributeError`, which is not a `ValueError`
+    and so slipped past every caller's `except ValueError`/`except
+    (RuntimeError, ValueError)` guard (the TUI's `on_mount`, `config show`,
+    `community list`/`show`'s `_active_or_none()`), crashing the TUI at
+    mount on a config file this design explicitly invites the user to
+    hand-edit."""
+    _write(tmp_path, f"{section_name} = 5\n", monkeypatch)
+    with pytest.raises(ValueError, match=section_name):
+        config.load()
 
 
 def test_unknown_keys_are_collected_not_rejected(monkeypatch, tmp_path) -> None:

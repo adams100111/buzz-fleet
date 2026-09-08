@@ -72,10 +72,15 @@ units and moves key material:
 # Stop every agent first — the migration refuses to run while any are active.
 systemctl --user stop 'buzz-agent@*'
 
-buzz-fleet migrate --dry-run   # review the plan; changes nothing
-buzz-fleet migrate             # apply it
-buzz-fleet agent list          # confirm every agent is present and running
+buzz-fleet migrate --dry-run           # review the plan; changes nothing
+buzz-fleet migrate                     # apply it
+buzz-fleet community use <id>          # pick which community to check first
+buzz-fleet agent list --community <id> # confirm its agents are present and running
 ```
+
+Repeat the last two lines for each community you migrated — `agent list`
+has no default community and always requires `--community` explicitly (see
+"Communities" below).
 
 The migration is resumable: if it's interrupted partway, just run
 `buzz-fleet migrate` again — every step checks its own postcondition, so
@@ -263,6 +268,11 @@ buzz-fleet community show
 `community show` exits with an error if no community is active yet (run
 `community use` first); `community list` never does — several communities
 with none selected is simply displayed with no `*` marked, not an error.
+
+The active community currently affects only the TUI (which screen it opens
+to on launch) and `community show` — the `agent`, `fleet`, and `task`
+command groups do not consult it yet, so `--community` is still required on
+every one of their commands regardless of what `community use` last set.
 
 ### Manage agents (CLI)
 

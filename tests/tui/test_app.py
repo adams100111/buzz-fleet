@@ -47,6 +47,32 @@ async def test_malformed_config_with_one_community_still_reaches_dashboard(monke
 
 
 @pytest.mark.asyncio
+async def test_scalar_config_section_with_one_community_still_reaches_dashboard(monkeypatch) -> None:
+    """Final whole-branch review FIX 2: `ui = 5` is valid TOML (unlike the
+    `[[[` syntax error the previous regression test above uses) but not a
+    valid section — `config.load()` used to do `raw.get("ui", {}).get(...)`
+    and crash with a bare `AttributeError` here, which is not a `ValueError`
+    and so was NOT caught by on_mount's `except (RuntimeError, ValueError)`.
+    A single-community user with nothing ambiguous to resolve must still
+    reach the dashboard."""
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [])
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.AgentManager", lambda runner, community: MagicMock()
+    )
+    cfg = paths.config_dir() / "config.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("ui = 5\n")
+    state.save_community(Community(id="eltahir", relay_url="wss://r", relay_admin_nsec="nsec1x"))
+
+    app = BuzzFleetApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        assert isinstance(app.screen, DashboardScreen)
+        assert app.screen._community_id == "eltahir"
+
+
+@pytest.mark.asyncio
 async def test_malformed_config_with_several_communities_falls_back_to_connect_and_notifies() -> None:
     """With more than one community and a malformed config.toml, resolution
     genuinely can't succeed — on_mount must not crash, and must say why the

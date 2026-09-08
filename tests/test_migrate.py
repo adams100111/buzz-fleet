@@ -53,6 +53,43 @@ def _legacy_tree(tmp_path: Path, monkeypatch) -> Path:
     return legacy
 
 
+def _two_community_legacy_tree(tmp_path: Path, monkeypatch, *, second_agent_id: str) -> Path:
+    """Two legacy communities, "eltahir" (from `_legacy_tree`, agent
+    "reviewer") and "acme" (agent `second_agent_id`).
+
+    No test in this file exercised more than one legacy community before
+    this fixture -- every other test uses `_legacy_tree`, which builds
+    exactly one community with one agent, so the normal multi-community
+    migrate path (and the collision the legacy layout's bare, global
+    agent-id keying makes possible) had never actually been run.
+
+    `second_agent_id="reviewer"` reproduces the collision this fixture
+    exists for: the legacy layout keys env/prompt files on the bare agent
+    id GLOBALLY, so a second community whose agent is ALSO called
+    "reviewer" doesn't get its own `agents/reviewer.env` -- there is
+    exactly one on a real machine hitting this, already written by
+    `_legacy_tree`, and this deliberately does not write a second one.
+    Any other value (e.g. "auditor") gives "acme" its own, non-colliding
+    agent id with its own env/prompt file, to prove the ordinary
+    multi-community path actually works.
+    """
+    legacy = _legacy_tree(tmp_path, monkeypatch)
+
+    (legacy / "communities" / "acme" / "agents").mkdir(parents=True)
+    (legacy / "communities" / "acme.json").write_text(
+        '{"id":"acme","relay_url":"wss://r2","relay_admin_nsec":"nsec1owner2"}'
+    )
+    (legacy / "communities" / "acme" / "agents" / f"{second_agent_id}.json").write_text(
+        '{"id":"' + second_agent_id + '","community_id":"acme","display_name":"A",'
+        '"harness":"claude","private_key":"nsec1other","public_key":"' + "b" * 64 + '",'
+        '"system_prompt_source":{"kind":"inline","text":"yo"}}'
+    )
+    if second_agent_id != "reviewer":
+        (legacy / "agents" / f"{second_agent_id}.env").write_text("BUZZ_PRIVATE_KEY=nsec1other\n")
+        (legacy / "agents" / f"{second_agent_id}.prompt.md").write_text("yo")
+    return legacy
+
+
 def test_dry_run_changes_nothing(tmp_path, monkeypatch) -> None:
     legacy = _legacy_tree(tmp_path, monkeypatch)
     runner = FakeRunner()
@@ -537,6 +574,60 @@ def test_refuses_the_whole_migration_for_an_invalid_legacy_agent_id(tmp_path, mo
         migrate.run(FakeRunner())
 
     assert not (paths.state_dir() / "communities" / "eltahir.json").exists()
+
+
+def test_refuses_the_whole_migration_when_an_agent_id_collides_across_communities(
+    tmp_path, monkeypatch
+) -> None:
+    """FIX 1 (Critical, final whole-branch review): the legacy layout keys
+    env files, prompt files, and work dirs on the bare agent id GLOBALLY, so
+    two communities that each contain an agent called "reviewer" share
+    exactly ONE legacy env file and ONE legacy prompt file between them.
+    Before this fix, `plan()` fanned that single shared file out to both
+    destinations -- giving at least one agent the wrong `BUZZ_PRIVATE_KEY`,
+    permanently, under a unit name that now asserts it's correct -- and a
+    resumed run reported success with the second agent's
+    `BUZZ_ACP_SYSTEM_PROMPT_FILE` pointing at a file the first run's prompt
+    step had already unlinked. `plan()` must now catch this up front, the
+    same as the id-validity checks above, and refuse before writing
+    anything: merging two agents that share one legacy env file can't be
+    done safely, since which key belongs to which agent isn't recorded
+    anywhere on disk.
+    """
+    legacy = _two_community_legacy_tree(tmp_path, monkeypatch, second_agent_id="reviewer")
+
+    with pytest.raises(RuntimeError, match="reviewer") as exc_info:
+        migrate.run(FakeRunner())
+    message = str(exc_info.value)
+    assert "eltahir" in message
+    assert "acme" in message
+
+    # Nothing written at all -- not even the perfectly fine parts of either
+    # community -- and no backup taken, same "refuse before touching
+    # anything" contract the id-validity checks above already have.
+    assert not (paths.state_dir() / "communities" / "eltahir.json").exists()
+    assert not (paths.state_dir() / "communities" / "acme.json").exists()
+    assert list(legacy.parent.glob(f"{legacy.name}.bak-*")) == []
+
+
+def test_two_communities_with_distinct_agent_ids_migrate_correctly(tmp_path, monkeypatch) -> None:
+    """The flip side of the collision test above, and the first test in this
+    suite to actually exercise a normal (non-colliding) multi-community
+    migration: two communities with distinct agent ids must both migrate,
+    each agent's env file ending up with its OWN `BUZZ_PRIVATE_KEY`, never
+    the other's. This is the test that proves the multi-community path
+    works at all -- nothing in the suite exercised it before this fixture.
+    """
+    _two_community_legacy_tree(tmp_path, monkeypatch, second_agent_id="auditor")
+
+    migrate.run(FakeRunner())
+
+    reviewer_env = (paths.secrets_dir() / "units" / "eltahir:reviewer.env").read_text()
+    auditor_env = (paths.secrets_dir() / "units" / "acme:auditor.env").read_text()
+    assert "BUZZ_PRIVATE_KEY=nsec1agent\n" == reviewer_env
+    assert "BUZZ_PRIVATE_KEY=nsec1other\n" == auditor_env
+    assert "nsec1other" not in reviewer_env
+    assert "nsec1agent" not in auditor_env
 
 
 def test_created_at_backfill_is_printed_not_silent(tmp_path, monkeypatch, capsys) -> None:

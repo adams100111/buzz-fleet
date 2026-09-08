@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from buzz_fleet import harnesses, paths
@@ -46,7 +46,12 @@ class Config:
     confirm_destructive: bool = True
     default_harness: str = "claude"
     ntfy_url: str | None = None
-    ntfy_token: str | None = None
+    # repr=False: this is the resolved secret value (post env: indirection),
+    # not the "env:NAME" reference stored in config.toml -- Phase B's
+    # JSON-RPC daemon will serialise Config objects, and nothing today stops
+    # a log line or an error message from carrying a whole Config via its
+    # default, auto-generated __repr__.
+    ntfy_token: str | None = field(default=None, repr=False)
     herdr_report_agents: bool = False
     unknown_keys: tuple[str, ...] = ()
 
@@ -68,6 +73,28 @@ def resolve_secret(raw: str | None, *, field: str = "value") -> str | None:
     if not raw.startswith(_ENV_PREFIX):
         raise ValueError(f"{field} must use env:NAME, got a literal value instead")
     return os.environ.get(raw[len(_ENV_PREFIX) :]) or None
+
+
+def _require_table(raw: dict, section_name: str, *, path: Path) -> dict:
+    """A section of `config.toml` must be a TOML table.
+
+    `ui = 5` is valid TOML but not a valid section — every parser below this
+    (`_parse_refresh_interval`, `_require_bool`, etc.) calls `.get()` on
+    whatever `raw.get(section_name, {})` returns, and an `int` has no
+    `.get()`. Left unchecked that's a bare `AttributeError`, which is not a
+    `ValueError` and so slips straight past every caller's `except
+    (RuntimeError, ValueError)`/`except ValueError` guard — `config.toml` is
+    a file this design explicitly invites the user to hand-edit, and a typo
+    like this must not crash the TUI at mount or `config show`.
+    """
+    value = raw.get(section_name, {})
+    if not isinstance(value, dict):
+        # ValueError, not TypeError -- matches _require_bool below and every
+        # other config validation error in this module.
+        raise ValueError(  # noqa: TRY004
+            f"[{section_name}] must be a table, got {value!r} ({type(value).__name__}) in {path}"
+        )
+    return value
 
 
 def _require_bool(section: dict, key: str, default: bool, *, section_name: str, path: Path) -> bool:
@@ -148,11 +175,11 @@ def load() -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"{path} is not valid TOML: {e}") from e
 
-    general = raw.get("general", {})
-    ui = raw.get("ui", {})
-    defaults = raw.get("defaults", {})
-    notifier = raw.get("notifier", {})
-    herdr = raw.get("herdr", {})
+    general = _require_table(raw, "general", path=path)
+    ui = _require_table(raw, "ui", path=path)
+    defaults = _require_table(raw, "defaults", path=path)
+    notifier = _require_table(raw, "notifier", path=path)
+    herdr = _require_table(raw, "herdr", path=path)
 
     return Config(
         default_community=general.get("default_community"),

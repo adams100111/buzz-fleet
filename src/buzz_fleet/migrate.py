@@ -334,6 +334,44 @@ def plan(runner: CommandRunner) -> list[Step]:
                     "agent's files and try again."
                 ) from e
 
+    # The legacy layout keys an agent's env file, prompt file, and work dir on
+    # its BARE id, globally -- there is no community scoping at all pre-
+    # migration. So when two communities each contain an agent with the same
+    # id (e.g. both have a "reviewer"), there is exactly ONE legacy env file
+    # and ONE legacy prompt file, and both migrated agents would otherwise be
+    # planned to receive a copy of it. That is not a merge that can be done
+    # safely: which agent the shared file's `BUZZ_PRIVATE_KEY` actually
+    # belongs to is not recorded anywhere on disk, so fanning it out to both
+    # destinations silently gives at least one agent the wrong Nostr
+    # identity -- permanently, under a unit name that now asserts it's
+    # correct. Caught here, up front, the same as the id-validity checks
+    # above: refusing the whole migration before writing anything is correct
+    # because there is no safe partial answer, not just a conservative one.
+    agent_ids_by_community: dict[str, list[str]] = {
+        community_id: _legacy_agent_ids(legacy, community_id) for community_id in community_ids
+    }
+    communities_by_agent_id: dict[str, list[str]] = {}
+    for community_id, agent_ids in agent_ids_by_community.items():
+        for agent_id in agent_ids:
+            communities_by_agent_id.setdefault(agent_id, []).append(community_id)
+    duplicated = {
+        agent_id: communities
+        for agent_id, communities in communities_by_agent_id.items()
+        if len(communities) > 1
+    }
+    if duplicated:
+        detail = "; ".join(
+            f"{agent_id!r} in communities {', '.join(communities)}"
+            for agent_id, communities in sorted(duplicated.items())
+        )
+        raise RuntimeError(
+            "legacy agent id(s) shared across more than one community, with no way to tell "
+            f"which one the single shared env/prompt file actually belongs to: {detail}. "
+            "Migrating would give at least one of them the wrong BUZZ_PRIVATE_KEY. Refusing "
+            "the whole migration rather than moving some agents and stopping partway. Rename "
+            "or remove the duplicate agent id(s) before migrating."
+        )
+
     steps: list[Step] = []
     for community_id in community_ids:
         target = paths.state_dir() / "communities" / f"{community_id}.json"
