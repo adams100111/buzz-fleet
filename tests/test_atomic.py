@@ -99,3 +99,63 @@ def test_lock_is_released_when_body_raises(tmp_path: Path) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+def test_creates_nested_directories_at_0700(tmp_path: Path) -> None:
+    """All created intermediate directories must be 0o700, not affected by umask."""
+    target = tmp_path / "a" / "b" / "c" / "secret.json"
+    atomic.write_secure(target, "content")
+
+    # Check all intermediate directories are 0o700
+    assert oct((tmp_path / "a").stat().st_mode & 0o777) == "0o700"
+    assert oct((tmp_path / "a" / "b").stat().st_mode & 0o777) == "0o700"
+    assert oct((tmp_path / "a" / "b" / "c").stat().st_mode & 0o777) == "0o700"
+    assert target.read_text() == "content"
+
+
+def test_dir_mode_is_overridable(tmp_path: Path) -> None:
+    """dir_mode parameter overrides the default 0o700."""
+    target = tmp_path / "x" / "y" / "file.json"
+    atomic.write_secure(target, "data", dir_mode=0o755)
+
+    # Check directories were created at 0o755
+    assert oct((tmp_path / "x").stat().st_mode & 0o777) == "0o755"
+    assert oct((tmp_path / "x" / "y").stat().st_mode & 0o777) == "0o755"
+    assert target.read_text() == "data"
+
+
+def test_preexisting_directory_mode_unchanged(tmp_path: Path) -> None:
+    """Pre-existing directories are not modified, only missing ones are created."""
+    # Create a directory with specific permissions (0o755)
+    existing_dir = tmp_path / "existing"
+    existing_dir.mkdir(mode=0o755)
+    os.chmod(existing_dir, 0o755)  # Ensure it's set despite umask
+
+    # Write to a file in that directory with different dir_mode
+    target = existing_dir / "file.json"
+    atomic.write_secure(target, "data", dir_mode=0o700)
+
+    # The existing directory should still be 0o755
+    assert oct(existing_dir.stat().st_mode & 0o777) == "0o755"
+    assert target.read_text() == "data"
+
+
+def test_locked_creates_nested_directories_at_0700(tmp_path: Path) -> None:
+    """Lock's parent directories must also be 0o700."""
+    lock_path = tmp_path / "locks" / "nested" / "community.lock"
+    with atomic.locked(lock_path):
+        pass
+
+    # Check all directories were created at 0o700
+    assert oct((tmp_path / "locks").stat().st_mode & 0o777) == "0o700"
+    assert oct((tmp_path / "locks" / "nested").stat().st_mode & 0o777) == "0o700"
+
+
+def test_locked_dir_mode_is_overridable(tmp_path: Path) -> None:
+    """locked's dir_mode parameter is honored."""
+    lock_path = tmp_path / "locks" / "open" / "lock"
+    with atomic.locked(lock_path, dir_mode=0o755):
+        pass
+
+    assert oct((tmp_path / "locks").stat().st_mode & 0o777) == "0o755"
+    assert oct((tmp_path / "locks" / "open").stat().st_mode & 0o777) == "0o755"
