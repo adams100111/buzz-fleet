@@ -18,6 +18,7 @@ from buzz_fleet import (
     state,
     systemctl_client,
     systemd,
+    units,
     visibility,
 )
 from buzz_fleet.models import Agent, Community, McpServer, SystemPromptSource, validate_env_key
@@ -31,29 +32,29 @@ _ENV_KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 FLEET_CHANNEL_NAME = "fleet"
 
 
-def _agent_env_has(agent_id: str, key: str, value: str) -> bool:
-    path = systemd.agent_env_path(agent_id)
-    return path.exists() and f"{key}={value}\n" in path.read_text()
+def _agent_env_has(instance_key: str, env_key: str, value: str) -> bool:
+    path = systemd.agent_env_path(instance_key)
+    return path.exists() and f"{env_key}={value}\n" in path.read_text()
 
 
-def _agent_env_has_auth_tag(agent_id: str) -> bool:
-    """Whether `agent_id`'s env file already carries `BUZZ_AUTH_TAG` — the
-    single flag `ensure_runtime_ready` uses to retroactively fix an agent
+def _agent_env_has_auth_tag(instance_key: str) -> bool:
+    """Whether `instance_key`'s env file already carries `BUZZ_AUTH_TAG` —
+    the single flag `ensure_runtime_ready` uses to retroactively fix an agent
     created before this env var existed (see `AgentManager._compute_agent_auth_tag`).
     """
-    path = systemd.agent_env_path(agent_id)
+    path = systemd.agent_env_path(instance_key)
     if not path.exists():
         return False
     return any(line.startswith("BUZZ_AUTH_TAG=") for line in path.read_text().splitlines())
 
 
-def _read_agent_command(agent_id: str) -> str | None:
-    """The `BUZZ_ACP_AGENT_COMMAND` value currently written for `agent_id`,
+def _read_agent_command(instance_key: str) -> str | None:
+    """The `BUZZ_ACP_AGENT_COMMAND` value currently written for `instance_key`,
 
     or None if it has no env file yet (a brand-new agent — `create_agent`'s
     own `write_agent_files` call handles that case directly).
     """
-    path = systemd.agent_env_path(agent_id)
+    path = systemd.agent_env_path(instance_key)
     if not path.exists():
         return None
     for line in path.read_text().splitlines():
@@ -62,13 +63,13 @@ def _read_agent_command(agent_id: str) -> str | None:
     return None
 
 
-def _read_existing_env_keys(agent_id: str) -> dict[str, str]:
+def _read_existing_env_keys(instance_key: str) -> dict[str, str]:
     """Best-effort parse of an existing agent .env file for keys write_agent_files
 
     would otherwise clobber with None on every update (Fix 9). A simple
     line-parse is sufficient here — this isn't a general env-file parser.
     """
-    path = systemd.agent_env_path(agent_id)
+    path = systemd.agent_env_path(instance_key)
     if not path.exists():
         return {}
     found: dict[str, str] = {}
@@ -99,6 +100,13 @@ class AgentManager:
         # case, is actively wrong advice (running `fleet init` again would
         # create a third channel).
         self._last_fleet_error: str | None = None
+
+    def _key(self, agent_id: str) -> str:
+        """This community's own instance key for `agent_id` — see units.py's
+        module docstring for why a bare agent id is not safe to pass to
+        systemctl_client or systemd's path helpers on its own.
+        """
+        return units.instance_key(self._community.id, agent_id)
 
     def list_agents(self) -> list[Agent]:
         return state.load_agents(self._community.id)
@@ -314,22 +322,22 @@ class AgentManager:
             agent = synced
 
             resolved_command = harnesses.resolve_adapter_command(agent.harness)
-            needs_auth_tag = agent.visibility_managed and not _agent_env_has_auth_tag(agent.id)
+            needs_auth_tag = agent.visibility_managed and not _agent_env_has_auth_tag(self._key(agent.id))
             needs_fleet_env = rec is not None and not (
-                _agent_env_has(agent.id, "BUZZ_FLEET_CHANNEL", self._community.fleet_channel_id or "")
-                and _agent_env_has(agent.id, "BUZZ_FLEET_RETRIEVAL_KEY", rec.retrieval_key)
+                _agent_env_has(self._key(agent.id), "BUZZ_FLEET_CHANNEL", self._community.fleet_channel_id or "")
+                and _agent_env_has(self._key(agent.id), "BUZZ_FLEET_RETRIEVAL_KEY", rec.retrieval_key)
             )
-            env_path = systemd.agent_env_path(agent.id)
+            env_path = systemd.agent_env_path(self._key(agent.id))
             needs_block = not instructions.has_current_block(env_path.read_text() if env_path.exists() else "")
             if (
                 not needs_full_refresh
                 and not needs_auth_tag
                 and not needs_fleet_env
                 and not needs_block
-                and _read_agent_command(agent.id) == resolved_command
+                and _read_agent_command(self._key(agent.id)) == resolved_command
             ):
                 continue
-            existing_keys = _read_existing_env_keys(agent.id)
+            existing_keys = _read_existing_env_keys(self._key(agent.id))
             systemd.write_agent_files(
                 agent,
                 self._community,
@@ -338,7 +346,7 @@ class AgentManager:
                 auth_tag=self._compute_agent_auth_tag(agent),
             )
             try:
-                systemctl_client.restart(self._runner, agent.id)
+                systemctl_client.restart(self._runner, self._key(agent.id))
             except RuntimeError:
                 # Best-effort: one agent's restart failing (e.g. its own
                 # unrelated config problem) must not block healing the
@@ -514,7 +522,7 @@ class AgentManager:
         state.save_agent(agent)
         agent = self._sync_visibility(agent)
         state.save_agent(agent)
-        systemctl_client.enable_now(self._runner, agent.id)
+        systemctl_client.enable_now(self._runner, self._key(agent.id))
         return agent
 
     def update_agent(self, agent_id: str, **changes: object) -> Agent:
@@ -617,7 +625,7 @@ class AgentManager:
         # Preserve any previously-set API keys instead of wiping them on every
         # update — write_agent_files takes explicit key args rather than
         # merging, so we read the existing .env file forward here (Fix 9).
-        existing_keys = _read_existing_env_keys(agent_id)
+        existing_keys = _read_existing_env_keys(self._key(agent_id))
         systemd.write_agent_files(
             updated,
             self._community,
@@ -625,14 +633,14 @@ class AgentManager:
             openai_api_key=existing_keys.get("OPENAI_API_KEY"),
             auth_tag=self._compute_agent_auth_tag(updated),
         )
-        systemctl_client.restart(self._runner, agent_id)
+        systemctl_client.restart(self._runner, self._key(agent_id))
         state.save_agent(updated)
         return updated
 
     def delete_agent(self, agent_id: str) -> None:
         agents = {a.id: a for a in self.list_agents()}
         agent = agents[agent_id]
-        systemctl_client.disable_now(self._runner, agent_id)
+        systemctl_client.disable_now(self._runner, self._key(agent_id))
 
         if agent.visibility_managed:
             owner_nsec = self._community.relay_admin_nsec.get_secret_value()
@@ -682,10 +690,10 @@ class AgentManager:
         # without this the secret key survives "deletion" on disk, and a stale
         # env file could be silently reused by a future agent with the same
         # slug (Fix 4).
-        systemd.agent_env_path(agent_id).unlink(missing_ok=True)
-        systemd.agent_prompt_path(agent_id).unlink(missing_ok=True)
+        systemd.agent_env_path(self._key(agent_id)).unlink(missing_ok=True)
+        systemd.agent_prompt_path(self._key(agent_id)).unlink(missing_ok=True)
         # Task 19 added two more secret-bearing artifacts under this agent's
-        # WORK_DIR that this cleanup never covered: the MCP wrapper script
+        # work dir that this cleanup never covered: the MCP wrapper script
         # (mode 0700, `export TOKEN='<real secret>'`) and Pi's private
         # mcp.json (mode 0600, the same secrets as JSON) — without this an
         # agent's real MCP credentials survive "deletion" on disk exactly like
@@ -693,6 +701,6 @@ class AgentManager:
         # one expected `mcp-<name>.sh` path from `agent.mcp_server` — a server
         # renamed at some point (before `write_agent_files`'s own stale-wrapper
         # cleanup existed) can have orphaned more than one wrapper here.
-        for wrapper in (systemd.WORK_DIR / agent_id).glob("mcp-*.sh"):
+        for wrapper in systemd.work_dir(self._key(agent_id)).glob("mcp-*.sh"):
             wrapper.unlink(missing_ok=True)
-        (systemd.WORK_DIR / agent_id / ".pi-agent" / "mcp.json").unlink(missing_ok=True)
+        (systemd.work_dir(self._key(agent_id)) / ".pi-agent" / "mcp.json").unlink(missing_ok=True)

@@ -57,6 +57,12 @@ def validate_env_key(key: str) -> None:
 
 
 class Community(BaseModel):
+    # A plain str, not validated here, deliberately: validation lives in
+    # connect.validate_community_id, called by connect_and_save at the point
+    # a community is *created* (the CLI's `connect --id` and the TUI's
+    # ConnectScreen both go through it). A stricter type here would also
+    # apply on *load*, making an already-saved community with a legacy id
+    # unloadable — a migration concern, not this model's.
     id: str
     relay_url: str
     relay_admin_nsec: SecretStr

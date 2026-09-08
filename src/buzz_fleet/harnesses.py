@@ -27,6 +27,8 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from buzz_fleet import paths
+
 if TYPE_CHECKING:
     from buzz_fleet.proc import CommandRunner
 
@@ -48,7 +50,8 @@ PI_MCP_ADAPTER_VERSION = "2.32.1"
 # every new Pi agent's own private `.pi-agent/` dir. Never pointed at
 # directly by a running agent — each agent gets its own copy so agents
 # can't see or interfere with each other's (or the owner's own) Pi setup.
-PI_AGENT_TEMPLATE_DIR = Path.home() / ".local" / "share" / "buzz-fleet" / "pi-agent-template"
+def pi_agent_template_dir() -> Path:
+    return paths.data_dir() / "pi-agent-template"
 
 _ADAPTER_COMMANDS: dict[str, list[str]] = {
     "claude": ["claude-agent-acp", "claude-code-acp"],
@@ -118,7 +121,7 @@ def install_adapter(runner: CommandRunner, harness: str) -> None:
     """Run `harness`'s install command(s) in order. Raises RuntimeError on any failure.
 
     For `pi` specifically, also installs `pi-mcp-adapter` into the shared
-    `PI_AGENT_TEMPLATE_DIR` (pointed at via `PI_CODING_AGENT_DIR`, the same
+    `pi_agent_template_dir()` (pointed at via `PI_CODING_AGENT_DIR`, the same
     env var pi-mcp-adapter itself reads) so every new Pi agent's first turn
     can copy it in locally instead of needing network access.
     """
@@ -137,9 +140,10 @@ def install_adapter(runner: CommandRunner, harness: str) -> None:
                 f"{result.stderr.strip()}"
             )
     if harness == "pi":
-        PI_AGENT_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+        template_dir = pi_agent_template_dir()
+        template_dir.mkdir(parents=True, exist_ok=True)
         previous = os.environ.get("PI_CODING_AGENT_DIR")
-        os.environ["PI_CODING_AGENT_DIR"] = str(PI_AGENT_TEMPLATE_DIR)
+        os.environ["PI_CODING_AGENT_DIR"] = str(template_dir)
         try:
             result = runner.run(["pi", "install", f"npm:pi-mcp-adapter@{PI_MCP_ADAPTER_VERSION}"])
         finally:

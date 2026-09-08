@@ -11,18 +11,17 @@ from textual.binding import Binding, BindingType
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header
 
-from buzz_fleet import state, visibility
+from buzz_fleet import state, units, visibility
 from buzz_fleet.manager import AgentManager
 from buzz_fleet.models import Agent
 from buzz_fleet.proc import RealCommandRunner
 from buzz_fleet.systemctl_client import AgentStatus
 from buzz_fleet.systemctl_client import status as systemctl_status
 from buzz_fleet.tui.screens.agent_form import AgentFormScreen
+from buzz_fleet.tui.screens.community_picker import CommunityPickerScreen
 from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 from buzz_fleet.tui.screens.logs import LogsScreen
 from buzz_fleet.tui.theme import PANEL_BORDER, STATUS_INACTIVE
-
-CURRENT_COMMUNITY_ID = "eltahir"
 
 # Displayed status text borrows systemd's own vocabulary (active/inactive/
 # failed) rather than inventing new words for states the underlying system
@@ -51,13 +50,13 @@ def _visibility_display(agent: Agent) -> tuple[str, str]:
     return text, "#C98A2C"  # "pending"
 
 
-def list_agents() -> list:
-    community = state.load_community(CURRENT_COMMUNITY_ID)
+def list_agents(community_id: str) -> list:
+    community = state.load_community(community_id)
     return state.load_agents(community.id) if community else []
 
 
-def agent_status(agent_id: str) -> AgentStatus:
-    return systemctl_status(RealCommandRunner(), agent_id)
+def agent_status(community_id: str, agent_id: str) -> AgentStatus:
+    return systemctl_status(RealCommandRunner(), units.instance_key(community_id, agent_id))
 
 
 class DashboardScreen(Screen):
@@ -76,7 +75,12 @@ class DashboardScreen(Screen):
         Binding("x", "delete_agent", "Delete agent"),
         Binding("delete", "delete_agent", "Delete agent", show=False),
         Binding("l", "view_logs", "View logs"),
+        Binding("s", "switch_community", "Switch community"),
     ]
+
+    def __init__(self, community_id: str) -> None:
+        super().__init__()
+        self._community_id = community_id
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -105,14 +109,14 @@ class DashboardScreen(Screen):
         # template is current, so this is cheap on every refresh, not just
         # the first. Runs inside this worker, not synchronously at mount,
         # so a cold install's download can't freeze the UI's first paint.
-        community = state.load_community(CURRENT_COMMUNITY_ID)
+        community = state.load_community(self._community_id)
         if community is not None:
             AgentManager(RealCommandRunner(), community).ensure_runtime_ready()
 
         table = self.query_one("#agent-table", DataTable)
         table.clear()
-        for agent in list_agents():
-            text, color = _STATUS_DISPLAY[agent_status(agent.id)]
+        for agent in list_agents(self._community_id):
+            text, color = _STATUS_DISPLAY[agent_status(agent.community_id, agent.id)]
             vis_text, vis_color = _visibility_display(agent)
             table.add_row(
                 agent.id,
@@ -133,7 +137,7 @@ class DashboardScreen(Screen):
         return str(table.get_row_at(table.cursor_row)[0])
 
     def _manager_or_notify(self) -> AgentManager | None:
-        community = state.load_community(CURRENT_COMMUNITY_ID)
+        community = state.load_community(self._community_id)
         if community is None:
             self.notify("No connected community — run `buzz-fleet connect` first.", severity="error")
             return None
@@ -182,4 +186,14 @@ class DashboardScreen(Screen):
         agent_id = self._selected_agent_id()
         if agent_id is None:
             return
-        self.app.push_screen(LogsScreen(agent_id))
+        self.app.push_screen(LogsScreen(units.instance_key(self._community_id, agent_id)))
+
+    def action_switch_community(self) -> None:
+        def on_chosen(chosen: str | None) -> None:
+            # Rebuilding the screen is deliberate: every widget on it is bound
+            # to one community's agents, so switching in place would mean
+            # resetting each of them by hand.
+            if chosen is not None and chosen != self._community_id:
+                self.app.switch_screen(DashboardScreen(chosen))
+
+        self.app.push_screen(CommunityPickerScreen(self._community_id), on_chosen)

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from buzz_fleet import __version__, harnesses, state
+from buzz_fleet import __version__, harnesses, paths, state
 from buzz_fleet.cli.fleet_commands import fleet_app, task_app, tasks_command
 from buzz_fleet.connect import connect_and_save
 from buzz_fleet.manager import AgentManager
@@ -89,6 +91,10 @@ app.add_typer(harness_app, name="harness")
 app.add_typer(fleet_app, name="fleet")
 app.add_typer(task_app, name="task")
 app.command("tasks")(tasks_command)
+config_app = typer.Typer(help="Inspect configuration")
+app.add_typer(config_app, name="config")
+community_app = typer.Typer(help="List the connected communities and choose the active one")
+app.add_typer(community_app, name="community")
 
 
 def _version_callback(show_version: bool) -> None:
@@ -121,7 +127,12 @@ def connect(
     ],
 ) -> None:
     runner = RealCommandRunner()
-    if not connect_and_save(runner, id, relay, admin_nsec):
+    try:
+        connected = connect_and_save(runner, id, relay, admin_nsec)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    if not connected:
         typer.echo("Could not authenticate against that relay with that key.", err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Connected and saved community '{id}'.")
@@ -389,6 +400,123 @@ def harness_install(name: Annotated[str, typer.Argument(help="claude, codex, pi,
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from e
     typer.echo(f"Installed {name}'s adapter.")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print the effective configuration and where it was read from."""
+    from dataclasses import asdict
+
+    from buzz_fleet import config as config_module
+
+    path = paths.config_dir() / "config.toml"
+    typer.echo(f"# {path}{'' if path.exists() else '  (not present; showing defaults)'}")
+    try:
+        loaded = config_module.load()
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    values = asdict(loaded)
+    unknown_keys = values.pop("unknown_keys")
+    values["ntfy_token"] = "<set>" if values["ntfy_token"] else None
+    for key, value in values.items():
+        typer.echo(f"{key} = {value!r}")
+    if unknown_keys:
+        typer.echo("unrecognised keys (ignored):")
+        for key in unknown_keys:
+            typer.echo(f"  {key}")
+
+
+def _active_or_none() -> str | None:
+    """resolve_community_id raises RuntimeError when several communities
+    exist and none is selected, and ValueError when config.toml (which it
+    consults internally) is malformed. For `community list`/`show` neither
+    case is an error to raise past the caller — an ambiguous selection is a
+    state to display, and a config typo must not break `community list`
+    (the same bug was found and fixed in the TUI in Task 7)."""
+    from buzz_fleet.orchestration.identity import resolve_community_id
+
+    try:
+        return resolve_community_id(os.environ, None)
+    except (RuntimeError, ValueError):
+        return None
+
+
+@community_app.command("list")
+def community_list(
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List every connected community and mark the active one."""
+    ids = state.list_community_ids()
+    active = _active_or_none()
+    if as_json:
+        typer.echo(json.dumps([{"id": i, "active": i == active} for i in ids]))
+        return
+    if not ids:
+        typer.echo("No communities yet. Run `buzz-fleet connect` first.")
+        return
+    for community_id in ids:
+        typer.echo(f"{'*' if community_id == active else ' '} {community_id}")
+    if active is None:
+        typer.echo("\nNo active community. Run `buzz-fleet community use <id>`.")
+
+
+@community_app.command("use")
+def community_use(
+    community_id: Annotated[str, typer.Argument(help="The community to make active")],
+) -> None:
+    """Set the active community for this machine."""
+    ids = state.list_community_ids()
+    if community_id not in ids:
+        typer.echo(f"No community {community_id!r}. Known: {', '.join(ids) or 'none'}", err=True)
+        raise typer.Exit(code=1)
+    state.save_active_community(community_id)
+    typer.echo(f"Active community: {community_id}")
+
+
+@community_app.command("show")
+def community_show() -> None:
+    """Show the active community, its relay, and how many agents it has."""
+    active = _active_or_none()
+    if active is None:
+        typer.echo("No active community. Run `buzz-fleet community use <id>`.", err=True)
+        raise typer.Exit(code=1)
+    community = state.load_community(active)
+    if community is None:
+        typer.echo(f"Community {active!r} is selected but its file is missing.", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"id:            {community.id}")
+    typer.echo(f"relay:         {community.relay_url}")
+    typer.echo(f"agents:        {len(state.load_agents(active))}")
+    typer.echo(f"fleet channel: {community.fleet_channel_id or '(none)'}")
+
+
+@app.command()
+def migrate(
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the plan and change nothing.")
+    ] = False,
+) -> None:
+    """Move this machine onto the current file layout and unit names.
+
+    Never runs automatically: it stops units and moves key material. Safe to
+    re-run — every step checks its own postcondition, so an interrupted
+    migration resumes where it stopped.
+    """
+    from buzz_fleet import migrate as migrate_module
+
+    try:
+        steps = migrate_module.run(RealCommandRunner(), dry_run=dry_run)
+    except RuntimeError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    if not steps:
+        typer.echo("Already on the current layout; nothing to do.")
+        return
+    for step in steps:
+        typer.echo(f"{'would ' if dry_run else ''}{step.description}")
+    typer.echo(f"\n{len(steps)} step(s){' planned' if dry_run else ' applied'}.")
 
 
 @app.command()

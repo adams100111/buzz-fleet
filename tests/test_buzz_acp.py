@@ -48,8 +48,8 @@ def _fake_urlopen(archive_bytes: bytes, checksum_text: str):
 
 @pytest.fixture(autouse=True)
 def _isolated_buzz_acp_path(tmp_path, monkeypatch):
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", tmp_path / "bin")
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", tmp_path / "bin" / "buzz-acp")
+    monkeypatch.setattr(buzz_acp, "buzz_acp_dir", lambda: tmp_path / "bin")
+    monkeypatch.setattr(buzz_acp, "buzz_acp_path", lambda: tmp_path / "bin" / "buzz-acp")
 
 
 def test_target_triple_maps_known_arches(monkeypatch) -> None:
@@ -71,9 +71,9 @@ def test_target_triple_raises_for_unsupported_arch(monkeypatch) -> None:
 
 
 def test_noop_when_already_present_and_executable(monkeypatch) -> None:
-    buzz_acp.BUZZ_ACP_DIR.mkdir(parents=True)
-    buzz_acp.BUZZ_ACP_PATH.write_bytes(b"already here")
-    buzz_acp.BUZZ_ACP_PATH.chmod(0o755)
+    buzz_acp.buzz_acp_dir().mkdir(parents=True)
+    buzz_acp.buzz_acp_path().write_bytes(b"already here")
+    buzz_acp.buzz_acp_path().chmod(0o755)
 
     def explode(*args: object, **kwargs: object) -> None:
         raise AssertionError("should not attempt a download when already installed")
@@ -96,9 +96,9 @@ def test_downloads_and_installs_when_missing(monkeypatch) -> None:
     result = buzz_acp.ensure_buzz_acp_installed()
 
     assert result is True
-    assert buzz_acp.BUZZ_ACP_PATH.is_file()
-    assert buzz_acp.BUZZ_ACP_PATH.read_bytes() == b"#!/bin/sh\necho fake sprig binary\n"
-    assert buzz_acp.BUZZ_ACP_PATH.stat().st_mode & 0o100
+    assert buzz_acp.buzz_acp_path().is_file()
+    assert buzz_acp.buzz_acp_path().read_bytes() == b"#!/bin/sh\necho fake sprig binary\n"
+    assert buzz_acp.buzz_acp_path().stat().st_mode & 0o100
 
 
 def test_raises_on_checksum_mismatch(monkeypatch) -> None:
@@ -113,7 +113,7 @@ def test_raises_on_checksum_mismatch(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="Checksum mismatch"):
         buzz_acp.ensure_buzz_acp_installed()
 
-    assert not buzz_acp.BUZZ_ACP_PATH.exists()
+    assert not buzz_acp.buzz_acp_path().exists()
 
 
 def test_ensure_buzz_cli_link_creates_and_is_idempotent(tmp_path, monkeypatch) -> None:
@@ -122,9 +122,9 @@ def test_ensure_buzz_cli_link_creates_and_is_idempotent(tmp_path, monkeypatch) -
     acp = acp_dir / "buzz-acp"
     acp.write_bytes(b"stub")
     acp.chmod(0o755)
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", acp_dir)
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", acp)
-    monkeypatch.setattr(buzz_acp, "BUZZ_CLI_PATH", acp_dir / "buzz")
+    monkeypatch.setattr(buzz_acp, "buzz_acp_dir", lambda: acp_dir)
+    monkeypatch.setattr(buzz_acp, "buzz_acp_path", lambda: acp)
+    monkeypatch.setattr(buzz_acp, "buzz_cli_path", lambda: acp_dir / "buzz")
 
     assert buzz_acp.ensure_buzz_cli_link() is True
     assert (acp_dir / "buzz").is_symlink()
@@ -139,9 +139,9 @@ def test_ensure_buzz_cli_link_replaces_dangling_link(tmp_path, monkeypatch) -> N
     acp.write_bytes(b"stub")
     link = acp_dir / "buzz"
     link.symlink_to(acp_dir / "missing")
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_DIR", acp_dir)
-    monkeypatch.setattr(buzz_acp, "BUZZ_ACP_PATH", acp)
-    monkeypatch.setattr(buzz_acp, "BUZZ_CLI_PATH", link)
+    monkeypatch.setattr(buzz_acp, "buzz_acp_dir", lambda: acp_dir)
+    monkeypatch.setattr(buzz_acp, "buzz_acp_path", lambda: acp)
+    monkeypatch.setattr(buzz_acp, "buzz_cli_path", lambda: link)
 
     assert buzz_acp.ensure_buzz_cli_link() is True
     assert link.resolve() == acp.resolve()

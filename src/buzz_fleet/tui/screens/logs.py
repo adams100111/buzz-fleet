@@ -29,9 +29,10 @@ class LogsScreen(Screen):
         Binding("escape", "close", "Close"),
     ]
 
-    def __init__(self, agent_id: str) -> None:
+    def __init__(self, key: str) -> None:
+        """`key` is a community-qualified instance key (see units.instance_key)."""
         super().__init__()
-        self._agent_id = agent_id
+        self._key = key
 
     def action_close(self) -> None:
         self.app.pop_screen()
@@ -39,7 +40,7 @@ class LogsScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
         log_view = RichLog(id="log-view")
-        log_view.border_title = self._agent_id
+        log_view.border_title = self._key
         yield log_view
         yield Footer()
 
@@ -49,4 +50,4 @@ class LogsScreen(Screen):
     @work(exclusive=True)
     async def stream_logs(self) -> None:
         log_widget = self.query_one("#log-view", RichLog)
-        log_widget.write(tail_logs(RealCommandRunner(), self._agent_id))
+        log_widget.write(tail_logs(RealCommandRunner(), self._key))

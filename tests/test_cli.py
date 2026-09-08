@@ -1,6 +1,7 @@
 import json
 import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
@@ -45,7 +46,7 @@ def test_version_flag_prints_version_and_exits() -> None:
 
 
 def test_connect_saves_community_on_success(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", lambda: FakeRunner())
 
     result = runner_cli.invoke(
@@ -66,7 +67,7 @@ def test_connect_prompts_for_admin_nsec_with_masked_input_when_omitted(tmp_path,
     rather than required as a plain CLI argument, to keep the owner's nsec out
     of shell history and /proc/<pid>/cmdline.
     """
-    monkeypatch.setattr("buzz_fleet.state.CONFIG_DIR", tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", lambda: FakeRunner())
 
     result = runner_cli.invoke(
@@ -814,3 +815,88 @@ def test_fleet_status_reports_duplicate_record_error_instead_of_generic_message(
     # message — running fleet init again here would create a THIRD channel.
     assert "more than one channel carries a fleet record" in result.output
     assert "Run `buzz-fleet fleet init`" not in result.output
+
+
+# Fix-round I4: `buzz-fleet migrate` CLI wiring — the plumbing between
+# `migrate.run`/`migrate.plan` and the command itself (--dry-run, a
+# RuntimeError going to stderr with exit 1, and the "already migrated"
+# branch). `tests/test_migrate.py` covers `migrate.run`/`plan` themselves in
+# full; this only covers the CLI layer on top.
+
+
+def _migrate_legacy_tree(tmp_path: Path, monkeypatch) -> Path:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    legacy = home / ".config" / "buzz-fleet"
+    (legacy / "communities" / "eltahir" / "agents").mkdir(parents=True)
+    (legacy / "communities" / "eltahir.json").write_text(
+        '{"id":"eltahir","relay_url":"wss://r","relay_admin_nsec":"nsec1owner"}'
+    )
+    (legacy / "communities" / "eltahir" / "agents" / "reviewer.json").write_text(
+        '{"id":"reviewer","community_id":"eltahir","display_name":"R","harness":"claude",'
+        '"private_key":"nsec1agent","public_key":"' + "a" * 64 + '",'
+        '"system_prompt_source":{"kind":"inline","text":"hi"}}'
+    )
+    (legacy / "agents").mkdir(parents=True)
+    (legacy / "agents" / "reviewer.env").write_text("BUZZ_PRIVATE_KEY=nsec1agent\n")
+    (legacy / "agents" / "reviewer.prompt.md").write_text("hi")
+    return legacy
+
+
+class MigrateFakeRunner:
+    """Mirrors tests/test_migrate.py's FakeRunner: `is-active` answers from
+    `self.active`; everything else succeeds."""
+
+    def __init__(self, active: set[str] | None = None) -> None:
+        self.active = active or set()
+
+    def run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if "is-active" in args:
+            unit = args[-1]
+            return subprocess.CompletedProcess(
+                args, 0, stdout="active" if unit in self.active else "inactive", stderr=""
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+def test_migrate_dry_run_prints_the_plan_and_changes_nothing(tmp_path, monkeypatch) -> None:
+    _migrate_legacy_tree(tmp_path, monkeypatch)
+    monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", MigrateFakeRunner)
+
+    result = runner_cli.invoke(app, ["migrate", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "planned" in result.stdout
+
+    from buzz_fleet import paths
+
+    assert not (paths.state_dir() / "communities" / "eltahir.json").exists()
+
+
+def test_migrate_refuses_while_active_prints_to_stderr_and_exits_nonzero(tmp_path, monkeypatch) -> None:
+    _migrate_legacy_tree(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "buzz_fleet.cli.app.RealCommandRunner",
+        lambda: MigrateFakeRunner(active={"buzz-agent@reviewer.service"}),
+    )
+
+    result = runner_cli.invoke(app, ["migrate"])
+
+    assert result.exit_code == 1
+    assert "still active" in result.stderr
+
+
+def test_migrate_when_already_on_current_layout_reports_nothing_to_do(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr("buzz_fleet.cli.app.RealCommandRunner", MigrateFakeRunner)
+
+    result = runner_cli.invoke(app, ["migrate"])
+
+    assert result.exit_code == 0
+    assert "Already on the current layout; nothing to do." in result.stdout

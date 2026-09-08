@@ -120,7 +120,9 @@ class AgentFormScreen(Screen):
         # those in would silently clobber what the user just entered.
         if self._agent is None:
             with _section("Template"):
-                self._templates, skipped = personas.discover_personas(personas.DEFAULT_PERSONAS_DIR)
+                self._templates, skipped = personas.discover_personas(
+                    personas.default_personas_dir()
+                )
                 if self._templates or skipped:
                     options = [
                         (f"{t.display_name} ({t.source_path.name})", i)
@@ -135,7 +137,7 @@ class AgentFormScreen(Screen):
                     yield Select(options, prompt=prompt, id="template-select")
                 else:
                     yield Static(
-                        f"No templates found in {personas.DEFAULT_PERSONAS_DIR}",
+                        f"No templates found in {personas.default_personas_dir()}",
                         id="no-templates-message",
                     )
 

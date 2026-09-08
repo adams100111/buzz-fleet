@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import getpass
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import SecretStr
 
-from buzz_fleet.buzz_acp import BUZZ_ACP_DIR, BUZZ_ACP_PATH
+from buzz_fleet import atomic, paths, units
+from buzz_fleet.buzz_acp import buzz_acp_dir, buzz_acp_path
 from buzz_fleet.harnesses import (
-    PI_AGENT_TEMPLATE_DIR,
     PI_MCP_ADAPTER_VERSION,
+    pi_agent_template_dir,
     resolve_adapter_command,
 )
 from buzz_fleet.models import MCP_SERVER_NAME_RE, Agent, Community
@@ -27,43 +27,59 @@ if TYPE_CHECKING:
     # `runner.run(...)` (duck-typed).
     from buzz_fleet.proc import CommandRunner
 
-AGENTS_DIR = Path.home() / ".config" / "buzz-fleet" / "agents"
-TEMPLATE_UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / "buzz-agent@.service"
-WORK_DIR = Path.home() / ".local" / "share" / "buzz-fleet" / "work"
+
+def units_state_dir() -> Path:
+    """Prompt files: state, not secret."""
+    return paths.state_dir() / "units"
+
+
+def units_secrets_dir() -> Path:
+    """Env files: they carry BUZZ_PRIVATE_KEY."""
+    return paths.secrets_dir() / "units"
+
+
+def work_dir(key: str) -> Path:
+    return paths.data_dir() / "work" / key
+
+
+def template_unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / "buzz-agent@.service"
+
 
 # A --user unit, not a system unit — no root anywhere in buzz-fleet (spec Open
 # Question 2, resolved this way): no `User=` line (it always runs as whoever
 # owns this systemd --user instance), `WantedBy=default.target` (the --user
-# equivalent of multi-user.target), and the env path matches AGENTS_DIR above.
-# Requires `loginctl enable-linger <user>` once so the --user instance (and
-# this unit) keeps running after the SSH session that created it ends — see
-# Task 12 Step 1.
+# equivalent of multi-user.target), and the env path matches units_secrets_dir()
+# above. Requires `loginctl enable-linger <user>` once so the --user instance
+# (and this unit) keeps running after the SSH session that created it ends —
+# see Task 12 Step 1.
 #
-# ExecStart points at BUZZ_ACP_PATH (a per-user path, not /usr/local/bin) so
+# ExecStart points at buzz_acp_path() (a per-user path, not /usr/local/bin) so
 # `ensure_buzz_acp_installed()` can install it automatically with no sudo
 # prompt — a unit pointed at a root-owned path could never self-heal without
 # asking the user to run something manually. Real incident: a machine that
 # never separately installed buzz-acp had this crash-loop status=203/EXEC
 # (exec target doesn't exist) hundreds of times before this was caught.
-TEMPLATE_UNIT = f"""[Unit]
+#
+# The instance specifier is %i (literal), never %I (unescaped) — see
+# units.py's module docstring: %I unescapes '-' back to '/', which would
+# corrupt every real agent id/community id that contains a dash.
+def render_template_unit() -> str:
+    return f"""[Unit]
 Description=Buzz headless agent (%i)
 After=network-online.target
 
 [Service]
-EnvironmentFile={AGENTS_DIR}/%i.env
-Environment=PATH={BUZZ_ACP_DIR}:/usr/local/bin:/usr/bin:/bin
-WorkingDirectory={WORK_DIR}/%i
-ExecStart={BUZZ_ACP_PATH}
+EnvironmentFile={units_secrets_dir()}/%i.env
+Environment=PATH={buzz_acp_dir()}:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory={paths.data_dir()}/work/%i
+ExecStart={buzz_acp_path()}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=default.target
 """
-
-
-def render_template_unit() -> str:
-    return TEMPLATE_UNIT
 
 
 def ensure_template_unit_installed(runner: CommandRunner) -> bool:
@@ -73,11 +89,15 @@ def ensure_template_unit_installed(runner: CommandRunner) -> bool:
     only picks up a new `Environment=`/`WorkingDirectory=` line on restart,
     so callers use this to decide whether to restart already-running agents.
     """
-    current = TEMPLATE_UNIT_PATH.read_text() if TEMPLATE_UNIT_PATH.exists() else None
-    if current == TEMPLATE_UNIT:
+    path = template_unit_path()
+    rendered = render_template_unit()
+    current = path.read_text() if path.exists() else None
+    if current == rendered:
         return False
-    TEMPLATE_UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TEMPLATE_UNIT_PATH.write_text(TEMPLATE_UNIT)
+    # dir_mode=0o755, not atomic.write_secure's 0o700 default: ~/.config/
+    # systemd/user/ is systemd's own namespace, shared with every other
+    # user unit on the machine — not buzz-fleet's to mode restrictively.
+    atomic.write_secure(path, rendered, mode=0o644, dir_mode=0o755)
     runner.run(["systemctl", "--user", "daemon-reload"])
     return True
 
@@ -111,21 +131,12 @@ def ensure_linger_enabled(runner: CommandRunner) -> None:
         )
 
 
-def agent_env_path(agent_id: str) -> Path:
-    return AGENTS_DIR / f"{agent_id}.env"
+def agent_env_path(key: str) -> Path:
+    return units_secrets_dir() / f"{key}.env"
 
 
-def agent_prompt_path(agent_id: str) -> Path:
-    return AGENTS_DIR / f"{agent_id}.prompt.md"
-
-
-def _write_secure(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, content.encode())
-    finally:
-        os.close(fd)
+def agent_prompt_path(key: str) -> Path:
+    return units_state_dir() / f"{key}.prompt.md"
 
 
 def resolve_prompt_text(agent: Agent) -> str:
@@ -162,7 +173,7 @@ def _secret_value(value: str | SecretStr) -> str:
     return value.get_secret_value() if isinstance(value, SecretStr) else value
 
 
-def _mcp_wrapper_path(agent_id: str, name: str) -> Path:
+def _mcp_wrapper_path(key: str, name: str) -> Path:
     # Defense in depth: `McpServer.name` is already validated at the model
     # level (see `models.MCP_SERVER_NAME_RE`'s docstring for why), but this
     # builds a filesystem path from it directly — assert again here so a
@@ -172,7 +183,7 @@ def _mcp_wrapper_path(agent_id: str, name: str) -> Path:
     # agent's own directory.
     if not MCP_SERVER_NAME_RE.match(name):
         raise ValueError(f"unsafe MCP server name {name!r} — refusing to build a wrapper path from it")
-    return WORK_DIR / agent_id / f"mcp-{name}.sh"
+    return work_dir(key) / f"mcp-{name}.sh"
 
 
 def _quote(value: str) -> str:
@@ -198,7 +209,8 @@ def write_mcp_wrapper(agent: Agent) -> Path | None:
 
     0700, not 0600: it must remain executable, and it holds the same class
     of secret (an MCP server's own env vars, e.g. an API token) as the
-    agent's private key — see `_write_secure`'s 0600 rationale.
+    agent's private key — see `atomic.write_secure`'s 0600 default (raised
+    here to 0700 so the file stays executable).
     """
     if agent.mcp_server is None:
         return None
@@ -207,18 +219,14 @@ def write_mcp_wrapper(agent: Agent) -> Path | None:
         return None
     lines = ["#!/bin/sh"] + [f"export {k}={_quote(_secret_value(v))}" for k, v in m.env.items()]
     lines.append("exec " + " ".join(_quote(x) for x in [m.command, *m.args]))
-    path = _mcp_wrapper_path(agent.id, m.name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
-    try:
-        os.write(fd, ("\n".join(lines) + "\n").encode())
-    finally:
-        os.close(fd)
+    key = units.instance_key(agent.community_id, agent.id)
+    path = _mcp_wrapper_path(key, m.name)
+    atomic.write_secure(path, "\n".join(lines) + "\n", mode=0o700)
     return path
 
 
-def _cleanup_stale_mcp_wrappers(agent_id: str, *, keep: Path | None) -> None:
-    """Remove any `mcp-*.sh` wrapper under this agent's WORK_DIR other than
+def _cleanup_stale_mcp_wrappers(key: str, *, keep: Path | None) -> None:
+    """Remove any `mcp-*.sh` wrapper under this agent's work dir other than
     `keep` (the path `write_mcp_wrapper` just (re)wrote this call, or None if
     it wrote nothing this call).
 
@@ -233,7 +241,7 @@ def _cleanup_stale_mcp_wrappers(agent_id: str, *, keep: Path | None) -> None:
     fresh env-file rewrite with no "previous" state to diff against — it just
     deletes whatever doesn't match what was (or wasn't) written this call.
     """
-    agent_dir = WORK_DIR / agent_id
+    agent_dir = work_dir(key)
     if not agent_dir.is_dir():
         return
     for path in agent_dir.glob("mcp-*.sh"):
@@ -241,8 +249,8 @@ def _cleanup_stale_mcp_wrappers(agent_id: str, *, keep: Path | None) -> None:
             path.unlink(missing_ok=True)
 
 
-def _pi_agent_dir(agent_id: str) -> Path:
-    return WORK_DIR / agent_id / ".pi-agent"
+def _pi_agent_dir(key: str) -> Path:
+    return work_dir(key) / ".pi-agent"
 
 
 def _write_pi_agent_dir(agent: Agent) -> Path:
@@ -255,15 +263,15 @@ def _write_pi_agent_dir(agent: Agent) -> Path:
     `harnesses.install_adapter("pi")`) so a brand-new agent's first turn
     doesn't need network access to fetch pi-mcp-adapter itself.
     """
-    pi_dir = _pi_agent_dir(agent.id)
-    pi_dir.mkdir(parents=True, exist_ok=True)
+    key = units.instance_key(agent.community_id, agent.id)
+    pi_dir = _pi_agent_dir(key)
     (pi_dir / "skills").mkdir(parents=True, exist_ok=True)
 
     settings = {
         "defaultProjectTrust": "always",
         "packages": [f"npm:pi-mcp-adapter@{PI_MCP_ADAPTER_VERSION}"],
     }
-    _write_secure(pi_dir / "settings.json", json.dumps(settings))
+    atomic.write_secure(pi_dir / "settings.json", json.dumps(settings))
 
     mcp_json_path = pi_dir / "mcp.json"
     if agent.mcp_server is not None:
@@ -277,19 +285,25 @@ def _write_pi_agent_dir(agent: Agent) -> Path:
                 }
             }
         }
-        _write_secure(mcp_json_path, json.dumps(mcp_json))
+        atomic.write_secure(mcp_json_path, json.dumps(mcp_json))
     else:
         mcp_json_path.unlink(missing_ok=True)
 
-    template_npm = PI_AGENT_TEMPLATE_DIR / "npm"
+    template_npm = pi_agent_template_dir() / "npm"
     if template_npm.is_dir():
         shutil.copytree(template_npm, pi_dir / "npm", dirs_exist_ok=True)
 
     return pi_dir
 
 
-def env_line(key: str, value: str) -> str:
+def env_line(name: str, value: str) -> str:
     """One KEY=value line for a systemd EnvironmentFile.
+
+    Parameter named `name`, not `key` — this file also has a `key` meaning
+    "community-qualified instance key" (see `write_agent_files`), and the
+    two must never collide in the same scope (a prior version of this file
+    shadowed the instance `key` with a per-agent env-var loop variable of
+    the same name; see `write_agent_files`'s `env_key` loop below).
 
     systemd stops an unquoted value at the first newline (real incident: a
     multi-paragraph BUZZ_ACP_TEAM_INSTRUCTIONS reached the agent as its first
@@ -298,9 +312,9 @@ def env_line(key: str, value: str) -> str:
     env files are byte-identical.
     """
     if "\n" not in value:
-        return f"{key}={value}"
+        return f"{name}={value}"
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'{key}="{escaped}"'
+    return f'{name}="{escaped}"'
 
 
 def write_agent_files(
@@ -310,10 +324,17 @@ def write_agent_files(
     openai_api_key: str | None,
     auth_tag: str | None = None,
 ) -> None:
-    (WORK_DIR / agent.id).mkdir(parents=True, exist_ok=True)
+    key = units.instance_key(agent.community_id, agent.id)
+    # A malformed community id (e.g. containing "/" or "..", never validated
+    # at connect time — that's Task 7's job) would otherwise interpolate
+    # straight into agent_env_path/agent_prompt_path/work_dir below and
+    # write BUZZ_PRIVATE_KEY outside paths.secrets_dir() before unit_name
+    # ever gets a chance to reject it at enable_now. Fail before any write.
+    units.validate_instance_key(key)
+    work_dir(key).mkdir(parents=True, exist_ok=True)
 
-    prompt_path = agent_prompt_path(agent.id)
-    _write_secure(prompt_path, resolve_prompt_text(agent))
+    prompt_path = agent_prompt_path(key)
+    atomic.write_secure(prompt_path, resolve_prompt_text(agent))
 
     lines = [
         env_line("BUZZ_PRIVATE_KEY", agent.private_key.get_secret_value()),
@@ -370,12 +391,14 @@ def write_agent_files(
 
     # Generic per-agent env-var passthrough (spec 5.13) — written after the
     # API keys, same as they were, so a persona- or operator-supplied value
-    # can override a preceding one if the keys collide.
-    for key, value in (agent.env or {}).items():
-        lines.append(env_line(key, _secret_value(value)))
+    # can override a preceding one if the keys collide. Named `env_key`, not
+    # `key`, so this loop cannot shadow the instance `key` computed above —
+    # it is still needed below for the wrapper cleanup and the env path.
+    for env_key, value in (agent.env or {}).items():
+        lines.append(env_line(env_key, _secret_value(value)))
 
     wrapper_path = write_mcp_wrapper(agent) if agent.mcp_server is not None else None
-    _cleanup_stale_mcp_wrappers(agent.id, keep=wrapper_path)
+    _cleanup_stale_mcp_wrappers(key, keep=wrapper_path)
     if agent.mcp_server is not None:
         if wrapper_path is not None:
             lines.append(env_line("BUZZ_ACP_MCP_COMMAND", str(wrapper_path)))
@@ -388,4 +411,4 @@ def write_agent_files(
         pi_dir = _write_pi_agent_dir(agent)
         lines.append(env_line("PI_CODING_AGENT_DIR", str(pi_dir)))
 
-    _write_secure(agent_env_path(agent.id), "\n".join(lines) + "\n")
+    atomic.write_secure(agent_env_path(key), "\n".join(lines) + "\n")

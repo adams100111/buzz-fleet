@@ -3,13 +3,15 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from buzz_fleet import units
 from buzz_fleet.models import Agent, Community, SystemPromptSource
 from buzz_fleet.systemd import (
-    TEMPLATE_UNIT,
     agent_env_path,
     agent_prompt_path,
     ensure_linger_enabled,
     ensure_template_unit_installed,
+    render_template_unit,
+    work_dir,
     write_agent_files,
     write_mcp_wrapper,
 )
@@ -34,9 +36,13 @@ def _community() -> Community:
     return Community(id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1admin")
 
 
+KEY = "eltahir:laravel-backend-dev"
+
+
 def test_write_agent_files_creates_env_and_prompt(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     # Deterministic regardless of what's actually on this machine's PATH —
     # the absolute-path-resolution behavior itself is covered separately
     # below and in test_harnesses.py.
@@ -45,18 +51,18 @@ def test_write_agent_files_creates_env_and_prompt(tmp_path: Path, monkeypatch) -
 
     write_agent_files(agent, _community(), anthropic_api_key="sk-ant-test", openai_api_key=None)
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(KEY).read_text()
     assert "BUZZ_PRIVATE_KEY=nsec1agent" in env_content
     assert "BUZZ_RELAY_URL=wss://buzz.eltahir.me" in env_content
     assert "BUZZ_ACP_AGENT_COMMAND=claude-agent-acp" in env_content
     assert "ANTHROPIC_API_KEY=sk-ant-test" in env_content
-    assert f"BUZZ_ACP_SYSTEM_PROMPT_FILE={agent_prompt_path(agent.id)}" in env_content
+    assert f"BUZZ_ACP_SYSTEM_PROMPT_FILE={agent_prompt_path(KEY)}" in env_content
     # Quoted, not bare: every agent's team instructions now always carry the
     # appended fleet coordination block (instructions.apply_coordination_block),
     # which is itself multi-line — so even a single-line operator value like
     # this one is written in systemd's quoted multi-line form (env_line).
     assert 'BUZZ_ACP_TEAM_INSTRUCTIONS="Team-wide rules here.' in env_content
-    assert agent_prompt_path(agent.id).read_text() == "You are the Laravel dev."
+    assert agent_prompt_path(KEY).read_text() == "You are the Laravel dev."
 
 
 def test_write_agent_files_resolves_adapter_command_to_absolute_path_when_on_path(
@@ -70,8 +76,9 @@ def test_write_agent_files_resolves_adapter_command_to_absolute_path_when_on_pat
     absolute path here, at write time (inheriting buzz-fleet's own PATH),
     sidesteps that entirely.
     """
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr(
         "buzz_fleet.harnesses.shutil.which",
         lambda cmd: "/home/dev/.local/share/mise/installs/node/22/bin/claude-agent-acp"
@@ -82,7 +89,7 @@ def test_write_agent_files_resolves_adapter_command_to_absolute_path_when_on_pat
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(KEY).read_text()
     assert (
         "BUZZ_ACP_AGENT_COMMAND=/home/dev/.local/share/mise/installs/node/22/bin/claude-agent-acp"
         in env_content
@@ -90,11 +97,12 @@ def test_write_agent_files_resolves_adapter_command_to_absolute_path_when_on_pat
 
 
 def test_env_file_is_mode_0600(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     write_agent_files(_agent(), _community(), anthropic_api_key="sk-ant-test", openai_api_key=None)
 
-    mode = stat.S_IMODE(agent_env_path("laravel-backend-dev").stat().st_mode)
+    mode = stat.S_IMODE(agent_env_path(KEY).stat().st_mode)
     assert mode == 0o600
 
 
@@ -109,20 +117,20 @@ class FakeRunner:
 
 def test_ensure_template_unit_installed_writes_file_and_reloads(tmp_path: Path, monkeypatch) -> None:
     unit_path = tmp_path / "systemd" / "buzz-agent@.service"
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: unit_path)
     runner = FakeRunner()
 
     ensure_template_unit_installed(runner)
 
-    assert unit_path.read_text() == TEMPLATE_UNIT
+    assert unit_path.read_text() == render_template_unit()
     assert ["systemctl", "--user", "daemon-reload"] in runner.calls
 
 
 def test_ensure_template_unit_installed_is_a_noop_when_already_current(tmp_path: Path, monkeypatch) -> None:
     unit_path = tmp_path / "systemd" / "buzz-agent@.service"
     unit_path.parent.mkdir(parents=True)
-    unit_path.write_text(TEMPLATE_UNIT)
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    unit_path.write_text(render_template_unit())
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: unit_path)
     runner = FakeRunner()
 
     ensure_template_unit_installed(runner)
@@ -212,24 +220,26 @@ def test_resolve_prompt_text_returns_whole_file_when_no_frontmatter(tmp_path: Pa
 
 
 def test_write_agent_files_emits_model_when_set(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     agent = _agent().model_copy(update={"model": "claude-sonnet-5"})
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(KEY).read_text()
     assert "BUZZ_ACP_MODEL=claude-sonnet-5" in env_content
 
 
 def test_write_agent_files_omits_optional_fields_when_unset(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     agent = _agent()
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(KEY).read_text()
     for key in (
         "BUZZ_ACP_MODEL",
         "BUZZ_ACP_AGENTS",
@@ -254,29 +264,31 @@ def test_write_agent_files_emits_auth_tag_when_given(tmp_path: Path, monkeypatch
     connect (confirmed in buzz's own source) — buzz-fleet just needed to
     write it into the env file.
     """
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     agent = _agent()
     auth_tag = '["auth","' + "b" * 64 + '","","' + "c" * 128 + '"]'
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None, auth_tag=auth_tag)
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(KEY).read_text()
     assert f"BUZZ_AUTH_TAG={auth_tag}" in env_content
 
 
 def test_write_agent_files_emits_parallelism_idle_timeout_max_turn_duration(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     agent = _agent().model_copy(
         update={"parallelism": 3, "idle_timeout_seconds": 120, "max_turn_duration_seconds": 600}
     )
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(KEY).read_text()
     assert "BUZZ_ACP_AGENTS=3" in env_content
     assert "BUZZ_ACP_IDLE_TIMEOUT=120" in env_content
     assert "BUZZ_ACP_MAX_TURN_DURATION=600" in env_content
@@ -285,53 +297,57 @@ def test_write_agent_files_emits_parallelism_idle_timeout_max_turn_duration(
 def test_write_agent_files_sets_respond_to_allowlist_mode_when_list_non_empty(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path)
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path)
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     agent = _agent().model_copy(update={"respond_to_allowlist": ["a" * 64, "b" * 64]})
 
     write_agent_files(agent, _community(), anthropic_api_key=None, openai_api_key=None)
 
-    env_content = agent_env_path(agent.id).read_text()
+    env_content = agent_env_path(KEY).read_text()
     assert f"BUZZ_ACP_RESPOND_TO_ALLOWLIST={'a' * 64},{'b' * 64}" in env_content
     assert "BUZZ_ACP_RESPOND_TO=allowlist" in env_content
 
 
 def test_write_agent_files_session_and_heartbeat_defaults(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
 
     write_agent_files(_agent(), _community(), None, None)
 
-    env = agent_env_path("laravel-backend-dev").read_text()
+    env = agent_env_path(KEY).read_text()
     for line in ("BUZZ_ACP_SESSION_POLICY=thread\n", "BUZZ_ACP_MAX_TURNS_PER_SESSION=40\n", "BUZZ_ACP_HEARTBEAT_INTERVAL=900\n"):
         assert line in env
 
 
 def test_write_agent_files_session_overrides(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={"session_policy": "channel", "max_turns_per_session": 5, "heartbeat_interval_seconds": 0})
 
     write_agent_files(agent, _community(), None, None)
 
-    env = agent_env_path("laravel-backend-dev").read_text()
+    env = agent_env_path(KEY).read_text()
     for line in ("BUZZ_ACP_SESSION_POLICY=channel\n", "BUZZ_ACP_MAX_TURNS_PER_SESSION=5\n", "BUZZ_ACP_HEARTBEAT_INTERVAL=0\n"):
         assert line in env
 
 
 def test_template_unit_sets_path_and_workdir() -> None:
-    from buzz_fleet.buzz_acp import BUZZ_ACP_DIR
-    from buzz_fleet.systemd import WORK_DIR
+    from buzz_fleet import paths
+    from buzz_fleet.buzz_acp import buzz_acp_dir
 
-    assert f"Environment=PATH={BUZZ_ACP_DIR}:/usr/local/bin:/usr/bin:/bin" in TEMPLATE_UNIT
-    assert f"WorkingDirectory={WORK_DIR}/%i" in TEMPLATE_UNIT
+    rendered = render_template_unit()
+    assert f"Environment=PATH={buzz_acp_dir()}:/usr/local/bin:/usr/bin:/bin" in rendered
+    assert f"WorkingDirectory={paths.data_dir()}/work/%i" in rendered
 
 
 def test_ensure_template_unit_installed_returns_changed_flag(tmp_path: Path, monkeypatch) -> None:
     unit_path = tmp_path / "buzz-agent@.service"
-    monkeypatch.setattr("buzz_fleet.systemd.TEMPLATE_UNIT_PATH", unit_path)
+    monkeypatch.setattr("buzz_fleet.systemd.template_unit_path", lambda: unit_path)
     calls: list[list[str]] = []
 
     class Runner:
@@ -368,33 +384,36 @@ def test_env_line_empty_value() -> None:
 
 
 def test_write_agent_files_quotes_multiline_team_instructions(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/claude-agent-acp")
     agent = _agent().model_copy(update={"team_instructions": "# Rules\n\n- one\n- two"})
 
     write_agent_files(agent, _community(), None, None)
 
-    assert 'BUZZ_ACP_TEAM_INSTRUCTIONS="# Rules\n\n- one\n- two' in agent_env_path(agent.id).read_text()
+    assert 'BUZZ_ACP_TEAM_INSTRUCTIONS="# Rules\n\n- one\n- two' in agent_env_path(KEY).read_text()
 
 
 def test_write_agent_files_injects_coordination_block(tmp_path: Path, monkeypatch) -> None:
     from buzz_fleet.orchestration.instructions import BLOCK_START
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
 
     write_agent_files(_agent().model_copy(update={"team_instructions": None}), _community(), None, None)
 
-    assert BLOCK_START in agent_env_path("laravel-backend-dev").read_text()
+    assert BLOCK_START in agent_env_path(KEY).read_text()
 
 
 def test_write_agent_files_exports_fleet_env_when_known(tmp_path: Path, monkeypatch) -> None:
     from buzz_fleet.orchestration.record import FleetRecord
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     community = _community().model_copy(update={
         "fleet_channel_id": "6f1c0000-0000-4000-8000-000000000000",
@@ -403,7 +422,7 @@ def test_write_agent_files_exports_fleet_env_when_known(tmp_path: Path, monkeypa
 
     write_agent_files(_agent(), community, None, None)
 
-    env = agent_env_path("laravel-backend-dev").read_text()
+    env = agent_env_path(KEY).read_text()
     assert "BUZZ_FLEET_CHANNEL=6f1c0000-0000-4000-8000-000000000000\n" in env
     assert f"BUZZ_FLEET_RETRIEVAL_KEY={'r' * 64}\n" in env
 
@@ -411,16 +430,17 @@ def test_write_agent_files_exports_fleet_env_when_known(tmp_path: Path, monkeypa
 def test_write_agent_files_env_and_mcp_wrapper(tmp_path: Path, monkeypatch) -> None:
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={"env": {"DATABASE_URL": "postgres://x"},
                                         "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": "t"})})
 
     write_agent_files(agent, _community(), None, None)
 
-    env = agent_env_path(agent.id).read_text()
-    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    env = agent_env_path(KEY).read_text()
+    wrapper = tmp_path / "work" / KEY / "mcp-boost.sh"
     assert "DATABASE_URL=postgres://x\n" in env and f"BUZZ_ACP_MCP_COMMAND={wrapper}\n" in env
     assert wrapper.stat().st_mode & 0o777 == 0o700
     body = wrapper.read_text()
@@ -435,17 +455,18 @@ def test_write_agent_files_bare_mcp_server_writes_no_wrapper(tmp_path: Path, mon
     """
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={"mcp_server": McpServer(name="boost", command="php")})
 
     write_agent_files(agent, _community(), None, None)
 
-    env = agent_env_path(agent.id).read_text()
+    env = agent_env_path(KEY).read_text()
     assert "BUZZ_ACP_MCP_COMMAND=php\n" in env
     assert write_mcp_wrapper(agent) is None
-    assert not (tmp_path / "work" / agent.id / "mcp-boost.sh").exists()
+    assert not (tmp_path / "work" / KEY / "mcp-boost.sh").exists()
 
 
 def test_write_mcp_wrapper_returns_none_for_bare_command() -> None:
@@ -462,7 +483,7 @@ def test_write_mcp_wrapper_writes_when_only_args_are_set(tmp_path: Path, monkeyp
     """
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     agent = _agent().model_copy(update={"mcp_server": McpServer(name="boost", command="php", args=["artisan"])})
 
     path = write_mcp_wrapper(agent)
@@ -486,7 +507,7 @@ def test_write_mcp_wrapper_defends_against_traversal_even_if_validation_is_bypas
 
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     # Non-empty args so this actually reaches wrapper-path construction
     # rather than short-circuiting via the "bare command" fast path.
     bypassed = McpServer.model_construct(name="../../../pwned", command="php", args=["artisan"], env={})
@@ -506,20 +527,21 @@ def test_write_agent_files_pi_gets_private_agent_dir_and_mcp_json(tmp_path: Path
 
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
     # Isolate from the real ~/.local/share/buzz-fleet/pi-agent-template/ —
     # without this, _write_pi_agent_dir stats the real host's shared
     # template dir, which is harmless while empty but host-dependent the
     # moment `harness install pi` has ever actually been run there.
-    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", tmp_path / "pi-template-unused")
+    monkeypatch.setattr("buzz_fleet.systemd.pi_agent_template_dir", lambda: tmp_path / "pi-template-unused")
     agent = _agent().model_copy(update={"harness": "pi", "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"])})
 
     write_agent_files(agent, _community(), None, None)
 
-    pi_dir = tmp_path / "work" / agent.id / ".pi-agent"
-    assert f"PI_CODING_AGENT_DIR={pi_dir}\n" in agent_env_path(agent.id).read_text()
+    pi_dir = tmp_path / "work" / KEY / ".pi-agent"
+    assert f"PI_CODING_AGENT_DIR={pi_dir}\n" in agent_env_path(KEY).read_text()
     settings = _json.loads((pi_dir / "settings.json").read_text())
     assert settings["defaultProjectTrust"] == "always" and settings["packages"][0].startswith("npm:pi-mcp-adapter@")
     assert _json.loads((pi_dir / "mcp.json").read_text())["mcpServers"]["boost"]["args"] == ["artisan", "boost:mcp"]
@@ -532,7 +554,7 @@ def test_write_mcp_wrapper_quotes_values_with_spaces(tmp_path: Path, monkeypatch
     """
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     agent = _agent().model_copy(update={
         "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"NOTE": "has space"})
     })
@@ -547,15 +569,16 @@ def test_write_mcp_wrapper_quotes_values_with_spaces(tmp_path: Path, monkeypatch
 
 
 def test_write_agent_files_no_mcp_server_writes_no_wrapper_or_mcp_command(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
 
     write_agent_files(_agent(), _community(), None, None)
 
-    env = agent_env_path("laravel-backend-dev").read_text()
+    env = agent_env_path(KEY).read_text()
     assert "BUZZ_ACP_MCP_COMMAND" not in env
-    assert not (tmp_path / "work" / "laravel-backend-dev" / "mcp-boost.sh").exists()
+    assert not (tmp_path / "work" / KEY / "mcp-boost.sh").exists()
 
 
 def test_write_agent_files_clearing_mcp_server_removes_stale_wrapper(tmp_path: Path, monkeypatch) -> None:
@@ -567,21 +590,22 @@ def test_write_agent_files_clearing_mcp_server_removes_stale_wrapper(tmp_path: P
 
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={
         "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")})
     })
     write_agent_files(agent, _community(), None, None)
-    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    wrapper = tmp_path / "work" / KEY / "mcp-boost.sh"
     assert wrapper.exists()
 
     cleared = agent.model_copy(update={"mcp_server": None})
     write_agent_files(cleared, _community(), None, None)
 
     assert not wrapper.exists()
-    env = agent_env_path(agent.id).read_text()
+    env = agent_env_path(KEY).read_text()
     assert "BUZZ_ACP_MCP_COMMAND" not in env
 
 
@@ -593,14 +617,15 @@ def test_write_agent_files_renaming_mcp_server_removes_old_wrapper(tmp_path: Pat
 
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={
         "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")})
     })
     write_agent_files(agent, _community(), None, None)
-    old_wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    old_wrapper = tmp_path / "work" / KEY / "mcp-boost.sh"
     assert old_wrapper.exists()
 
     renamed = agent.model_copy(update={
@@ -608,7 +633,7 @@ def test_write_agent_files_renaming_mcp_server_removes_old_wrapper(tmp_path: Pat
     })
     write_agent_files(renamed, _community(), None, None)
 
-    new_wrapper = tmp_path / "work" / agent.id / "mcp-renamed.sh"
+    new_wrapper = tmp_path / "work" / KEY / "mcp-renamed.sh"
     assert new_wrapper.exists() and not old_wrapper.exists()
 
 
@@ -621,36 +646,38 @@ def test_write_agent_files_editing_mcp_server_to_bare_command_removes_old_wrappe
 
     from buzz_fleet.models import McpServer
 
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/x")
     agent = _agent().model_copy(update={
         "mcp_server": McpServer(name="boost", command="php", args=["artisan", "boost:mcp"], env={"TOKEN": SecretStr("t")})
     })
     write_agent_files(agent, _community(), None, None)
-    wrapper = tmp_path / "work" / agent.id / "mcp-boost.sh"
+    wrapper = tmp_path / "work" / KEY / "mcp-boost.sh"
     assert wrapper.exists()
 
     bare = agent.model_copy(update={"mcp_server": McpServer(name="boost", command="php")})
     write_agent_files(bare, _community(), None, None)
 
     assert not wrapper.exists()
-    env = agent_env_path(agent.id).read_text()
+    env = agent_env_path(KEY).read_text()
     assert "BUZZ_ACP_MCP_COMMAND=php\n" in env
 
 
 def test_write_agent_files_pi_without_mcp_server_writes_no_mcp_json(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
     # See the sibling test above for why this must not touch the real host's
     # shared template dir.
-    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", tmp_path / "pi-template-unused")
+    monkeypatch.setattr("buzz_fleet.systemd.pi_agent_template_dir", lambda: tmp_path / "pi-template-unused")
     agent = _agent().model_copy(update={"harness": "pi"})
 
     write_agent_files(agent, _community(), None, None)
 
-    pi_dir = tmp_path / "work" / agent.id / ".pi-agent"
+    pi_dir = tmp_path / "work" / KEY / ".pi-agent"
     assert pi_dir.is_dir()
     assert not (pi_dir / "mcp.json").exists()
 
@@ -661,16 +688,122 @@ def test_write_agent_files_pi_copies_shared_template_npm_dir(tmp_path: Path, mon
     template's npm/ payload actually lands inside the agent's own
     .pi-agent/npm/ rather than being left behind.
     """
-    monkeypatch.setattr("buzz_fleet.systemd.AGENTS_DIR", tmp_path / "agents")
-    monkeypatch.setattr("buzz_fleet.systemd.WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr("buzz_fleet.systemd.units_secrets_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.units_state_dir", lambda: tmp_path / "agents")
+    monkeypatch.setattr("buzz_fleet.systemd.work_dir", lambda key: tmp_path / "work" / key)
     monkeypatch.setattr("buzz_fleet.systemd.resolve_adapter_command", lambda harness: "/usr/bin/pi-acp")
     template_dir = tmp_path / "pi-template"
     (template_dir / "npm" / "pi-mcp-adapter").mkdir(parents=True)
     (template_dir / "npm" / "pi-mcp-adapter" / "package.json").write_text("{}")
-    monkeypatch.setattr("buzz_fleet.systemd.PI_AGENT_TEMPLATE_DIR", template_dir)
+    monkeypatch.setattr("buzz_fleet.systemd.pi_agent_template_dir", lambda: template_dir)
     agent = _agent().model_copy(update={"harness": "pi"})
 
     write_agent_files(agent, _community(), None, None)
 
-    copied = tmp_path / "work" / agent.id / ".pi-agent" / "npm" / "pi-mcp-adapter" / "package.json"
+    copied = tmp_path / "work" / KEY / ".pi-agent" / "npm" / "pi-mcp-adapter" / "package.json"
     assert copied.is_file()
+
+
+# Task 4 regression tests: paths are keyed on the community-qualified
+# instance key, resolved through paths.py's XDG-aware functions rather than
+# the systemd module's own now-removed AGENTS_DIR/WORK_DIR constants.
+
+
+def test_agent_env_path_is_under_secrets_and_qualified(monkeypatch, tmp_path: Path) -> None:
+    from buzz_fleet import paths
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    key = units.instance_key("eltahir", "reviewer")
+    assert agent_env_path(key) == paths.secrets_dir() / "units" / "eltahir:reviewer.env"
+
+
+def test_agent_prompt_path_is_under_state_and_qualified(monkeypatch, tmp_path: Path) -> None:
+    from buzz_fleet import paths
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    key = units.instance_key("eltahir", "reviewer")
+    assert agent_prompt_path(key) == paths.state_dir() / "units" / "eltahir:reviewer.prompt.md"
+
+
+def test_work_dir_is_under_data_and_qualified(monkeypatch, tmp_path: Path) -> None:
+    from buzz_fleet import paths
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert work_dir("eltahir:reviewer") == paths.data_dir() / "work" / "eltahir:reviewer"
+
+
+def test_template_unit_points_at_the_new_locations(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    rendered = render_template_unit()
+    assert f"EnvironmentFile={tmp_path / 'state'}/buzz-fleet/secrets/units/%i.env" in rendered
+    assert f"WorkingDirectory={tmp_path / 'data'}/buzz-fleet/work/%i" in rendered
+
+
+def test_env_file_is_written_0600(monkeypatch, tmp_path: Path) -> None:
+    """write_agent_files now goes through atomic.write_secure; the mode must
+    survive the temp-file-and-rename it does internally."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    from buzz_fleet import atomic, paths
+
+    target = paths.secrets_dir() / "units" / "eltahir:reviewer.env"
+    atomic.write_secure(target, "BUZZ_PRIVATE_KEY=nsec1x")
+    assert oct(target.stat().st_mode & 0o777) == "0o600"
+
+
+def test_two_communities_with_the_same_agent_id_write_distinct_secrets(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The literal defect this whole phase exists to close: two communities
+    each with a "reviewer" agent must never collide on one unit's files.
+    Before instance keys, both of these calls wrote
+    ~/.config/buzz-fleet/agents/reviewer.env — whichever `write_agent_files`
+    call ran last silently decided which community's private key
+    `buzz-agent@reviewer.service` loaded. Task 8's live-fleet migration
+    proceeds on the assumption this is now impossible; this test is the
+    direct proof, not an inference from a single-community test plus a
+    unit-name uniqueness test.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr("buzz_fleet.harnesses.shutil.which", lambda cmd: None)
+
+    from pydantic import SecretStr
+
+    eltahir_agent = _agent().model_copy(
+        update={
+            "community_id": "eltahir",
+            "id": "reviewer",
+            "private_key": SecretStr("nsec1eltahirkey"),
+        }
+    )
+    acme_agent = _agent().model_copy(
+        update={
+            "community_id": "acme",
+            "id": "reviewer",
+            "private_key": SecretStr("nsec1acmekey"),
+        }
+    )
+    eltahir_community = Community(
+        id="eltahir", relay_url="wss://buzz.eltahir.me", relay_admin_nsec="nsec1admin"
+    )
+    acme_community = Community(
+        id="acme", relay_url="wss://buzz.acme.example", relay_admin_nsec="nsec1admin2"
+    )
+
+    write_agent_files(eltahir_agent, eltahir_community, None, None)
+    write_agent_files(acme_agent, acme_community, None, None)
+
+    eltahir_env_path = agent_env_path(units.instance_key("eltahir", "reviewer"))
+    acme_env_path = agent_env_path(units.instance_key("acme", "reviewer"))
+
+    assert eltahir_env_path != acme_env_path
+    assert eltahir_env_path.exists()
+    assert acme_env_path.exists()
+
+    eltahir_content = eltahir_env_path.read_text()
+    acme_content = acme_env_path.read_text()
+    assert "BUZZ_PRIVATE_KEY=nsec1eltahirkey" in eltahir_content
+    assert "BUZZ_PRIVATE_KEY=nsec1acmekey" in acme_content
+    assert "BUZZ_PRIVATE_KEY=nsec1acmekey" not in eltahir_content
+    assert "BUZZ_PRIVATE_KEY=nsec1eltahirkey" not in acme_content

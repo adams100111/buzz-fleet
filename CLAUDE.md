@@ -298,3 +298,13 @@ compaction.
   changelog file — not urgent, but the "Releasing a new version" README
   section could at least point at GitHub Releases' auto-generated notes if
   nothing more structured is wanted.
+- **The file layout is now XDG-based, with secrets split into a parallel
+  tree, and unit instance names are `<community>:<agent>`.** Any text
+  anywhere (docs, comments, error messages you're about to write) that
+  refers to `~/.config/buzz-fleet` as where state/agent files actually live,
+  or to a unit as bare `buzz-agent@<agent-id>`, is describing the pre-0.9
+  layout — see `paths.py`, `state.py`, `systemd.py` and `units.py` for the
+  current one, and `migrate.py` for the one-time move off the old layout
+  (`README.md`'s "Upgrading from 0.8.x"). `paths.legacy_dir()` is the only
+  place still allowed to name the old location, and only `migrate.py` reads
+  it.

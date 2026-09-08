@@ -58,6 +58,60 @@ overwrites the installed binaries in place — there's no separate "update"
 command, no version diffing, and no confirmation prompt. Run
 `buzz-fleet --version` afterward to confirm you're on the new version.
 
+### Upgrading from 0.8.x
+
+0.9.0 moved every file `buzz-fleet` owns onto the XDG base directories (with
+secrets split into a parallel, more restrictively permissioned tree) and
+renamed every agent's systemd unit instance from `buzz-agent@<agent-id>` to
+`buzz-agent@<community-id>:<agent-id>`, so two communities can never again
+collide on one agent id sharing a unit. Existing installs need a one-time,
+one-command migration — it does not run automatically, because it stops
+units and moves key material:
+
+```bash
+# Stop every agent first — the migration refuses to run while any are active.
+systemctl --user stop 'buzz-agent@*'
+
+buzz-fleet migrate --dry-run           # review the plan; changes nothing
+buzz-fleet migrate                     # apply it
+buzz-fleet community use <id>          # pick which community to check first
+buzz-fleet agent list --community <id> # confirm its agents are present and running
+```
+
+Repeat the last two lines for each community you migrated — `agent list`
+has no default community and always requires `--community` explicitly (see
+"Communities" below).
+
+The migration is resumable: if it's interrupted partway, just run
+`buzz-fleet migrate` again — every step checks its own postcondition, so
+whatever already moved is left alone and only the rest is redone.
+
+Before touching anything, each run that reaches this point copies your
+entire pre-migration `~/.config/buzz-fleet` tree to its own
+`~/.config/buzz-fleet.bak-<timestamp>` — a fresh, separately timestamped
+backup every time, including a retry after a failed attempt (e.g. one that
+aborted because a unit failed to start), not just once overall.
+**Every one of those backups holds every secret it copied in plaintext** —
+the legacy layout kept relay nsecs and agent private keys inline in the
+same JSON files as everything else, unlike the split state/secrets tree the
+migration moves you onto. Once you've confirmed the fleet is healthy on the
+new layout, review and delete all of them: `rm -rf ~/.config/buzz-fleet.bak-*`.
+
+Other than those backups, the migration never deletes anything from your
+*original* `~/.config/buzz-fleet` tree — the one exception is each agent's
+legacy system-prompt file, removed only after its copy to the new location
+has been verified. `communities/*.json` and `agents/*.env` are left behind
+with every relay nsec and agent private key still inline, and any agent
+that used an MCP server keeps its old `mcp-*.sh` wrapper (with its own
+`export TOKEN=…` lines) under the legacy work directory too. Once you've
+confirmed the fleet is healthy on the new layout, delete
+`~/.config/buzz-fleet/communities/` and `~/.config/buzz-fleet/agents/`
+specifically — **do not delete `~/.config/buzz-fleet` itself**, since
+`config.toml` and your `personas/` templates genuinely still live there
+under the current layout too. (It's safe to delete `communities/` before
+`agents/`, or the reverse, or to re-run `buzz-fleet migrate` in between —
+already-migrated agents are never re-derived from what's left in either.)
+
 ### Building from source instead
 
 If you're on an architecture the releases don't cover yet, or you're
@@ -127,6 +181,53 @@ privilege for a non-console session to self-enable lingering — if that
 happens, `buzz-fleet` tells you the exact one-time command to run
 (`sudo loginctl enable-linger <you>`) instead of failing confusingly later.
 
+### Configuration
+
+`config.toml` lives at `$XDG_CONFIG_HOME/buzz-fleet/config.toml` (falling back
+to `~/.config/buzz-fleet/config.toml` when `XDG_CONFIG_HOME` is unset).
+`buzz-fleet` never rewrites this file — that's deliberate, so your comments
+and formatting survive, and it's why every field is optional and defaults
+apply when the file (or any section in it) is missing:
+
+```toml
+# buzz-fleet configuration. Machine-managed data lives in $XDG_STATE_HOME.
+
+[general]
+default_community = "eltahir"   # used when nothing else selects one
+
+[ui]
+refresh_interval_ms = 2000
+default_view       = "agents"   # agents | runs | tasks
+theme              = "buzz-fleet"
+confirm_destructive = true
+
+[defaults]
+harness = "claude"              # pre-selected in the create-agent form
+
+[notifier]                      # reserved for a future ntfy-based alert feature; not wired up yet
+ntfy_url   = "https://ntfy.example.org/buzz-fleet"
+ntfy_token = "env:BUZZ_FLEET_NTFY_TOKEN"   # never a literal secret
+
+[herdr]
+report_agents = false           # reserved for a future fleet-health report; not wired up yet
+```
+
+Secrets are never literals in config. A value may be `env:NAME` to indirect
+through the environment; anything else is treated as plaintext and rejected
+for fields marked secret (currently `notifier.ntfy_token`) — `config.toml` is
+a file you're invited to edit and hand around, so a pasted token would be the
+one plaintext secret outside the secrets tree.
+
+Run `buzz-fleet config show` to print the effective configuration (defaults
+merged with whatever `config.toml` sets) and where it was read from. A secret
+value is never printed — you'll see `<set>` or `None` for `ntfy_token`, never
+its value. An unrecognised section or key (a typo, or a key a newer
+`buzz-fleet` understands that this older binary doesn't) is never rejected —
+across a fleet with machines on different versions, a forward-compatible
+config key must not brick an older binary mid-upgrade — but `config show`
+lists any it found under "unrecognised keys (ignored)" so a typo doesn't go
+unnoticed.
+
 ## Usage
 
 ### Connect to a community
@@ -140,6 +241,52 @@ instead of passing it as a plaintext argument:
 ```bash
 buzz-fleet connect --id eltahir --relay wss://buzz.eltahir.me
 ```
+
+### Communities
+
+The active community is a small piece of persisted state, separate from
+`config.toml`. `community use` is how you change it from the command line;
+the TUI's picker (`s` on the dashboard) and its connect screen are the only
+other things that write it.
+
+Which commands consult it depends on whether `--community` is optional:
+
+- **`--community` is required**, and the active community is never consulted:
+  `agent create`, `agent list`, `agent delete`, `agent update`, `fleet init`,
+  `fleet status`.
+- **`--community` is optional**, and the active community is used when it is
+  omitted: `fleet agents`, `tasks`, and `task delegate` / `ack` / `report` /
+  `cancel` / `show`. On these, `BUZZ_FLEET_COMMUNITY` also works and takes
+  precedence over the stored pointer — both override it for that one
+  invocation without changing what is stored.
+- The TUI uses it to decide which community it opens to, and `community show`
+  reports it.
+
+Wiring the resolver into the first group is deliberately left to a later
+phase, so today `community use` does not change what `agent list` shows.
+
+```bash
+# List every community connected on this machine; `*` marks the active one
+buzz-fleet community list
+buzz-fleet community list --json
+
+# Make a community active — validates the id exists first, and leaves the
+# previous selection untouched if it doesn't
+buzz-fleet community use eltahir
+
+# Show the active community's relay, agent count, and fleet channel
+buzz-fleet community show
+```
+
+`community show` exits with an error if no community is active yet (run
+`community use` first); `community list` never does — several communities
+with none selected is simply displayed with no `*` marked, not an error.
+
+If `migrate` refuses with a message about an agent id shared across more than
+one community, that is the collision described in "Upgrading from 0.8.x" — the
+legacy layout stored one env file per bare agent id, so two communities with
+the same agent name shared it, and there is no way to tell from disk which key
+belongs to which agent. Rename or remove one of them before migrating.
 
 ### Manage agents (CLI)
 
@@ -280,10 +427,18 @@ Shows a connect screen if no community is set up yet, otherwise a live
 dashboard of agents and their systemd status. Bindings: `c` create, `u`
 edit (display name and/or prompt — editing a persona-file agent without
 touching the prompt field leaves its persona file alone), `x` (or `Delete`)
-delete, `l` view live logs. `esc` cancels the create/edit form or closes the
-log view without side effects. Delete is destructive and not undoable, so
-`x`/`Delete` opens a confirmation dialog first (`y`/click Delete to confirm,
-`n`/`esc`/click Cancel to back out) rather than deleting on the keypress.
+delete, `l` view live logs, `s` switch community. `esc` cancels the
+create/edit form or closes the log view without side effects. Delete is
+destructive and not undoable, so `x`/`Delete` opens a confirmation dialog
+first (`y`/click Delete to confirm, `n`/`esc`/click Cancel to back out)
+rather than deleting on the keypress.
+
+`s` opens a picker listing every connected community (marking the active one
+with `*`), its relay URL, and its agent count. Enter switches to it and
+rebuilds the dashboard around it; `esc` cancels without changing anything.
+The picker writes the active community through the same
+`state.save_active_community` function `buzz-fleet community use` calls, so
+the CLI and the TUI can never disagree about which community is active.
 
 When creating an agent (`c`), the form shows a template dropdown that lists
 all `.persona.md` and `.agent.json` files from `~/.config/buzz-fleet/personas`

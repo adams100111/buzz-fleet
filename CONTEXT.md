@@ -6,9 +6,17 @@ Manages headless Buzz agents across a small set of machines owned by one person,
 
 ### Fleet
 
+**Community**:
+One Buzz relay together with the owner identity that administers it. Every agent belongs to exactly one community; a fleet exists within one. One machine may host agents from several communities.
+_Avoid_: server, tenant, workspace, relay (a relay is the transport a community uses, not the community itself)
+
 **Fleet**:
 All agents, on every machine, that share one owner and one Buzz community.
 _Avoid_: cluster, swarm, team
+
+**Machine view**:
+Every agent whose unit runs on one host, listed together regardless of community. It answers "what is running on this box", which is not a fleet question: a fleet spans machines and stops at one community, a machine view spans communities and stops at one host.
+_Avoid_: dashboard, all agents, local fleet
 
 **Agent**:
 One headless harness process with its own Nostr identity, run as a systemd unit by buzz-fleet on one machine.

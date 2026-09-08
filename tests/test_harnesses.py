@@ -134,7 +134,7 @@ def test_install_adapter_for_pi_points_pi_install_at_shared_template_dir(monkeyp
 
     harnesses.install_adapter(runner, "pi")
 
-    assert seen_env["PI_CODING_AGENT_DIR"] == str(harnesses.PI_AGENT_TEMPLATE_DIR)
+    assert seen_env["PI_CODING_AGENT_DIR"] == str(harnesses.pi_agent_template_dir())
     assert os.environ["PI_CODING_AGENT_DIR"] == "/some/other/dir"
 
 

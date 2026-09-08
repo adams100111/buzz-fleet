@@ -62,11 +62,24 @@ def test_visibility_display_error_is_error_colored() -> None:
 
 @pytest.mark.asyncio
 async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr(
-        "buzz_fleet.tui.screens.dashboard.agent_status",
-        lambda agent_id: AgentStatus.RUNNING,
-    )
+    # Deliberately "acme", not "eltahir" (the old hardcoded constant's
+    # value): asserting on the community_id these fakes actually receive
+    # below is what proves DashboardScreen threads its constructor argument
+    # through rather than a bug re-hardcoding "eltahir" internally passing
+    # unnoticed.
+    received_list_agents_community_id = []
+    received_agent_status_community_id = []
+
+    def fake_list_agents(community_id: str) -> list:
+        received_list_agents_community_id.append(community_id)
+        return [_agent("laravel-dev", community_id="acme")]
+
+    def fake_agent_status(community_id: str, agent_id: str) -> AgentStatus:
+        received_agent_status_community_id.append(community_id)
+        return AgentStatus.RUNNING
+
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", fake_list_agents)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", fake_agent_status)
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
@@ -74,7 +87,7 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
         # Push DashboardScreen explicitly rather than relying on BuzzFleetApp's
         # automatic on_mount routing, which now depends on whether a community
         # is connected (Fix 6) — irrelevant to what this test is checking.
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("acme"))
         await pilot.pause()
         table = app.screen.query_one("#agent-table")
         # Displayed status text borrows systemd's own vocabulary ("active"),
@@ -85,10 +98,18 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
             tuple(str(v) for v in table.get_row_at(i)) for i in range(table.row_count)
         ]
 
+    # refresh_agents can run more than once (on_mount plus any redraw-
+    # triggered resume), so assert every call received "acme" rather than an
+    # exact call count.
+    assert received_list_agents_community_id
+    assert set(received_list_agents_community_id) == {"acme"}
+    assert received_agent_status_community_id
+    assert set(received_agent_status_community_id) == {"acme"}
+
 
 @pytest.mark.asyncio
 async def test_create_agent_with_no_connected_community_does_not_crash(monkeypatch) -> None:
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", list)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [])
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: None)
 
     created_managers = []
@@ -101,7 +122,7 @@ async def test_create_agent_with_no_connected_community_does_not_crash(monkeypat
     async with app.run_test() as pilot:
         await pilot.pause()
         # Push DashboardScreen explicitly (see comment in the test above).
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
         screen = app.screen
         screen.action_create_agent()
@@ -123,13 +144,13 @@ async def test_dashboard_refreshes_when_a_pushed_screen_is_popped(monkeypatch) -
     from textual.screen import Screen
 
     agents: list[Agent] = []
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: list(agents))
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: list(agents))
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
         table = app.screen.query_one("#agent-table")
         assert table.row_count == 0
@@ -159,7 +180,7 @@ async def test_refresh_heals_runtime_when_a_community_is_connected(monkeypatch) 
     """
     from unittest.mock import MagicMock
 
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", list)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [])
     monkeypatch.setattr(
         "buzz_fleet.tui.screens.dashboard.state.load_community",
         lambda community_id: object(),
@@ -173,13 +194,19 @@ async def test_refresh_heals_runtime_when_a_community_is_connected(monkeypatch) 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
 
-    # BuzzFleetApp.on_mount() also auto-pushes a DashboardScreen once it
-    # sees a "connected" community (shared with the explicit push below via
-    # the same monkeypatched state.load_community) — this test only cares
-    # that healing happens when connected, not the exact call count.
+    # BuzzFleetApp.on_mount() runs (synchronously, before the explicit push
+    # below) when app.run_test() starts — but with no real local community
+    # in this test's isolated state dir, resolve_community_id has nothing to
+    # resolve and it pushes its own ConnectScreen instead, never calling
+    # state.load_community at all. That's fine: this assertion only cares
+    # that a DashboardScreen's own on_mount()/refresh_agents() calls
+    # ensure_runtime_ready() once state.load_community() (monkeypatched
+    # above, module-wide — dashboard.py and app.py share the same `state`
+    # module object) reports a connected community, which the explicit push
+    # below exercises directly.
     assert fake_manager.ensure_runtime_ready.called
 
 
@@ -187,14 +214,14 @@ async def test_refresh_heals_runtime_when_a_community_is_connected(monkeypatch) 
 async def test_refresh_skips_healing_when_no_community_is_connected(monkeypatch) -> None:
     from unittest.mock import MagicMock
 
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", list)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [])
     fake_manager_cls = MagicMock()
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.AgentManager", fake_manager_cls)
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
 
     fake_manager_cls.assert_not_called()
@@ -206,12 +233,12 @@ async def test_view_logs_and_delete_on_empty_dashboard_does_not_crash(monkeypatc
     # on an empty table, so a guard checking `cursor_row is None` fails to
     # catch the empty-table case and get_row_at(0) raises RowDoesNotExist,
     # crashing the whole app when 'l'/'x'/'u' is pressed with no rows.
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", list)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [])
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
         screen = app.screen
         table = screen.query_one("#agent-table")
@@ -237,8 +264,10 @@ async def test_delete_agent_shows_confirmation_before_deleting(monkeypatch) -> N
 
     from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [_agent("laravel-dev")]
+    )
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]
@@ -247,7 +276,7 @@ async def test_delete_agent_shows_confirmation_before_deleting(monkeypatch) -> N
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
         screen = app.screen
         screen.action_delete_agent()
@@ -261,8 +290,10 @@ async def test_delete_agent_shows_confirmation_before_deleting(monkeypatch) -> N
 async def test_confirming_delete_dialog_deletes_the_agent(monkeypatch) -> None:
     from unittest.mock import MagicMock
 
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [_agent("laravel-dev")]
+    )
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]
@@ -271,7 +302,7 @@ async def test_confirming_delete_dialog_deletes_the_agent(monkeypatch) -> None:
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
         screen = app.screen
         screen.action_delete_agent()
@@ -287,8 +318,10 @@ async def test_confirming_delete_dialog_deletes_the_agent(monkeypatch) -> None:
 async def test_cancelling_delete_dialog_does_not_delete(monkeypatch) -> None:
     from unittest.mock import MagicMock
 
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [_agent("laravel-dev")]
+    )
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]
@@ -297,7 +330,7 @@ async def test_cancelling_delete_dialog_does_not_delete(monkeypatch) -> None:
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
         screen = app.screen
         screen.action_delete_agent()
@@ -318,8 +351,10 @@ async def test_delete_key_binding_triggers_delete_confirmation(monkeypatch) -> N
 
     from buzz_fleet.tui.screens.confirm_delete import ConfirmDeleteScreen
 
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", lambda: [_agent("laravel-dev")])
-    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda agent_id: AgentStatus.RUNNING)
+    monkeypatch.setattr(
+        "buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [_agent("laravel-dev")]
+    )
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", lambda community_id, agent_id: AgentStatus.RUNNING)
     monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.state.load_community", lambda community_id: object())
     fake_manager = MagicMock()
     fake_manager.list_agents.return_value = [_agent("laravel-dev")]
@@ -328,7 +363,7 @@ async def test_delete_key_binding_triggers_delete_confirmation(monkeypatch) -> N
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app.push_screen(DashboardScreen())
+        await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
 
         await pilot.press("delete")
