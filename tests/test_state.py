@@ -3,9 +3,10 @@ import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from pydantic import SecretStr
 
-from buzz_fleet import paths, state
+from buzz_fleet import atomic, paths, state
 from buzz_fleet.models import Agent, Community, SystemPromptSource
 from buzz_fleet.state import (
     load_agents,
@@ -126,6 +127,12 @@ def test_secrets_directory_is_0700(monkeypatch, tmp_path) -> None:
     state.save_community(_community())
     mode = stat.S_IMODE((paths.secrets_dir() / "communities").stat().st_mode)
     assert oct(mode) == "0o700"
+    # Fix round 1: also pin secrets_dir() itself (not just its "communities"
+    # child) and the secrets *file's* own mode -- neither was asserted before,
+    # though both already held in practice via atomic.write_secure's defaults.
+    assert oct(stat.S_IMODE(paths.secrets_dir().stat().st_mode)) == "0o700"
+    secret_file = paths.secrets_dir() / "communities" / "eltahir.json"
+    assert oct(stat.S_IMODE(secret_file.stat().st_mode)) == "0o600"
 
 
 def test_nested_and_dict_secrets_round_trip(monkeypatch, tmp_path) -> None:
@@ -176,3 +183,108 @@ def test_delete_agent_removes_both_files(monkeypatch, tmp_path) -> None:
     state.delete_agent("eltahir", "reviewer")
     assert state.load_agents("eltahir") == []
     assert not (paths.secrets_dir() / "communities" / "eltahir" / "agents" / "reviewer.json").exists()
+
+
+# --- Fix round 1: write ordering and refusal to load/persist a masked secret ---
+
+
+def _agent(**overrides: object) -> Agent:
+    defaults: dict[str, object] = {
+        "id": "reviewer",
+        "community_id": "eltahir",
+        "display_name": "Reviewer",
+        "harness": "claude",
+        "private_key": SecretStr("nsec1agent"),
+        "public_key": "a" * 64,
+        "system_prompt_source": SystemPromptSource(kind="inline", text="hi"),
+        "created_at": datetime.now(UTC),
+    }
+    defaults.update(overrides)
+    return Agent(**defaults)
+
+
+def test_load_community_raises_when_secrets_file_missing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_community(_community())
+    secret_path = paths.secrets_dir() / "communities" / "eltahir.json"
+    secret_path.unlink()
+
+    with pytest.raises(ValueError, match=r"secrets file .*eltahir\.json.* is missing") as exc:
+        state.load_community("eltahir")
+    assert str(secret_path) in str(exc.value)
+
+
+def test_load_agent_raises_when_secrets_file_missing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_agent(_agent())
+    secret_path = paths.secrets_dir() / "communities" / "eltahir" / "agents" / "reviewer.json"
+    secret_path.unlink()
+
+    with pytest.raises(ValueError, match=r"secrets file .*reviewer\.json.* is missing") as exc:
+        state.load_agents("eltahir")
+    assert str(secret_path) in str(exc.value)
+
+
+def test_empty_secrets_file_raises_not_silently(monkeypatch, tmp_path) -> None:
+    """An empty `{}` secrets file exists (unlike the missing-file case above)
+    but doesn't account for the community's required `relay_admin_nsec` — the
+    merge leaves the mask in place, and that must raise too, not load a
+    Community whose secret is the literal string "**********"."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_community(_community())
+    secret_path = paths.secrets_dir() / "communities" / "eltahir.json"
+    secret_path.write_text("{}")
+
+    with pytest.raises(ValueError, match="does not account for every secret"):
+        state.load_community("eltahir")
+
+
+def test_saving_a_masked_secret_raises_and_leaves_secrets_file_unchanged(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_community(_community())
+    secret_path = paths.secrets_dir() / "communities" / "eltahir.json"
+    before = secret_path.read_text()
+
+    masked = Community(
+        id="eltahir",
+        relay_url="wss://relay.example",
+        relay_admin_nsec=SecretStr("**********"),
+    )
+    with pytest.raises(ValueError, match="refusing to persist a masked secret"):
+        state.save_community(masked)
+
+    assert secret_path.read_text() == before
+
+
+def test_saving_a_masked_agent_secret_raises(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    with pytest.raises(ValueError, match="refusing to persist a masked secret"):
+        state.save_agent(_agent(private_key=SecretStr("**********")))
+
+
+def test_second_write_failure_leaves_no_orphaned_state_file(monkeypatch, tmp_path) -> None:
+    """Fix round 1: secrets are written before state. If the *second* write
+    (the state file) fails, the surviving secrets file is an orphan with no
+    matching state file -- invisible to load_community/list_community_ids,
+    and therefore harmless -- rather than the reverse (a state file promising
+    a secret that was never written)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    real_write_secure = atomic.write_secure
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real_write_secure(*args, **kwargs)
+
+    monkeypatch.setattr(atomic, "write_secure", flaky)
+
+    with pytest.raises(OSError):
+        state.save_community(_community())
+
+    state_path = paths.state_dir() / "communities" / "eltahir.json"
+    secret_path = paths.secrets_dir() / "communities" / "eltahir.json"
+    assert not state_path.exists()
+    assert secret_path.exists()
+    assert state.list_community_ids() == []
