@@ -38,11 +38,18 @@ def resolve_community_id(env: Mapping[str, str], explicit: str | None) -> str:
     active = state.load_active_community()
     if active and active in ids:
         return active
+    # Checked before config.load(): with exactly one local community, a
+    # config default can only ever resolve to that same id (or fail its
+    # `in ids` check and fall through to this same line anyway) — so it's a
+    # no-op here, and checking it first would mean a config.toml typo (a bad
+    # bool/enum/refresh_interval_ms, or invalid TOML — config.load() raises
+    # ValueError for all of those) breaks resolution even for a user who has
+    # nothing ambiguous to resolve at all.
+    if len(ids) == 1:
+        return ids[0]
     default = config.load().default_community
     if default and default in ids:
         return default
-    if len(ids) == 1:
-        return ids[0]
     if not ids:
         raise RuntimeError("no local community; run `buzz-fleet connect` first")
     raise RuntimeError(f"several local communities ({', '.join(ids)}); pass --community")
@@ -55,7 +62,21 @@ def resolve_identity(env: Mapping[str, str], runner: CommandRunner, community_id
                         auth_tag=env.get("BUZZ_AUTH_TAG") or None, fleet_channel=env.get("BUZZ_FLEET_CHANNEL") or None,
                         retrieval_key=env.get("BUZZ_FLEET_RETRIEVAL_KEY") or None, is_owner=False,
                         owner_pubkey=env.get("BUZZ_ACP_AGENT_OWNER") or None, record=None)
-    community_id = resolve_community_id(env, community_id)
+    try:
+        community_id = resolve_community_id(env, community_id)
+    except RuntimeError as e:
+        if str(e).startswith("no local community"):
+            # resolve_community_id's own message is generic — it's also
+            # called directly by the TUI, which has no BUZZ_PRIVATE_KEY
+            # concept at all. Here, reaching this point already means
+            # neither BUZZ_PRIVATE_KEY nor BUZZ_RELAY_URL was set, which is
+            # the more actionable half of "why did this fail" for an agent
+            # running under an incomplete unit environment.
+            raise RuntimeError(
+                "no BUZZ_PRIVATE_KEY in the environment and no local community; "
+                "run `buzz-fleet connect` first"
+            ) from e
+        raise
     community = state.load_community(community_id)
     if community is None:
         raise RuntimeError(f"no community '{community_id}'; run `buzz-fleet connect` first")

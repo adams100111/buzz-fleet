@@ -22,6 +22,12 @@ _VALID_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
 )
 
+# Generous — real ids are short slugs like "eltahir" — but a cap all the
+# same: an unbounded id otherwise passes validation and only fails later
+# with a raw OSError (ENAMETOOLONG) from the filesystem, once it's already
+# part of a path.
+_MAX_LENGTH = 64
+
 
 def validate_community_id(community_id: str) -> None:
     """Reject a community id that is not a safe single path segment.
@@ -37,6 +43,11 @@ def validate_community_id(community_id: str) -> None:
             f"community id {community_id!r} must not start with '.' (would hide the file "
             "and, for '..', escape the state directory)"
         )
+    if len(community_id) > _MAX_LENGTH:
+        raise ValueError(
+            f"community id {community_id!r} is {len(community_id)} characters; "
+            f"the limit is {_MAX_LENGTH}"
+        )
     for char in community_id:
         if char not in _VALID_CHARS:
             raise ValueError(
@@ -51,17 +62,29 @@ def connect_and_save(runner: CommandRunner, community_id: str, relay_url: str, a
     Returns True on success (community saved), False on failure (nothing saved).
     Raises ValueError (before any I/O or network call) if `community_id` is
     not a safe single path segment — see `validate_community_id`.
+
+    Reconnecting an id that already exists preserves `display_name`,
+    `fleet_channel_id` and `fleet_record` rather than wiping them: the
+    connect screen is the de-facto way to switch/re-auth a community, and
+    only `relay_url`, the admin nsec and `owner_pubkey` are what the caller
+    is actually re-supplying here. The latter two self-heal on next use via
+    `AgentManager.ensure_fleet_record`, but `display_name` has no such
+    backfill — dropping it would just be gone.
     """
     validate_community_id(community_id)
     if not signer_client.check_connection(runner, relay_url, admin_nsec):
         return False
     owner_pubkey = signer_client.pubkey_from_nsec(runner, admin_nsec)
+    existing = state.load_community(community_id)
     state.save_community(
         Community(
             id=community_id,
             relay_url=relay_url,
             relay_admin_nsec=admin_nsec,
             owner_pubkey=owner_pubkey,
+            display_name=existing.display_name if existing else None,
+            fleet_channel_id=existing.fleet_channel_id if existing else None,
+            fleet_record=existing.fleet_record if existing else None,
         )
     )
     return True

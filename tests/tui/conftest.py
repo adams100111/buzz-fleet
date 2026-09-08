@@ -23,5 +23,12 @@ def _isolated_buzz_fleet_config_dir(tmp_path, monkeypatch) -> None:
     already set `XDG_STATE_HOME` to their own `tmp_path` explicitly, which
     is the same object pytest hands this fixture, so the two compose
     without conflict).
+
+    `resolve_community_id` also falls through to `config.load().default_community`
+    once the state-side checks miss, so `XDG_CONFIG_HOME` needs the same
+    isolation as `XDG_STATE_HOME` — otherwise every test here would read
+    the developer's real `~/.config/buzz-fleet/config.toml` (machine-
+    dependent, and a hard failure on a machine with a malformed one).
     """
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "buzz-fleet-state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "buzz-fleet-config"))

@@ -64,3 +64,12 @@ def test_connect_and_save_refuses_bad_id_and_writes_nothing(bad_id, tmp_path, mo
     # Nothing landed anywhere under the state tree.
     assert list(tmp_path.rglob("*")) == []
     assert state.list_community_ids() == []
+
+
+def test_id_over_the_length_cap_is_refused() -> None:
+    with pytest.raises(ValueError, match="64"):
+        validate_community_id("a" * 65)
+
+
+def test_id_at_the_length_cap_is_accepted() -> None:
+    validate_community_id("a" * 64)

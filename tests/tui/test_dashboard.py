@@ -62,13 +62,24 @@ def test_visibility_display_error_is_error_colored() -> None:
 
 @pytest.mark.asyncio
 async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "buzz_fleet.tui.screens.dashboard.list_agents", lambda community_id: [_agent("laravel-dev")]
-    )
-    monkeypatch.setattr(
-        "buzz_fleet.tui.screens.dashboard.agent_status",
-        lambda community_id, agent_id: AgentStatus.RUNNING,
-    )
+    # Deliberately "acme", not "eltahir" (the old hardcoded constant's
+    # value): asserting on the community_id these fakes actually receive
+    # below is what proves DashboardScreen threads its constructor argument
+    # through rather than a bug re-hardcoding "eltahir" internally passing
+    # unnoticed.
+    received_list_agents_community_id = []
+    received_agent_status_community_id = []
+
+    def fake_list_agents(community_id: str) -> list:
+        received_list_agents_community_id.append(community_id)
+        return [_agent("laravel-dev", community_id="acme")]
+
+    def fake_agent_status(community_id: str, agent_id: str) -> AgentStatus:
+        received_agent_status_community_id.append(community_id)
+        return AgentStatus.RUNNING
+
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.list_agents", fake_list_agents)
+    monkeypatch.setattr("buzz_fleet.tui.screens.dashboard.agent_status", fake_agent_status)
 
     app = BuzzFleetApp()
     async with app.run_test() as pilot:
@@ -76,7 +87,7 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
         # Push DashboardScreen explicitly rather than relying on BuzzFleetApp's
         # automatic on_mount routing, which now depends on whether a community
         # is connected (Fix 6) — irrelevant to what this test is checking.
-        await app.push_screen(DashboardScreen("eltahir"))
+        await app.push_screen(DashboardScreen("acme"))
         await pilot.pause()
         table = app.screen.query_one("#agent-table")
         # Displayed status text borrows systemd's own vocabulary ("active"),
@@ -86,6 +97,14 @@ async def test_dashboard_lists_agents_with_status(monkeypatch) -> None:
         assert ("laravel-dev", "Laravel-Dev", "claude", "active", "—") in [
             tuple(str(v) for v in table.get_row_at(i)) for i in range(table.row_count)
         ]
+
+    # refresh_agents can run more than once (on_mount plus any redraw-
+    # triggered resume), so assert every call received "acme" rather than an
+    # exact call count.
+    assert received_list_agents_community_id
+    assert set(received_list_agents_community_id) == {"acme"}
+    assert received_agent_status_community_id
+    assert set(received_agent_status_community_id) == {"acme"}
 
 
 @pytest.mark.asyncio
@@ -178,10 +197,16 @@ async def test_refresh_heals_runtime_when_a_community_is_connected(monkeypatch) 
         await app.push_screen(DashboardScreen("eltahir"))
         await pilot.pause()
 
-    # BuzzFleetApp.on_mount() also auto-pushes a DashboardScreen once it
-    # sees a "connected" community (shared with the explicit push below via
-    # the same monkeypatched state.load_community) — this test only cares
-    # that healing happens when connected, not the exact call count.
+    # BuzzFleetApp.on_mount() runs (synchronously, before the explicit push
+    # below) when app.run_test() starts — but with no real local community
+    # in this test's isolated state dir, resolve_community_id has nothing to
+    # resolve and it pushes its own ConnectScreen instead, never calling
+    # state.load_community at all. That's fine: this assertion only cares
+    # that a DashboardScreen's own on_mount()/refresh_agents() calls
+    # ensure_runtime_ready() once state.load_community() (monkeypatched
+    # above, module-wide — dashboard.py and app.py share the same `state`
+    # module object) reports a connected community, which the explicit push
+    # below exercises directly.
     assert fake_manager.ensure_runtime_ready.called
 
 

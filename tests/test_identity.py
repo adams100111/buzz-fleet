@@ -34,7 +34,13 @@ def test_owner_identity_from_local_state(tmp_path, monkeypatch) -> None:
 
 def test_owner_identity_errors(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    with pytest.raises(RuntimeError, match="connect"):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    # Tightened to the full historical wording (not just "connect"), which a
+    # generic "no local community; run `buzz-fleet connect` first" would
+    # also satisfy — this is the message an agent with a broken unit
+    # environment actually needs: it names BUZZ_PRIVATE_KEY, not just "no
+    # community".
+    with pytest.raises(RuntimeError, match=r"no BUZZ_PRIVATE_KEY in the environment and no local community"):
         resolve_identity({}, FakeRunner(), community_id=None)
     for cid in ("a", "b"):
         state.save_community(Community(id=cid, relay_url="wss://r", relay_admin_nsec="nsec1x", owner_pubkey="0" * 64))
@@ -51,6 +57,15 @@ from buzz_fleet.orchestration import identity
 
 def _community(monkeypatch, tmp_path, cid: str) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    # resolve_community_id falls through to config.load().default_community;
+    # without isolating XDG_CONFIG_HOME too, a test that reaches that step
+    # would read the developer's real config.toml. Two tests below
+    # (test_active_community_beats_config_default,
+    # test_config_default_used_when_nothing_active) already set this
+    # explicitly and short-circuit before it matters here, which is why this
+    # was easy to miss — but every other test in this block goes through
+    # this same helper, so isolating it here covers all of them.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     from pydantic import SecretStr
 
     from buzz_fleet.models import Community
@@ -121,4 +136,17 @@ def test_a_stale_pointer_is_ignored(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     _community(monkeypatch, tmp_path, "eltahir")
     state.save_active_community("deleted-one")
+    assert identity.resolve_community_id({}, None) == "eltahir"
+
+
+def test_single_community_resolves_even_with_a_malformed_config_toml(monkeypatch, tmp_path) -> None:
+    """config.load() sits above the "sole local community" step and raises
+    ValueError for a malformed config.toml — that must not break resolution
+    for a user who has nothing ambiguous to resolve in the first place."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    cfg = paths.config_dir() / "config.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text("this is not valid toml [[[")
+    _community(monkeypatch, tmp_path, "eltahir")
+
     assert identity.resolve_community_id({}, None) == "eltahir"
